@@ -1,0 +1,486 @@
+"""Gurobi-hosted master problem with native quadratic penalty support.
+
+Each instance owns an isolated ``gurobipy`` environment; the shared
+process-global default is never used so masters don't couple lifetimes
+and license checkouts. Output is muted before start (also silencing the
+license banner); the caller's ``params`` may re-enable it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+
+import numpy as np
+
+from combrum.master import CutReadings, MasterBackend
+from combrum.masters._common import validated_construction
+from combrum.transport.base import CutRow
+
+_CUT_BATCH_SIZE = 4096
+
+
+def available() -> bool:
+    """True when gurobipy imports AND a licensed environment starts.
+
+    Importability alone is not availability: gurobipy installs without a
+    license, so backend auto-selection must check that an environment
+    actually starts.
+    """
+    # Any import- or license-time failure means not available.
+    try:
+        import gurobipy
+    except Exception:
+        return False
+    try:
+        env = _started_env(gurobipy)
+    except Exception:
+        return False
+    env.dispose()
+    return True
+
+
+def _started_env(gurobipy: object) -> object:
+    # Mute output before start() so the license banner never prints.
+    env = gurobipy.Env(empty=True)
+    env.setParam("OutputFlag", 0)
+    env.start()
+    return env
+
+
+def _status_name(gurobipy: object, status: int) -> str:
+    statuses = gurobipy.GRB.Status
+    for name in dir(statuses):
+        if not name.startswith("_") and getattr(statuses, name) == status:
+            return name
+    return f"status code {status}"
+
+
+@dataclass(frozen=True)
+class _Solution:
+    """Last solve's results, copied out at solve time.
+
+    Values are materialized while the solver's query surface is valid so
+    accessors keep reporting the last solve after later cut installs or
+    objective edits.
+    """
+
+    theta: np.ndarray
+    objective: float
+
+
+class GurobiMaster(MasterBackend):
+    """Master relaxation hosted on a per-instance Gurobi model.
+
+    Slack columns are created lazily at an agent's first cut (or all up
+    front when ``n_agents`` is given). :meth:`set_penalty` installs the
+    quadratic term natively and removes it entirely on revert.
+    """
+
+    def __init__(
+        self,
+        K: int,
+        theta_bounds: tuple[np.ndarray, np.ndarray],
+        c_theta: np.ndarray,
+        u_coef: Callable[[int], float],
+        params: Mapping[str, object] | None = None,
+        n_agents: int | None = None,
+    ) -> None:
+        self._env = None
+        self._model = None
+        # n_agents given -> all u-columns declared up front (fixed column
+        # structure); None -> lazy per-first-cut columns.
+        self._n_agents = None if n_agents is None else int(n_agents)
+        self._K, self._lower, self._upper, self._c = validated_construction(
+            K, theta_bounds, c_theta
+        )
+        if not callable(u_coef):
+            raise ValueError(
+                f"u_coef must be callable; got {type(u_coef).__name__}"
+            )
+        self._u_coef = u_coef
+        self._params = dict(params) if params else {}
+        u_lower = self._params.pop("u_lower_bound", 0.0)
+        self._u_lower_bound = None if u_lower is None else float(u_lower)
+        # Per-agent slack coefficients read once and kept for the master's
+        # lifetime: penalty revert and reinstall must restore the exact
+        # objective an agent entered with.
+        self._u_obj: dict[int, float] = {}
+        import gurobipy
+
+        self._gp = gurobipy
+        self._env = _started_env(gurobipy)
+        self._build()
+
+    def _invalidate_solution(self) -> None:
+        self._solution = None
+        self._solved_constrs = None
+        self._solved_block_keys = None
+        self._solved_block = None
+        self._cut_duals = None
+        self._bound_duals = None
+
+    def _build(self) -> None:
+        model = self._gp.Model("master", env=self._env)
+        for key, value in self._params.items():
+            model.setParam(key, value)
+        self._theta_mvar = model.addMVar(
+            self._K, lb=self._lower, ub=self._upper, obj=self._c
+        )
+        self._theta_vars = self._theta_mvar.tolist()
+        self._theta_eye = None
+        self._model = model
+        self._installed: dict[tuple[int, bytes], CutRow] = {}
+        self._constrs: dict[tuple[int, bytes], object] = {}
+        self._u_vars: dict[int, object] = {}
+        self._u_mvar = None
+        self._penalty: tuple[np.ndarray, float] | None = None
+        self._solution: _Solution | None = None
+        self._solved_constrs: dict[tuple[int, bytes], object] | None = None
+        self._solved_block_keys: tuple[tuple[int, bytes], ...] | None = None
+        self._solved_block = None
+        self._cut_duals: dict[tuple[int, bytes], float] | None = None
+        self._bound_duals: dict[int, float] | None = None
+        if self._n_agents is not None:
+            # Pre-declare ALL u-columns in agent order: a fixed column
+            # structure keeps the warm re-solve vertex deterministic even at a
+            # degenerate optimum. With the default lower bound, a cutless
+            # agent's u sits at lb=0 -> 0, so the estimate is unchanged.
+            u_obj = np.empty(self._n_agents, dtype=np.float64)
+            for agent_id in range(self._n_agents):
+                coef = self._u_obj.setdefault(
+                    agent_id, float(self._u_coef(agent_id))
+                )
+                if not np.isfinite(coef):
+                    raise ValueError(
+                        f"u_coef({agent_id}) must be finite; got {coef!r}"
+                    )
+                u_obj[agent_id] = coef
+            self._u_mvar = model.addMVar(
+                self._n_agents,
+                lb=self._u_lb(),
+                obj=u_obj,
+            )
+            self._u_vars.update(enumerate(self._u_mvar.tolist()))
+
+    # -- cut management ----------------------------------------------------
+
+    def add_cuts(self, rows: Sequence[CutRow]) -> int:
+        fresh: list[CutRow] = []
+        for row in rows:
+            key = (row.agent_id, row.bundle_key)
+            if key not in self._installed:
+                # First occurrence wins; duplicates absorbed.
+                self._installed[key] = row
+                fresh.append(row)
+        # Install in canonical key order so equal row sets build identical
+        # models regardless of in-batch arrival permutation.
+        ordered = sorted(fresh, key=lambda r: (r.agent_id, r.bundle_key))
+        if self._u_mvar is None:
+            for row in ordered:
+                self._install(row)
+        else:
+            self._install_batch(ordered)
+        return len(fresh)
+
+    def _install_batch(self, rows: Sequence[CutRow]) -> None:
+        for start in range(0, len(rows), _CUT_BATCH_SIZE):
+            chunk = rows[start : start + _CUT_BATCH_SIZE]
+            agent_ids = np.fromiter(
+                (row.agent_id for row in chunk),
+                dtype=np.int64,
+                count=len(chunk),
+            )
+            phi = np.vstack([row.phi for row in chunk])
+            epsilon = np.fromiter(
+                (row.epsilon for row in chunk),
+                dtype=np.float64,
+                count=len(chunk),
+            )
+            constrs = self._model.addConstr(
+                self._u_mvar[agent_ids] >= phi @ self._theta_mvar + epsilon
+            ).tolist()
+            for row, constr in zip(chunk, constrs):
+                self._constrs[(row.agent_id, row.bundle_key)] = constr
+
+    def _install(self, row: CutRow) -> None:
+        u_var = self._u_vars.get(row.agent_id)
+        if u_var is None:
+            coef = self._u_obj.setdefault(
+                row.agent_id, float(self._u_coef(row.agent_id))
+            )
+            if not np.isfinite(coef):
+                raise ValueError(
+                    f"u_coef({row.agent_id}) must be finite; got {coef!r}"
+                )
+            u_var = self._model.addVar(lb=self._u_lb(), obj=coef)
+            self._u_vars[row.agent_id] = u_var
+        expr = self._gp.LinExpr(
+            [1.0, *(-row.phi)], [u_var, *self._theta_vars]
+        )
+        self._constrs[(row.agent_id, row.bundle_key)] = (
+            self._model.addConstr(expr >= row.epsilon)
+        )
+
+    def _u_lb(self) -> float:
+        if self._u_lower_bound is None:
+            return -float(self._gp.GRB.INFINITY)
+        return float(self._u_lower_bound)
+
+    def extract_cuts(self) -> tuple[CutRow, ...]:
+        return tuple(self._installed[key] for key in sorted(self._installed))
+
+    @property
+    def n_active_cuts(self) -> int:
+        return len(self._installed)
+
+    def reinstall(self, rows: Sequence[CutRow]) -> None:
+        # Full dispose + rebuild (the reinstall contract; surgical removal would
+        # leave solver history). Rebuilding also drops the penalty, so this is a
+        # pure LP.
+        self._model.dispose()
+        self._build()
+        self.add_cuts(rows)
+
+    def remove_cuts(self, keys: Iterable[tuple[int, bytes]]) -> int:
+        # In-place retirement at O(retired): remove each retired constraint,
+        # leaving other rows, the pre-declared u-columns, and the warm basis
+        # untouched (no dispose/rebuild). Fixed column structure keeps the warm
+        # re-solve vertex deterministic; the result equals reinstall(kept).
+        removed = 0
+        for key in set(keys):
+            constr = self._constrs.pop(key, None)
+            if constr is None:
+                continue
+            self._model.remove(constr)
+            del self._installed[key]
+            removed += 1
+        if removed:
+            self._invalidate_solution()
+        return removed
+
+    def set_rhs(self, updates: Mapping[tuple[int, bytes], float]) -> None:
+        # Validate the whole key set first, so an unknown key makes the update
+        # all-or-nothing and never leaves the relaxation partially changed.
+        for key in updates:
+            if key not in self._constrs:
+                raise KeyError(key)
+        # Invalidate before the writes so a mid-loop solver error cannot leave
+        # accessors reporting the pre-edit solve.
+        self._invalidate_solution()
+        for key, new_eps in updates.items():
+            self._constrs[key].RHS = float(new_eps)
+            # Mirror the new RHS into the installed row; phi is untouched.
+            self._installed[key] = replace(
+                self._installed[key], epsilon=float(new_eps)
+            )
+
+    # -- solving and reporting ----------------------------------------------
+
+    def solve(self) -> None:
+        self._model.optimize()
+        status = self._model.Status
+        if status != self._gp.GRB.OPTIMAL:
+            # non-OPTIMAL is solver distress (see MasterBackend.solve), not a state.
+            raise RuntimeError(
+                "master solve terminated"
+                f" {_status_name(self._gp, status)}; expected OPTIMAL"
+            )
+        theta = np.array(
+            [var.X for var in self._theta_vars], dtype=np.float64
+        )
+        theta.setflags(write=False)
+        self._solution = _Solution(
+            theta=theta,
+            objective=float(self._model.ObjVal),
+        )
+        self._solved_constrs = dict(self._constrs)
+        self._cut_duals = None
+        self._bound_duals = None
+
+    def _bound_duals_now(self, theta: np.ndarray) -> dict[int, float]:
+        grb = self._gp.GRB
+        out: dict[int, float] = {}
+        if self._penalty is None:
+            for k, var in enumerate(self._theta_vars):
+                if var.VBasis in (grb.NONBASIC_LOWER, grb.NONBASIC_UPPER):
+                    out[k] = float(var.RC)
+            return out
+        # An active penalty makes this a barrier QP with no simplex basis, so
+        # VBasis is unavailable; use bound proximity within FeasibilityTol.
+        tol = float(self._model.Params.FeasibilityTol)
+        for k, var in enumerate(self._theta_vars):
+            at_lower = float(theta[k]) - float(self._lower[k]) <= tol
+            at_upper = float(self._upper[k]) - float(theta[k]) <= tol
+            if at_lower or at_upper:
+                out[k] = float(var.RC)
+        return out
+
+    def _last(self) -> _Solution:
+        if self._solution is None:
+            raise RuntimeError(
+                "no solve to report: call solve() before reading results"
+            )
+        return self._solution
+
+    def theta(self) -> np.ndarray:
+        return np.array(self._last().theta)
+
+    def objective(self) -> float:
+        return self._last().objective
+
+    def u_values(self) -> dict[int, float]:
+        self._last()
+        agent_ids = sorted({agent_id for agent_id, _key in self._installed})
+        if not agent_ids:
+            return {}
+        vals = self._model.getAttr(
+            "X", [self._u_vars[agent_id] for agent_id in agent_ids]
+        )
+        return {
+            int(agent_id): float(value)
+            for agent_id, value in zip(agent_ids, vals)
+        }
+
+    def dual_values(self) -> dict[tuple[int, bytes], float]:
+        self._last()
+        if self._cut_duals is None:
+            keys, block = self._solved_block_now()
+            if not keys:
+                self._cut_duals = {}
+            else:
+                assert block is not None
+                pis = block.getAttr("Pi")
+                self._cut_duals = {
+                    key: float(pi) for key, pi in zip(keys, pis)
+                }
+        return dict(self._cut_duals)
+
+    def cut_readings(
+        self, *, dual: bool = False, slack: bool = False
+    ) -> CutReadings:
+        self._last()
+        keys, block = self._solved_block_now()
+        if not keys:
+            return CutReadings(
+                keys=keys,
+                dual=np.empty(0, dtype=np.float64) if dual else None,
+                slack=np.empty(0, dtype=np.float64) if slack else None,
+            )
+        assert block is not None
+        dual_arr = (
+            np.asarray(block.getAttr("Pi"), dtype=np.float64) if dual else None
+        )
+        slack_arr = None
+        if slack:
+            # Gurobi's row-sense Slack is negative for loose ``>=`` rows; negate
+            # so binding ~= 0 and larger positive = looser.
+            slack_arr = -np.asarray(block.getAttr("Slack"), dtype=np.float64)
+        return CutReadings(keys=keys, dual=dual_arr, slack=slack_arr)
+
+    def _solved_block_now(self) -> tuple[tuple[tuple[int, bytes], ...], object | None]:
+        solved = self._solved_constrs or {}
+        keys = tuple(sorted(solved))
+        if not keys:
+            return keys, None
+        if self._solved_block_keys != keys:
+            self._solved_block = self._gp.MConstr.fromlist(
+                [solved[key] for key in keys]
+            )
+            self._solved_block_keys = keys
+        return keys, self._solved_block
+
+    def solved_cut_keys(self) -> frozenset[tuple[int, bytes]]:
+        self._last()
+        return frozenset(self._solved_constrs or {})
+
+    def bound_duals(self) -> dict[int, float]:
+        solution = self._last()
+        if self._bound_duals is None:
+            self._bound_duals = self._bound_duals_now(solution.theta)
+        return dict(self._bound_duals)
+
+    # -- objective shaping ---------------------------------------------------
+
+    def set_penalty(self, ref: np.ndarray, weight: float) -> None:
+        ref = np.array(ref, dtype=np.float64)
+        if ref.shape != (self._K,):
+            raise ValueError(
+                f"ref must have shape ({self._K},); got {ref.shape}"
+            )
+        if weight <= 0:
+            if self._penalty is not None:
+                self._penalty = None
+                self._invalidate_solution()
+                # Restore the linear objective so the terminating solve is a
+                # true LP whose duals belong to the unpenalized relaxation.
+                self._set_linear_objective()
+            return
+        self._set_quadratic_objective(ref, float(weight))
+        self._invalidate_solution()
+        ref.setflags(write=False)
+        self._penalty = (ref, float(weight))
+
+    def _linear_variables(self) -> list[object]:
+        return [*self._theta_vars, *self._u_vars.values()]
+
+    def _linear_coefficients(
+        self, theta_delta: np.ndarray | None = None
+    ) -> np.ndarray:
+        coeffs = np.empty(self._K + len(self._u_vars), dtype=np.float64)
+        coeffs[: self._K] = (
+            self._c if theta_delta is None else self._c + theta_delta
+        )
+        for offset, agent_id in enumerate(self._u_vars, start=self._K):
+            coeffs[offset] = self._u_obj[agent_id]
+        return coeffs
+
+    def _set_linear_objective(self) -> None:
+        self._model.setMObjective(
+            None,
+            self._linear_coefficients(),
+            0.0,
+            xc=self._linear_variables(),
+            sense=self._gp.GRB.MINIMIZE,
+        )
+
+    def _set_quadratic_objective(self, ref: np.ndarray, weight: float) -> None:
+        # Matrix objective form mutates the same model in place, preserving
+        # warm state across changing proximal objectives.
+        theta_linear = -2.0 * weight * ref
+        constant = weight * float(ref @ ref)
+        self._model.setMObjective(
+            self._quadratic_eye() * weight,
+            self._linear_coefficients(theta_linear),
+            constant,
+            xQ_L=self._theta_mvar,
+            xQ_R=self._theta_mvar,
+            xc=self._linear_variables(),
+            sense=self._gp.GRB.MINIMIZE,
+        )
+
+    def _quadratic_eye(self) -> object:
+        if self._theta_eye is None:
+            from scipy import sparse
+
+            self._theta_eye = sparse.eye(
+                self._K, format="csr", dtype=np.float64
+            )
+        return self._theta_eye
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the model and the per-instance environment."""
+        if self._model is not None:
+            self._model.dispose()
+            self._model = None
+        if self._env is not None:
+            self._env.dispose()
+            self._env = None
+
+    def __enter__(self) -> GurobiMaster:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
