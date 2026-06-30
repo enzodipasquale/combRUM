@@ -270,7 +270,7 @@ def estimate_distributed(
 ) -> FitResult:
     """Fit an NSlack model from rank-owned observed shards.
 
-    This is the split-axis distributed entry point. ``n_observations`` is the
+    This is the distributed entry point. ``n_observations`` is the
     observed row count ``N``; ``n_simulations`` is the number of simulated
     pricing agents per observation, so the global pricing ids are
     ``0, ..., N*S-1`` and agent ``gid`` belongs to observation ``gid % N``.

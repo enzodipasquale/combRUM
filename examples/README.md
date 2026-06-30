@@ -37,7 +37,7 @@ For the peer-effects MPI example:
 mpiexec -n 4 python examples/peer_effects_large_network.py --transport mpi
 ```
 
-The public split-axis distributed APIs are `cb.estimate_distributed(...)` and
+The public distributed APIs are `cb.estimate_distributed(...)` and
 `cb.bootstrap_distributed(...)`. They are for sharded NSlack jobs where each
 rank owns observed rows and prices the corresponding simulated agents. They do
 not accept dense `Data` or `observed_bundles`; the model must expose

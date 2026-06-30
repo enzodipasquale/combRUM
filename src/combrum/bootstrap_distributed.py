@@ -734,7 +734,7 @@ def bootstrap_distributed(
     dual_store_dir: Path | str | None = None,
     activity: ActivityConfig | None = None,
 ) -> BootstrapResult:
-    """Run the split-axis distributed multiplier bootstrap for NSlack.
+    """Run the distributed multiplier bootstrap for NSlack.
 
     ``n_observations`` is the observed row count ``N`` and ``n_simulations`` is
     the number of simulated pricing agents per observation. Pricing runs over
