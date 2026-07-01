@@ -290,33 +290,42 @@ def build_distributed_fit_context(
             params=params,
             n_agents=None,
         )
-        if warm_cuts is not None:
-            master_obj.reinstall(tuple(warm_cuts))
-        return master_obj
+        try:
+            if warm_cuts is not None:
+                master_obj.reinstall(tuple(warm_cuts))
+            return master_obj
+        except Exception:
+            master_obj.close()
+            raise
 
     master_obj = None
     with transport.collective():
         if transport.rank == owner:
             master_obj = _owner_master()
-    ctx = FitContext(
-        K=prep.K,
-        N=prep.N,
-        S=prep.S,
-        theta_bounds=model.parameters.bounds(),
-        theta_coef=None,
-        agent_weights=None,
-        slack_coef=slack_coef,
-        local_ids=prep.local_ids,
-        transport=transport,
-        tolerance=tolerance,
-        theta_init=theta_init,
-        master_backend=master_obj,
-        cut_policy=cut_policy,
-        master_params=master_params or {},
-        owner_rank=owner,
-        result_publication=publication,
-        weight_mode="distributed",
-    )
+    try:
+        ctx = FitContext(
+            K=prep.K,
+            N=prep.N,
+            S=prep.S,
+            theta_bounds=model.parameters.bounds(),
+            theta_coef=None,
+            agent_weights=None,
+            slack_coef=slack_coef,
+            local_ids=prep.local_ids,
+            transport=transport,
+            tolerance=tolerance,
+            theta_init=theta_init,
+            master_backend=master_obj,
+            cut_policy=cut_policy,
+            master_params=master_params or {},
+            owner_rank=owner,
+            result_publication=publication,
+            weight_mode="distributed",
+        )
+    except Exception:
+        if master_obj is not None:
+            master_obj.close()
+        raise
     return BuiltContext(
         ctx=ctx, c_theta=c, empirical_moment=prep.empirical_moment
     )

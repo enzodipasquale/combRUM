@@ -705,7 +705,12 @@ def _build_distributed_replica(
         cut_policy=cut_policy,
         result_publication=result_publication,
     )
-    formulation.setup(built.ctx)
+    try:
+        formulation.setup(built.ctx)
+    except Exception:
+        if built.ctx.master_backend is not None:
+            built.ctx.master_backend.close()
+        raise
     return _Replica(
         rep_id=rep_id,
         formulation=formulation,
