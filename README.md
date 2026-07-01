@@ -44,73 +44,61 @@ python examples/network_formation.py
 python examples/peer_effects_large_network.py
 ```
 
-The tiny example builds a small `Model` and `Oracle`, estimates it with
-`cb.estimate_distributed(...)`, then runs a small bootstrap with
-`cb.bootstrap_distributed(...)`.
-The unit-demand example builds a market-level demand oracle and feature map for
-a large outside-option run with market-item fixed effects kept as integer
-parameter columns rather than dense agent covariates. It reports
-row-generation logging, parameter recovery, and an IV price-sensitivity
-diagnostic from the estimated fixed effects.
-The BLP demand example and notebook both show the batched quadratic-knapsack
-setting as standalone estimation code, with a Gurobi demand backend and a
-license-free HiGHS fallback. The script can also run under MPI.
+The tiny example builds a small bundle-choice model, estimates it, and runs a
+small bootstrap. It can run either serially or under MPI.
+
+The unit-demand example estimates a BLP-style model with many agents per market,
+an outside option, and market-item fixed effects. It reports parameter recovery
+and a simple IV price-sensitivity diagnostic.
+
+The BLP bundle-demand example estimates price sensitivity in a market where
+agents choose bundles under a quadratic knapsack problem. It uses Gurobi when
+available and otherwise falls back to HiGHS. The script can also run under MPI.
+
 For MPI runs, launch the standalone scripts with `mpiexec` and pass
 `--transport mpi`.
 
 ## Distributed Fits
 
-`cb.estimate(...)` and `cb.bootstrap(...)` are the dense public path: pass a
-`Data` object with `observed_bundles` on the observation axis `N` and shocks on
-the simulation axis `S`.
+Use `cb.estimate(...)` and `cb.bootstrap(...)` when the observed bundles and
+simulation draws fit in one Python process. Pass a `Data` object with
+`observed_bundles` indexed by observation and shocks indexed by observation and
+simulation draw.
 
-For data that is already sharded across ranks, use `cb.estimate_distributed(...)`
-or `cb.bootstrap_distributed(...)`. These functions do not take `Data` or
-`observed_bundles`. Instead:
+Use `cb.estimate_distributed(...)` or `cb.bootstrap_distributed(...)` when the
+data is already split across MPI ranks. The distributed entry points do not take
+a `Data` object. Instead:
 
-- pass `n_observations=N` and `n_simulations=S`;
-- price global agent ids `0, ..., N*S-1`;
-- treat `agent_id % N` as the observed row for the default simulation geometry;
-- implement `Oracle.price_batch(theta, local_ids)` for the rank's pricing shard;
-- provide an observed-feature surface with
-  `setup_observed(transport, observation_ids)` and
-  `observed_features_batch(observation_ids)`.
+- Pass `n_observations=N` and `n_simulations=S`.
+- Price global agent ids `0, ..., N*S-1`.
+- Use `agent_id % N` to recover the observation index.
+- Implement `Oracle.price_batch(theta, local_ids)` for the agent ids owned by
+  the rank.
+- Provide observed features with `setup_observed(transport, observation_ids)`
+  and `observed_features_batch(observation_ids)`.
 
-Distributed bootstrap multipliers are drawn on the `N` observed rows, then reused
-across the `S` simulated agents belonging to the same observation. The public
-distributed entry points currently support `NSlack`; other formulations should
-use the serial path until their distributed contracts are audited.
+Distributed bootstrap weights are drawn for the `N` observed rows and reused
+across the `S` simulation draws for the same observation. The distributed entry
+points currently support `NSlack`. Use the serial path for other formulations.
 
 `bootstrap_distributed(max_live_reps=...)` controls how many bootstrap
-replications are live in one wave. Higher values use more memory and fewer
-waves; lower values use less memory and more wave setup. Callback iteration
-indices are wave-local.
+replications run in one wave. Higher values use more memory and fewer waves.
+Lower values use less memory and more wave setup.
 
 ## Notebooks
 
-- `notebooks/01_quickstart.ipynb`: runnable public-API quickstart covering
-  `Oracle`, `FeatureMap`, `Parameters`, `Model`, `Data`, `estimate`,
-  `bootstrap`, and warm-started follow-up fits.
-- `notebooks/02_blp_bundle_demand.ipynb`: multi-market bundle demand at the applied
-  scale with a batched quadratic-knapsack MIP oracle and BLP-style 2SLS.
-- `notebooks/03_network_formation.ipynb`: directed network formation at the
-  applied scale with the min-cut pricing oracle.
-- `notebooks/04_unitdemand_blp_large.ipynb`: market-wise OneSlack large-`N`
-  example with an outside option, three agent-specific covariates, and local
-  item fixed effects generated from BLP-style prices and instruments. It runs
-  one independent OneSlack estimate per market `t`, keeps each master small,
-  and closes with the IV price-sensitivity diagnostic.
-- `notebooks/05_peer_effects_large_network.ipynb`: large-network peer-effects
-  example with MPI row generation and a persistent NSlack master over a sigma
-  grid.
-- `notebooks/06_combinatorial_auction.ipynb`: combinatorial auction with
-  assignment valuations. This is not an estimation notebook. It uses the
-  row-generation algorithm in combRUM to compute Walrasian prices and allocation.
-
-The BLP and network-formation notebooks are substantive applied examples and
-can take longer than the quickstart. The OneSlack notebook is the larger
-market-wise example for batched oracles, array-backed demand batches, and
-market-level decomposition.
+- `notebooks/01_quickstart.ipynb`: the smallest complete combRUM example, with
+  estimation, bootstrap, and a warm-started follow-up fit.
+- `notebooks/02_blp_bundle_demand.ipynb`: bundle demand with endogenous prices,
+  quadratic knapsack choice problems, and a BLP-style 2SLS second stage.
+- `notebooks/03_network_formation.ipynb`: directed network formation with
+  reciprocity and a min-cut demand oracle.
+- `notebooks/04_unitdemand_blp_large.ipynb`: BLP inversion with many agents per
+  market, an outside option, and market-item fixed effects.
+- `notebooks/05_peer_effects_large_network.ipynb`: peer effects on a large
+  network, with estimation of non-linear shocks parameters.
+- `notebooks/06_combinatorial_auction.ipynb`: a combinatorial auction example
+  that uses combRUM to find equilibrium prices and an allocation.
 
 ## License
 
