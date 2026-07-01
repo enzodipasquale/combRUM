@@ -38,31 +38,26 @@ def min_cut_bundle(
     edge_cols: np.ndarray,
     pair: np.ndarray,
 ) -> np.ndarray:
-    linear = np.asarray(linear, dtype=np.float64)
-    edge_rows = np.asarray(edge_rows, dtype=np.int64)
-    edge_cols = np.asarray(edge_cols, dtype=np.int64)
-    pair = np.maximum(np.asarray(pair, dtype=np.float64), 0.0)
-
-    upper_rowsum = np.zeros(linear.size, dtype=np.float64)
+    upper_rowsum = np.zeros(linear.size)
     np.add.at(upper_rowsum, edge_rows, pair)
     net = -linear - upper_rowsum
     magnitude = max(
-        float(np.abs(net).max(initial=0.0)),
-        float(pair.max(initial=0.0)),
+        np.abs(net).max(initial=0.0),
+        pair.max(initial=0.0),
     )
     scale = 1.0 if magnitude == 0.0 else 10.0 ** (
-        8 - int(np.floor(np.log10(magnitude)))
+        8 - np.floor(np.log10(magnitude))
     )
     net_int = np.round(net * scale).astype(np.int64)
     pair_int = np.round(pair * scale).astype(np.int64)
 
     source, sink = 0, 1
-    node_ids = np.arange(linear.size, dtype=np.int64) + 2
+    node_ids = np.arange(linear.size) + 2
     select = net_int < 0
     present = pair_int > 0
     rows = np.concatenate(
         [
-            np.full(int(select.sum()), source, dtype=np.int64),
+            np.full(select.sum(), source),
             node_ids[~select],
             edge_rows[present] + 2,
         ]
@@ -70,13 +65,11 @@ def min_cut_bundle(
     cols = np.concatenate(
         [
             node_ids[select],
-            np.full(int((~select).sum()), sink, dtype=np.int64),
+            np.full((~select).sum(), sink),
             edge_cols[present] + 2,
         ]
     )
-    vals = np.concatenate(
-        [-net_int[select], net_int[~select], pair_int[present]]
-    ).astype(np.int64, copy=False)
+    vals = np.concatenate([-net_int[select], net_int[~select], pair_int[present]])
     cap = csr_matrix(
         (vals, (rows, cols)),
         shape=(linear.size + 2, linear.size + 2),
@@ -122,8 +115,6 @@ def _build_arrays(
     M = T * (T - 1)
     rng = np.random.default_rng(design_seed)
     snd, rcv = np.nonzero(~np.eye(T, dtype=bool))
-    snd = snd.astype(np.int64, copy=False)
-    rcv = rcv.astype(np.int64, copy=False)
     pair_index = np.empty((T, T), dtype=np.int64)
     pair_index[snd, rcv] = np.arange(M, dtype=np.int64)
     recip = pair_index[rcv, snd]
@@ -141,20 +132,14 @@ def _build_arrays(
     r[:, 4] = z[snd] * z[rcv]
 
     alpha = rng.normal(fe_mean, fe_sd, size=T)
-    theta_true = np.concatenate(
-        [
-            alpha,
-            np.asarray(beta_true, dtype=np.float64),
-            np.array([float(gamma_true)], dtype=np.float64),
-        ]
-    )
+    theta_true = np.r_[alpha, beta_true, gamma_true]
 
     shocks = np.random.default_rng(shock_seed).standard_normal((N, S, M))
     edge_rows = np.flatnonzero(np.arange(M, dtype=np.int64) < recip)
     edge_cols = recip[edge_rows]
     xbeta = np.einsum("mk,k->m", r, beta_true, optimize=True)
     base = alpha[snd] + alpha[rcv] + xbeta
-    pair = np.full(edge_rows.size, float(gamma_true), dtype=np.float64)
+    pair = np.full(edge_rows.size, gamma_true)
     observed = np.empty((N, M), dtype=bool)
     for obs_id in range(N):
         observed[obs_id] = min_cut_bundle(
@@ -187,15 +172,15 @@ class NetworkDesign:
 
     @property
     def N(self) -> int:
-        return int(np.asarray(self.arrays["observed"]).shape[0])
+        return self.arrays["observed"].shape[0]
 
     @property
     def observed(self) -> np.ndarray:
-        return np.asarray(self.arrays["observed"], dtype=np.float64)
+        return self.arrays["observed"]
 
     @property
     def theta_true(self) -> np.ndarray:
-        return np.asarray(self.arrays["theta_true"], dtype=np.float64)
+        return self.arrays["theta_true"]
 
 
 class NetworkFeatures(cb.FeatureMap):
@@ -206,15 +191,15 @@ class NetworkFeatures(cb.FeatureMap):
         self.N = int(design.N)
         self.M = self.T * (self.T - 1)
         self.K = self.T + K_BETA + 1
-        self.r = np.asarray(arrays["r"], dtype=np.float64)
-        self.edge_rows = np.asarray(arrays["edge_rows"], dtype=np.int64)
-        self.edge_cols = np.asarray(arrays["edge_cols"], dtype=np.int64)
-        self.shocks = np.asarray(arrays["shocks"], dtype=np.float64)
+        self.r = arrays["r"]
+        self.edge_rows = arrays["edge_rows"]
+        self.edge_cols = arrays["edge_cols"]
+        self.shocks = arrays["shocks"]
 
-        snd = np.asarray(arrays["snd"], dtype=np.int64)
-        rcv = np.asarray(arrays["rcv"], dtype=np.int64)
-        cols = np.arange(self.M, dtype=np.int64)
-        ones = np.ones(self.M, dtype=np.float64)
+        snd = arrays["snd"]
+        rcv = arrays["rcv"]
+        cols = np.arange(self.M)
+        ones = np.ones(self.M)
         sender = csr_matrix((ones, (snd, cols)), shape=(self.T, self.M))
         receiver = csr_matrix((ones, (rcv, cols)), shape=(self.T, self.M))
         self.incidence = sender + receiver
@@ -222,11 +207,13 @@ class NetworkFeatures(cb.FeatureMap):
     def setup_observed(
         self, transport: cb.Transport, observation_ids: np.ndarray
     ) -> None:
-        self.observation_ids = np.asarray(observation_ids, dtype=np.int64)
+        pass
 
     def observed_features_batch(self, observation_ids: np.ndarray) -> np.ndarray:
-        ids = np.asarray(observation_ids, dtype=np.int64)
-        Phi, _eps = self.features_batch(ids, self.design.observed[ids])
+        Phi, _eps = self.features_batch(
+            observation_ids,
+            self.design.observed[observation_ids],
+        )
         return np.ascontiguousarray(Phi, dtype=np.float64)
 
     def features_batch(
@@ -238,27 +225,14 @@ class NetworkFeatures(cb.FeatureMap):
         K: int | None = None,
         aggregate: bool = False,
     ) -> tuple[np.ndarray, np.ndarray | float]:
-        ids = np.asarray(ids, dtype=np.int64)
-        bundles = np.asarray(bundles, dtype=np.float64)
-        if bundles.ndim != 2 or bundles.shape[1] != self.M:
-            raise ValueError(
-                f"bundles must have shape (n, {self.M}); got {bundles.shape}"
-            )
-
         beta_start = self.T
         obs_ids = ids % self.N
         sim_ids = ids // self.N
         reciprocal = bundles[:, self.edge_rows] * bundles[:, self.edge_cols]
         if aggregate:
-            if weights is None:
-                raise ValueError("weights are required when aggregate=True")
-            w = np.asarray(weights, dtype=np.float64)
-            weighted_bundle = np.einsum("n,nm->m", w, bundles, optimize=True)
+            weighted_bundle = np.einsum("n,nm->m", weights, bundles, optimize=True)
             phi = np.zeros(self.K, dtype=np.float64)
-            phi[: self.T] = np.asarray(
-                self.incidence @ weighted_bundle,
-                dtype=np.float64,
-            )
+            phi[: self.T] = self.incidence @ weighted_bundle
             phi[beta_start : beta_start + K_BETA] = np.einsum(
                 "m,mk->k",
                 weighted_bundle,
@@ -267,24 +241,21 @@ class NetworkFeatures(cb.FeatureMap):
             )
             phi[-1] = np.einsum(
                 "n,n->",
-                w,
+                weights,
                 reciprocal.sum(axis=1),
                 optimize=True,
             )
             eps = np.einsum(
                 "n,nm,nm->",
-                w,
+                weights,
                 self.shocks[obs_ids, sim_ids],
                 bundles,
                 optimize=True,
             )
-            return phi, float(eps)
+            return phi, eps
 
         Phi = np.zeros((bundles.shape[0], self.K), dtype=np.float64)
-        Phi[:, : self.T] = np.asarray(
-            (self.incidence @ bundles.T).T,
-            dtype=np.float64,
-        )
+        Phi[:, : self.T] = (self.incidence @ bundles.T).T
         Phi[:, beta_start : beta_start + K_BETA] = np.einsum(
             "nm,mk->nk",
             bundles,
@@ -307,19 +278,18 @@ class NetworkDemandOracle(cb.Oracle):
         self.T = int(design.T)
         self.N = int(design.N)
         self.M = self.T * (self.T - 1)
-        self.r = np.asarray(arrays["r"], dtype=np.float64)
-        self.snd = np.asarray(arrays["snd"], dtype=np.int64)
-        self.rcv = np.asarray(arrays["rcv"], dtype=np.int64)
-        self.edge_rows = np.asarray(arrays["edge_rows"], dtype=np.int64)
-        self.edge_cols = np.asarray(arrays["edge_cols"], dtype=np.int64)
-        self.shocks = np.asarray(arrays["shocks"], dtype=np.float64)
+        self.r = arrays["r"]
+        self.snd = arrays["snd"]
+        self.rcv = arrays["rcv"]
+        self.edge_rows = arrays["edge_rows"]
+        self.edge_cols = arrays["edge_cols"]
+        self.shocks = arrays["shocks"]
 
     def _linear(self, theta: np.ndarray) -> tuple[np.ndarray, float]:
-        theta = np.asarray(theta, dtype=np.float64)
         beta_start = self.T
         alpha = theta[:beta_start]
         beta = theta[beta_start : beta_start + K_BETA]
-        gamma = float(theta[-1])
+        gamma = theta[-1]
         xbeta = np.einsum("mk,k->m", self.r, beta, optimize=True)
         return alpha[self.snd] + alpha[self.rcv] + xbeta, gamma
 
@@ -327,21 +297,21 @@ class NetworkDemandOracle(cb.Oracle):
         self, theta: np.ndarray, local_ids: np.ndarray
     ) -> dict[int, cb.Demand]:
         base, gamma = self._linear(theta)
-        pair = np.full(self.edge_rows.size, gamma, dtype=np.float64)
+        pair = np.full(self.edge_rows.size, gamma)
         demands: dict[int, cb.Demand] = {}
-        for agent_id in np.asarray(local_ids, dtype=np.int64):
-            obs_id = int(agent_id) % self.N
-            sim_id = int(agent_id) // self.N
+        for agent_id in local_ids:
+            obs_id = agent_id % self.N
+            sim_id = agent_id // self.N
             linear = base + self.shocks[obs_id, sim_id]
             bundle = min_cut_bundle(linear, self.edge_rows, self.edge_cols, pair)
-            payoff = float(
+            payoff = (
                 np.sum(linear, dtype=np.float64, where=bundle)
                 + gamma
                 * np.count_nonzero(
                     bundle[self.edge_rows] & bundle[self.edge_cols]
                 )
             )
-            demands[int(agent_id)] = cb.Demand.exact(bundle, payoff)
+            demands[agent_id] = cb.Demand.exact(bundle, payoff)
         return demands
 
 

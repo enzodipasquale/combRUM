@@ -225,9 +225,7 @@ def _merge_settings(
     )
 
 
-def _default_oracle_workers(backend: str) -> int:
-    if backend != "highs":
-        return 1
+def _default_oracle_workers() -> int:
     world_size = 1
     for name in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE", "MV2_COMM_WORLD_SIZE"):
         value = os.environ.get(name)
@@ -294,18 +292,19 @@ def choose_backend(requested: str = "auto") -> str:
 class BLPFeatures(cb.FeatureMap):
     """Batched structural features for the BLP demand example."""
 
-    def __init__(self, design: BLPDesign, shocks: np.ndarray) -> None:
+    def __init__(self, design: BLPDesign) -> None:
         self.design = design
-        self.shocks = np.asarray(shocks, dtype=np.float64)
 
     def setup_observed(
         self, transport: cb.Transport, observation_ids: np.ndarray
     ) -> None:
-        self.observation_ids = np.asarray(observation_ids, dtype=np.int64)
+        pass
 
     def observed_features_batch(self, observation_ids: np.ndarray) -> np.ndarray:
-        ids = np.asarray(observation_ids, dtype=np.int64)
-        Phi, _eps = self.features_batch(ids, self.design.observed[ids])
+        Phi, _eps = self.features_batch(
+            observation_ids,
+            self.design.observed[observation_ids],
+        )
         return np.ascontiguousarray(Phi, dtype=np.float64)
 
     def features_batch(
@@ -315,8 +314,6 @@ class BLPFeatures(cb.FeatureMap):
         weights: np.ndarray | None = None,
         aggregate: bool = False,
     ) -> tuple[np.ndarray, np.ndarray | float]:
-        ids = np.asarray(ids, dtype=np.int64)
-        bundles = np.asarray(bundles, dtype=np.float64)
         obs_ids = ids % self.design.N
         sim_ids = ids // self.design.N
         q_start = K_BETA + self.design.T * self.design.M
@@ -327,25 +324,22 @@ class BLPFeatures(cb.FeatureMap):
         )
 
         if aggregate:
-            if weights is None:
-                raise ValueError("weights are required when aggregate=True")
-            w = np.asarray(weights, dtype=np.float64)
             phi = np.zeros(feature_dim, dtype=np.float64)
             phi[:K_BETA] = np.einsum(
                 "n,nm,nmk->k",
-                w,
+                weights,
                 bundles,
                 self.design.X[obs_ids],
                 optimize=True,
             )
             phi[K_BETA:q_start] = np.bincount(
                 delta_cols.ravel(),
-                weights=(w[:, None] * bundles).ravel(),
+                weights=(weights[:, None] * bundles).ravel(),
                 minlength=self.design.T * self.design.M,
             )
             phi[q_start : q_start + K_QUAD] = np.einsum(
                 "n,ni,kij,nj->k",
-                w,
+                weights,
                 bundles,
                 self.design.Qs,
                 bundles,
@@ -353,12 +347,12 @@ class BLPFeatures(cb.FeatureMap):
             )
             eps = np.einsum(
                 "n,nm,nm->",
-                w,
-                self.shocks[obs_ids, sim_ids],
+                weights,
+                self.design.est_shocks[obs_ids, sim_ids],
                 bundles,
                 optimize=True,
             )
-            return phi, float(eps)
+            return phi, eps
 
         Phi = np.zeros((ids.size, feature_dim), dtype=np.float64)
         Phi[:, :K_BETA] = np.einsum(
@@ -380,7 +374,7 @@ class BLPFeatures(cb.FeatureMap):
         )
         eps = np.einsum(
             "nm,nm->n",
-            self.shocks[obs_ids, sim_ids],
+            self.design.est_shocks[obs_ids, sim_ids],
             bundles,
             optimize=True,
         )
@@ -390,18 +384,16 @@ class BLPFeatures(cb.FeatureMap):
 class GurobiDemand:
     """Quadratic-knapsack solver using Gurobi's native quadratic objective."""
 
-    def __init__(self, weights: np.ndarray, *, quiet: bool = True) -> None:
+    def __init__(self, weights: np.ndarray) -> None:
         import gurobipy as gp
 
         self._gp = gp
-        self._weights = np.asarray(weights, dtype=np.float64)
+        self._weights = weights
         self._env = gp.Env(empty=True)
-        if quiet:
-            self._env.setParam("OutputFlag", 0)
+        self._env.setParam("OutputFlag", 0)
         self._env.start()
         self._model = gp.Model(env=self._env)
-        if quiet:
-            self._model.Params.OutputFlag = 0
+        self._model.Params.OutputFlag = 0
         self._x = self._model.addMVar(self._weights.size, vtype=gp.GRB.BINARY)
         self._capacity = self._model.addConstr(self._weights @ self._x <= 0.0)
         self._model.update()
@@ -420,7 +412,7 @@ class GurobiDemand:
     def solve(
         self, linear: np.ndarray, quadratic: np.ndarray, capacity: float
     ) -> cb.Demand:
-        self._capacity.RHS = float(capacity)
+        self._capacity.RHS = capacity
         self._model.setMObjective(
             Q=quadratic,
             c=linear,
@@ -431,9 +423,9 @@ class GurobiDemand:
         self._model.optimize()
         if self._model.Status != self._gp.GRB.OPTIMAL and self._model.SolCount == 0:
             raise RuntimeError("Gurobi found no feasible bundle")
-        bundle = np.asarray(self._x.X, dtype=np.float64) > 0.5
-        value = float(self._model.ObjVal)
-        raw_gap = float(self._model.MIPGap)
+        bundle = self._x.X > 0.5
+        value = self._model.ObjVal
+        raw_gap = self._model.MIPGap
         if (
             self._model.Status == self._gp.GRB.OPTIMAL
             and math.isfinite(raw_gap)
@@ -454,31 +446,28 @@ class HighsDemand:
         self,
         weights: np.ndarray,
         Qs: np.ndarray,
-        *,
-        quiet: bool = True,
     ) -> None:
         import highspy
 
         self._highspy = highspy
-        self._weights = np.asarray(weights, dtype=np.float64)
-        upper_nonzero = np.triu(np.any(np.asarray(Qs) != 0.0, axis=0), 1)
+        self._weights = weights
+        upper_nonzero = np.triu(np.any(Qs != 0.0, axis=0), 1)
         rows, cols = np.nonzero(upper_nonzero)
-        self._edges = np.column_stack([rows, cols]).astype(np.int64)
+        self._edges = np.column_stack([rows, cols])
         self._edge_rows = self._edges[:, 0]
         self._edge_cols = self._edges[:, 1]
         self._costs = np.empty(self._weights.size + self._edges.shape[0])
         self._cost_indices = np.arange(self._costs.size, dtype=np.int32)
-        self._model = self._build_model(quiet=quiet)
+        self._model = self._build_model()
         self._settings = cb.SolverSettings()
 
-    def _build_model(self, *, quiet: bool) -> Any:
+    def _build_model(self) -> Any:
         hp = self._highspy
         M = self._weights.size
-        n_edges = int(self._edges.shape[0])
+        n_edges = self._edges.shape[0]
         n_vars = M + n_edges
         model = hp.Highs()
-        if quiet:
-            model.setOptionValue("output_flag", False)
+        model.setOptionValue("output_flag", False)
         model.setOptionValue("threads", 1)
         model.setOptionValue("parallel", "off")
         model.setOptionValue("presolve", "off")
@@ -529,7 +518,7 @@ class HighsDemand:
     def _push_settings(self) -> None:
         if self._settings.time_limit_seconds is not None:
             self._model.setOptionValue(
-                "time_limit", float(self._settings.time_limit_seconds)
+                "time_limit", self._settings.time_limit_seconds
             )
 
     def solve(
@@ -540,7 +529,7 @@ class HighsDemand:
             2.0 * quadratic[self._edge_rows, self._edge_cols]
         )
         hp = self._highspy
-        self._model.changeRowBounds(0, -hp.kHighsInf, float(capacity))
+        self._model.changeRowBounds(0, -hp.kHighsInf, capacity)
         self._model.changeColsCost(
             self._costs.size,
             self._cost_indices,
@@ -559,15 +548,15 @@ class HighsDemand:
         if (
             run_status not in admissible_run
             or model_status not in admissible
-            or not bool(getattr(solution, "value_valid", False))
+            or not solution.value_valid
         ):
             raise RuntimeError(
                 "HiGHS found no feasible bundle:"
                 f" run_status={run_status}, model_status={model_status}"
             )
         bundle = np.asarray(solution.col_value[: self._weights.size]) > 0.5
-        value = float(self._model.getObjectiveValue())
-        raw_gap = float(self._model.getInfo().mip_gap)
+        value = self._model.getObjectiveValue()
+        raw_gap = self._model.getInfo().mip_gap
         if (
             model_status == hp.HighsModelStatus.kOptimal
             and math.isfinite(raw_gap)
@@ -589,33 +578,29 @@ class BLPDemandOracle(cb.Oracle):
         shocks: np.ndarray,
         *,
         backend: str = "auto",
-        quiet: bool = True,
         oracle_workers: int | None = None,
     ) -> None:
         self.design = design
-        self.shocks = np.asarray(shocks, dtype=np.float64)
+        self.shocks = shocks
         self.backend_name = choose_backend(backend)
-        self._quiet = bool(quiet)
         self.settings = cb.SolverSettings()
         workers = (
-            _default_oracle_workers(self.backend_name)
+            _default_oracle_workers()
             if oracle_workers is None
             else int(oracle_workers)
         )
         if workers < 1:
             raise ValueError("oracle_workers must be at least 1")
-        self._oracle_workers = workers if self.backend_name == "highs" else 1
+        self._oracle_workers = workers
         self._solver_lock = threading.Lock()
         self._solver_queue: Queue[GurobiDemand | HighsDemand] = Queue()
         self._solvers: list[GurobiDemand | HighsDemand] = []
 
     def _new_solver(self) -> GurobiDemand | HighsDemand:
         if self.backend_name == "gurobi":
-            solver = GurobiDemand(self.design.weights, quiet=self._quiet)
+            solver = GurobiDemand(self.design.weights)
         else:
-            solver = HighsDemand(
-                self.design.weights, self.design.Qs, quiet=self._quiet
-            )
+            solver = HighsDemand(self.design.weights, self.design.Qs)
         solver.apply_solver_settings(self.settings)
         return solver
 
@@ -656,14 +641,13 @@ class BLPDemandOracle(cb.Oracle):
     def price_batch(
         self, theta: np.ndarray, local_ids: np.ndarray
     ) -> dict[int, cb.Demand]:
-        values = self.design.parameters.unpack(np.asarray(theta, dtype=np.float64))
+        values = self.design.parameters.unpack(theta)
         beta = values["beta"]
         delta = values["delta"].reshape(self.design.T, self.design.M)
         quadratic = np.tensordot(values["lambda"], self.design.Qs, axes=([0], [0]))
 
-        ids = np.asarray(local_ids, dtype=np.int64)
-        obs_ids = ids % self.design.N
-        sim_ids = ids // self.design.N
+        obs_ids = local_ids % self.design.N
+        sim_ids = local_ids // self.design.N
         unique_obs, obs_pos = np.unique(obs_ids, return_inverse=True)
         base_linear = (
             np.einsum(
@@ -676,25 +660,16 @@ class BLPDemandOracle(cb.Oracle):
         )
 
         def solve_one(row: int) -> tuple[int, cb.Demand]:
-            agent_id = int(ids[row])
-            agent_key = int(agent_id)
-            obs_id = int(obs_ids[row])
+            agent_id = local_ids[row]
+            obs_id = obs_ids[row]
             linear = base_linear[obs_pos[row]] + self.shocks[obs_id, sim_ids[row]]
             demand = self._solve(
-                linear, quadratic, float(self.design.capacities[obs_id])
+                linear, quadratic, self.design.capacities[obs_id]
             )
-            return agent_key, demand
+            return agent_id, demand
 
-        if self._oracle_workers > 1 and ids.size > 1:
-            n_workers = min(self._oracle_workers, int(ids.size))
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                return dict(pool.map(solve_one, range(int(ids.size))))
-
-        demands: dict[int, cb.Demand] = {}
-        for row in range(int(ids.size)):
-            agent_key, demand = solve_one(row)
-            demands[agent_key] = demand
-        return demands
+        with ThreadPoolExecutor(max_workers=self._oracle_workers) as pool:
+            return dict(pool.map(solve_one, range(len(local_ids))))
 
     def teardown(self) -> None:
         with self._solver_lock:
@@ -709,20 +684,18 @@ def simulate_observed(
     design: BLPDesign,
     *,
     backend: str = "auto",
-    quiet: bool = True,
     oracle_workers: int | None = None,
 ) -> BLPDesign:
     demand = BLPDemandOracle(
         design,
         design.dgp_shocks.reshape(design.N, 1, design.M),
         backend=backend,
-        quiet=quiet,
         oracle_workers=oracle_workers,
     )
     ids = np.arange(design.N, dtype=np.int64)
     try:
         demands = demand.price_batch(design.theta_true, ids)
-        observed = np.vstack([demands[int(i)].bundle for i in ids])
+        observed = np.vstack([demands[i].bundle for i in ids])
     finally:
         demand.teardown()
     return replace(design, observed=observed)
@@ -732,15 +705,13 @@ def build_distributed_model(
     design: BLPDesign,
     *,
     backend: str = "auto",
-    quiet: bool = True,
     oracle_workers: int | None = None,
 ) -> cb.Model:
-    features = BLPFeatures(design, design.est_shocks)
+    features = BLPFeatures(design)
     demand = BLPDemandOracle(
         design,
         design.est_shocks,
         backend=backend,
-        quiet=quiet,
         oracle_workers=oracle_workers,
     )
     return cb.Model(
@@ -879,7 +850,6 @@ def build_distributed_design(
             design = simulate_observed(
                 design,
                 backend=backend,
-                quiet=not bool(args.solver_output),
                 oracle_workers=args.oracle_workers,
             )
             publish = design.arrays()
@@ -912,7 +882,6 @@ def _parser() -> argparse.ArgumentParser:
         choices=("off", "summary", "iterations", "diagnostic"),
         default="iterations",
     )
-    p.add_argument("--solver-output", action="store_true")
     return p
 
 

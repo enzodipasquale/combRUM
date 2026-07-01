@@ -60,32 +60,30 @@ def min_cut_choice(
     edge_j: np.ndarray,
     pair: np.ndarray,
 ) -> np.ndarray:
-    linear = np.asarray(linear, dtype=np.float64)
-    pair = np.maximum(np.asarray(pair, dtype=np.float64), 0.0)
     n = linear.size
 
-    row_sum = np.zeros(n, dtype=np.float64)
+    row_sum = np.zeros(n)
     np.add.at(row_sum, edge_i, pair)
     net = -linear - row_sum
 
     magnitude = max(
-        float(np.abs(net).max(initial=0.0)),
-        float(pair.max(initial=0.0)),
+        np.abs(net).max(initial=0.0),
+        pair.max(initial=0.0),
     )
     scale = 1.0 if magnitude == 0.0 else 10.0 ** (
-        8 - int(np.floor(np.log10(magnitude)))
+        8 - np.floor(np.log10(magnitude))
     )
     net_i = np.round(net * scale).astype(np.int64)
     pair_i = np.round(pair * scale).astype(np.int64)
 
     source, sink = 0, 1
-    nodes = np.arange(n, dtype=np.int64) + 2
+    nodes = np.arange(n) + 2
     choose = net_i < 0
     linked = pair_i > 0
 
     rows = np.concatenate(
         [
-            np.full(int(choose.sum()), source, dtype=np.int64),
+            np.full(choose.sum(), source),
             nodes[~choose],
             edge_i[linked] + 2,
         ]
@@ -93,7 +91,7 @@ def min_cut_choice(
     cols = np.concatenate(
         [
             nodes[choose],
-            np.full(int((~choose).sum()), sink, dtype=np.int64),
+            np.full((~choose).sum(), sink),
             edge_j[linked] + 2,
         ]
     )
@@ -123,7 +121,7 @@ def make_arrays(
     correlated_s: int,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(GRAPH_SEED)
-    side = np.sqrt(float(T))
+    side = np.sqrt(T)
     radius = np.sqrt(AVG_DEGREE / (LINK_PROB * np.pi))
     positions = rng.uniform(0.0, side, size=(T, 2))
     distance = np.sqrt(
@@ -135,13 +133,11 @@ def make_arrays(
     W = (
         (distance <= radius)
         & (np.log(LINK_PROB / (1.0 - LINK_PROB)) >= link_shocks)
-    ).astype(np.int8)
+    )
     np.fill_diagonal(W, 0)
 
     edge_i, edge_j = np.nonzero(np.triu(W, k=1))
-    edge_i = edge_i.astype(np.int64)
-    edge_j = edge_j.astype(np.int64)
-    pair = np.full(edge_i.size, DELTA_TRUE, dtype=np.float64)
+    pair = np.full(edge_i.size, DELTA_TRUE)
 
     degree = W.sum(axis=1, dtype=np.float64)
     inv_sqrt_degree = np.zeros_like(degree)
@@ -155,16 +151,13 @@ def make_arrays(
             rng.uniform(0.0, 1.0, size=T),
             rng.uniform(0.0, 1.0, size=T),
         ]
-    ).astype(np.float64)
+    )
     xbeta = np.einsum("tk,k->t", X, BETA_TRUE, optimize=True)
 
     rng_iid = np.random.default_rng(IID_SEED)
     iid_eta_dgp = rng_iid.standard_normal((1, T))
     iid_eta_est = rng_iid.standard_normal((1, iid_s, T))
-    iid_y = np.asarray(
-        [min_cut_choice(xbeta + iid_eta_dgp[0], edge_i, edge_j, pair)],
-        dtype=bool,
-    )
+    iid_y = min_cut_choice(xbeta + iid_eta_dgp[0], edge_i, edge_j, pair)[None, :]
 
     rng_corr = np.random.default_rng(CORRELATED_SEED)
     corr_z = np.zeros(correlated_n, dtype=np.float64)
@@ -241,33 +234,32 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         etaW_est: np.ndarray | None = None,
         with_alpha: bool,
     ) -> None:
-        self.X = np.asarray(X, dtype=np.float64)
-        self.edge_i = np.asarray(edge_i, dtype=np.int64)
-        self.edge_j = np.asarray(edge_j, dtype=np.int64)
-        self.z = np.asarray(z, dtype=np.float64)
-        eta_est = np.asarray(eta_est, dtype=np.float64)
+        self.X = X
+        self.edge_i = edge_i
+        self.edge_j = edge_j
+        self.z = z
         self.eps = (
             eta_est
             if etaW_est is None
-            else eta_est + float(sigma) * np.asarray(etaW_est, dtype=np.float64)
+            else eta_est + sigma * etaW_est
         )
-        self.observed = (
-            None if observed is None else np.asarray(observed, dtype=bool)
-        )
+        self.observed = observed
         self.N, self.S, self.T = self.eps.shape
-        self.with_alpha = bool(with_alpha)
-        self.K = BETA_TRUE.size + 1 + int(self.with_alpha)
+        self.with_alpha = with_alpha
+        self.K = BETA_TRUE.size + 1 + self.with_alpha
 
     def setup_observed(
         self, transport: cb.Transport, observation_ids: np.ndarray
     ) -> None:
-        self.observation_ids = np.asarray(observation_ids, dtype=np.int64)
+        pass
 
     def observed_features_batch(self, observation_ids: np.ndarray) -> np.ndarray:
         if self.observed is None:
             raise ValueError("observed choices are required for distributed fits")
-        ids = np.asarray(observation_ids, dtype=np.int64)
-        Phi, _eps = self.features_batch(ids, self.observed[ids])
+        Phi, _eps = self.features_batch(
+            observation_ids,
+            self.observed[observation_ids],
+        )
         return np.ascontiguousarray(Phi, dtype=np.float64)
 
     def features_batch(
@@ -278,8 +270,6 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         weights: np.ndarray | None = None,
         aggregate: bool = False,
     ) -> tuple[np.ndarray, np.ndarray | float]:
-        ids = np.asarray(ids, dtype=np.int64)
-        bundles = np.asarray(bundles, dtype=np.float64)
         obs = ids % self.N
         sim = ids // self.N
 
@@ -305,12 +295,9 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         )
 
         if aggregate:
-            if weights is None:
-                raise ValueError("weights are required when aggregate=True")
-            w = np.asarray(weights, dtype=np.float64)
             return (
-                np.einsum("n,nk->k", w, Phi, optimize=True),
-                float(np.einsum("n,n->", w, eps, optimize=True)),
+                np.einsum("n,nk->k", weights, Phi, optimize=True),
+                np.einsum("n,n->", weights, eps, optimize=True),
             )
         return Phi, eps
 
@@ -319,33 +306,31 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         theta: np.ndarray,
         local_ids: np.ndarray,
     ) -> cb.DemandBatch:
-        theta = np.asarray(theta, dtype=np.float64)
-        ids = np.asarray(local_ids, dtype=np.int64)
-        obs = ids % self.N
-        sim = ids // self.N
+        obs = local_ids % self.N
+        sim = local_ids // self.N
 
         if self.with_alpha:
-            alpha = float(theta[0])
+            alpha = theta[0]
             beta = theta[1 : 1 + BETA_TRUE.size]
         else:
             alpha = 0.0
             beta = theta[: BETA_TRUE.size]
-        delta = float(theta[-1])
-        pair = np.full(self.edge_i.size, delta, dtype=np.float64)
+        delta = theta[-1]
+        pair = np.full(self.edge_i.size, delta)
         base = np.einsum("tk,k->t", self.X, beta, optimize=True)
 
-        bundles = np.empty((ids.size, self.T), dtype=bool)
-        payoffs = np.empty(ids.size, dtype=np.float64)
+        bundles = np.empty((local_ids.size, self.T), dtype=bool)
+        payoffs = np.empty(local_ids.size)
         for r, (i, s) in enumerate(zip(obs, sim)):
             linear = base + alpha * self.z[i] + self.eps[i, s]
             bundle = min_cut_choice(linear, self.edge_i, self.edge_j, pair)
             bundles[r] = bundle
-            payoffs[r] = float(
+            payoffs[r] = (
                 np.sum(linear, dtype=np.float64, where=bundle)
                 + delta
                 * np.count_nonzero(bundle[self.edge_i] & bundle[self.edge_j])
             )
-        return cb.DemandBatch.exact(ids, bundles, payoffs)
+        return cb.DemandBatch.exact(local_ids, bundles, payoffs)
 
 
 def fit_iid(
@@ -423,13 +408,13 @@ def fit_sigma_grid(
     corr_eta_est = arrays["corr_eta_est"]
     corr_etaW_est = arrays["corr_etaW_est"]
     n_profiles, n_simulations, _ = corr_eta_est.shape
-    observed_size2 = float(np.mean(corr_y.sum(axis=1, dtype=np.float64) ** 2))
+    observed_size2 = np.mean(corr_y.sum(axis=1) ** 2)
 
     def rhs_sigma(row, sigma):
         i = row.agent_id % n_profiles
         s = row.agent_id // n_profiles
-        eps = corr_eta_est[i, s] + float(sigma) * corr_etaW_est[i, s]
-        return float(np.sum(eps, dtype=np.float64, where=row.bundle))
+        eps = corr_eta_est[i, s] + sigma * corr_etaW_est[i, s]
+        return np.sum(eps, where=row.bundle)
 
     params = cb.Parameters(
         {
@@ -444,33 +429,33 @@ def fit_sigma_grid(
         observables=np.arange(n_profiles, dtype=np.int64),
         observed_bundles=corr_y,
         transport=transport,
-        config=cb.LoopConfig(max_iterations=int(max_iterations)),
+        config=cb.LoopConfig(max_iterations=max_iterations),
         rhs_transform=rhs_sigma,
         master_backend=master_backend,
-        tolerance=float(tolerance),
+        tolerance=tolerance,
     )
 
     rows: list[dict[str, Any]] = []
     try:
-        for k, sigma in enumerate(np.asarray(sigma_grid, dtype=np.float64)):
+        for k, sigma in enumerate(sigma_grid):
             game = PeerGame(
                 X=X,
                 edge_i=edge_i,
                 edge_j=edge_j,
                 z=corr_z,
                 eta_est=corr_eta_est,
-                sigma=float(sigma),
+                sigma=sigma,
                 etaW_est=corr_etaW_est,
                 with_alpha=True,
             )
             fit = driver.fit if k == 0 else driver.reevaluate
             result = fit(
-                float(sigma),
+                sigma,
                 oracle=game,
                 shocks=game.eps,
             )
             if not result.converged:
-                raise RuntimeError(f"sigma={float(sigma):.6g} did not converge")
+                raise RuntimeError(f"sigma={sigma:.6g} did not converge")
             if transport.rank != 0:
                 continue
 
@@ -478,18 +463,18 @@ def fit_sigma_grid(
             dual_bundles = dual.bundle_table[dual.bundle_row_ids]
             dual_pis = dual.pis.astype(np.longdouble)
             dual_sizes = dual_bundles.sum(axis=1, dtype=np.longdouble)
-            dual_size2 = float(
+            dual_size2 = (
                 dual_pis @ (dual_sizes * dual_sizes) / (game.N * game.S)
             )
             row = {
-                "sigma": float(sigma),
+                "sigma": sigma,
                 "start": "cold" if k == 0 else "warm",
                 "criterion": ((dual_size2 - observed_size2) / observed_size2)
                 ** 2,
                 "theta_hat": result.theta_hat,
                 "dual_size2": dual_size2,
-                "iterations": int(result.iterations),
-                "active_cuts": int(result.n_active_cuts),
+                "iterations": result.iterations,
+                "active_cuts": result.n_active_cuts,
             }
             rows.append(row)
             if progress:
@@ -507,7 +492,7 @@ def fit_sigma_grid(
     if transport.rank != 0:
         return None
 
-    best_id = int(np.argmin([row["criterion"] for row in rows]))
+    best_id = np.argmin([row["criterion"] for row in rows])
     best = rows[best_id]
     theta_true = np.r_[[ALPHA_TRUE], BETA_TRUE, [DELTA_TRUE]]
     theta_error = best["theta_hat"] - theta_true
@@ -515,7 +500,7 @@ def fit_sigma_grid(
         "theta_true": theta_true,
         "theta_hat": best["theta_hat"],
         "theta_error": theta_error,
-        "max_abs_error": float(np.max(np.abs(theta_error))),
+        "max_abs_error": np.max(np.abs(theta_error)),
         "sigma_true": SIGMA_TRUE,
         "sigma_best_id": best_id,
         "sigma_best": best,
@@ -553,10 +538,10 @@ def run_example(
 
     transport = cb.SerialTransport() if transport is None else transport
     arrays = build_arrays(
-        T=int(T),
-        iid_s=int(iid_s),
-        correlated_n=int(correlated_n),
-        correlated_s=int(correlated_s),
+        T=T,
+        iid_s=iid_s,
+        correlated_n=correlated_n,
+        correlated_s=correlated_s,
         transport=transport,
     )
     _, iid = fit_iid(
@@ -568,9 +553,9 @@ def run_example(
         activity_level=activity_level,
     )
     sigma_grid = np.linspace(
-        float(sigma_min),
-        float(sigma_max),
-        int(sigma_grid_size),
+        sigma_min,
+        sigma_max,
+        sigma_grid_size,
     )
     correlated = fit_sigma_grid(
         arrays,

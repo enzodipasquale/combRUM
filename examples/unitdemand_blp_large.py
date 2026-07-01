@@ -55,10 +55,10 @@ def make_transport(kind: str) -> cb.Transport:
 def price_sensitivity_alpha(
     delta: np.ndarray, prices: np.ndarray, instruments: np.ndarray
 ) -> tuple[float, float]:
-    delta_flat = np.asarray(delta, dtype=np.float64).ravel()
-    price_flat = np.asarray(prices, dtype=np.float64).ravel()
-    instrument_flat = np.asarray(instruments, dtype=np.float64).ravel()
-    constant = np.ones(delta_flat.size, dtype=np.float64)
+    delta_flat = delta.ravel()
+    price_flat = prices.ravel()
+    instrument_flat = instruments.ravel()
+    constant = np.ones(delta_flat.size)
     ols = IV2SLS(
         delta_flat,
         np.column_stack([constant, price_flat]),
@@ -73,28 +73,32 @@ class MarketDemand(cb.Oracle, cb.FeatureMap):
     """One market: dense covariates plus local item fixed effects."""
 
     def __init__(self, *, x: np.ndarray, est_shocks: np.ndarray) -> None:
-        self.x = np.asarray(x, dtype=np.float64)
-        self.est_shocks = np.asarray(est_shocks, dtype=np.float64)
-        self.N, self.J, self.C = map(int, self.x.shape)
+        self.x = x
+        self.est_shocks = est_shocks
+        self.N, self.J, self.C = self.x.shape
         self.K = self.C + self.J
-        self._rows = np.arange(self.N, dtype=np.int64)
+        self.rows = np.arange(self.N)
 
-    def _batch(
+    def batch(
         self, agent_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        ids = np.asarray(agent_ids, dtype=np.int64)
         if (
             self.est_shocks.shape[1] == 1
-            and ids.size == self.N
-            and np.array_equal(ids, self._rows)
+            and len(agent_ids) == self.N
+            and np.array_equal(agent_ids, self.rows)
         ):
-            return ids, self.x, self.est_shocks[:, 0, :], self._rows
-        obs = ids % self.N
-        sim = ids // self.N
-        return ids, self.x[obs], self.est_shocks[obs, sim], np.arange(ids.size)
+            return agent_ids, self.x, self.est_shocks[:, 0], self.rows
+        obs = agent_ids % self.N
+        sim = agent_ids // self.N
+        return (
+            agent_ids,
+            self.x[obs],
+            self.est_shocks[obs, sim],
+            np.arange(len(agent_ids)),
+        )
 
     def price_batch(self, theta: np.ndarray, local_ids: np.ndarray) -> cb.DemandBatch:
-        ids, x, eps, rows = self._batch(local_ids)
+        ids, x, eps, rows = self.batch(local_ids)
         inside_values = (
             np.einsum("ijk,k->ij", x, theta[: self.C], optimize=True)
             + theta[self.C :]
@@ -104,7 +108,7 @@ class MarketDemand(cb.Oracle, cb.FeatureMap):
         best_inside = np.argmax(inside_values, axis=1)
         best_inside_values = inside_values[rows, best_inside]
         choose_inside = best_inside_values > outside_values
-        best = np.where(choose_inside, best_inside + 1, 0).astype(np.int32)
+        best = np.where(choose_inside, best_inside + 1, 0)
         payoffs = np.where(choose_inside, best_inside_values, outside_values)
         return cb.DemandBatch.exact(ids, best, payoffs)
 
@@ -115,36 +119,29 @@ class MarketDemand(cb.Oracle, cb.FeatureMap):
         weights: np.ndarray | None = None,
         aggregate: bool = False,
     ) -> tuple[np.ndarray, np.ndarray | float]:
-        ids, x, eps, rows = self._batch(ids)
-        bundles = np.asarray(bundles)
+        ids, x, eps, rows = self.batch(ids)
         if bundles.ndim == 1:
-            chosen = bundles.astype(np.int64, copy=False)
+            chosen = bundles
         else:
-            chosen = np.argmax(bundles, axis=1).astype(np.int64, copy=False)
+            chosen = np.argmax(bundles, axis=1)
         chosen_eps = eps[rows, chosen]
         inside_rows = np.flatnonzero(chosen > 0)
+        items = chosen[inside_rows] - 1
 
         if aggregate:
-            if weights is None:
-                raise ValueError("weights are required when aggregate=True")
-            w = np.asarray(weights, dtype=np.float64)
             phi = np.zeros(self.K, dtype=np.float64)
-            if inside_rows.size:
-                items = chosen[inside_rows] - 1
-                w_inside = w[inside_rows]
-                phi[: self.C] = w_inside @ x[inside_rows, items]
-                phi[self.C :] = np.bincount(
-                    items,
-                    weights=w_inside,
-                    minlength=self.J,
-                )
-            return phi, float(np.dot(w, chosen_eps))
+            w_inside = weights[inside_rows]
+            phi[: self.C] = w_inside @ x[inside_rows, items]
+            phi[self.C :] = np.bincount(
+                items,
+                weights=w_inside,
+                minlength=self.J,
+            )
+            return phi, np.dot(weights, chosen_eps)
 
         Phi = np.zeros((ids.size, self.K), dtype=np.float64)
-        if inside_rows.size:
-            items = chosen[inside_rows] - 1
-            Phi[inside_rows, : self.C] = x[inside_rows, items]
-            Phi[inside_rows, self.C + items] = 1.0
+        Phi[inside_rows, : self.C] = x[inside_rows, items]
+        Phi[inside_rows, self.C + items] = 1.0
         return Phi, chosen_eps
 
 
@@ -159,20 +156,20 @@ class MarketBlock:
 
     @property
     def t_values(self) -> np.ndarray:
-        return np.asarray(self.arrays["t_values"], dtype=np.int64)
+        return self.arrays["t_values"]
 
 
 def market_parameters(n_inside_items: int, bound: float = 4.0) -> cb.Parameters:
     return cb.Parameters(
         {
             "beta": (-3.0, 3.0, N_COVARIATES),
-            "item": (-bound, bound, int(n_inside_items)),
+            "item": (-bound, bound, n_inside_items),
         }
     )
 
 
 def _node_t_values(n_markets: int, node) -> np.ndarray:
-    return np.arange(node.node_id, int(n_markets), node.n_nodes, dtype=np.int64)
+    return np.arange(node.node_id, n_markets, node.n_nodes, dtype=np.int64)
 
 
 def _market_seed(seed: int, t: int) -> np.random.SeedSequence:
@@ -182,7 +179,7 @@ def _market_seed(seed: int, t: int) -> np.random.SeedSequence:
 def _empty_arrays(
     *, n_per_t: int, n_simulations: int, n_inside_items: int
 ) -> dict[str, np.ndarray]:
-    m = int(n_inside_items) + 1
+    m = n_inside_items + 1
     return {
         "t_values": np.empty(0, dtype=np.int64),
         "x": np.empty((0, n_per_t, n_inside_items, N_COVARIATES), dtype=np.float64),
@@ -204,7 +201,7 @@ def _one_market_arrays(
     seed: int,
 ) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(_market_seed(seed, t))
-    m = int(n_inside_items) + 1
+    m = n_inside_items + 1
     beta_true = np.array([0.65, -0.35, 0.2], dtype=np.float64)
 
     x = rng.normal(size=(n_per_t, n_inside_items, N_COVARIATES))
@@ -217,12 +214,12 @@ def _one_market_arrays(
 
     dgp_shocks = rng.normal(scale=SHOCK_SCALE, size=(n_per_t, m))
     est_shocks = rng.normal(scale=SHOCK_SCALE, size=(n_per_t, n_simulations, m))
-    observed_utilities = dgp_shocks.copy()
-    observed_utilities[:, 1:] += (
+    dgp_utilities = dgp_shocks.copy()
+    dgp_utilities[:, 1:] += (
         np.einsum("njc,c->nj", x, beta_true, optimize=True)
         + delta_true
     )
-    choice_labels = np.argmax(observed_utilities, axis=1)
+    choice_labels = np.argmax(dgp_utilities, axis=1)
     observed = np.eye(m, dtype=np.float64)[choice_labels]
 
     return {
@@ -338,13 +335,13 @@ def fit_t(
     t = int(arrays["t_values"][block_index])
     params = market_parameters(block.n_inside_items)
     oracle = MarketDemand(
-        x=np.asarray(arrays["x"][block_index], dtype=np.float64),
-        est_shocks=np.asarray(arrays["est_shocks"][block_index], dtype=np.float64),
+        x=arrays["x"][block_index],
+        est_shocks=arrays["est_shocks"][block_index],
     )
     data = cb.Data(
-        observed_bundles=np.asarray(arrays["observed"][block_index], dtype=np.float64),
-        shocks=np.asarray(arrays["est_shocks"][block_index], dtype=np.float64),
-        observables=np.arange(block.n_per_t, dtype=np.int64),
+        observed_bundles=arrays["observed"][block_index],
+        shocks=arrays["est_shocks"][block_index],
+        observables=np.arange(block.n_per_t),
     )
     activity = (
         cb.ActivityConfig(label=f"t-{t:02d}", level="summary", stdout=True)
@@ -358,20 +355,19 @@ def fit_t(
         transport=cb.SerialTransport(),
         master_backend="highs",
         master_params={"u_lower_bound": None},
-        max_iterations=int(max_iterations),
-        tolerance=float(tolerance),
+        max_iterations=max_iterations,
+        tolerance=tolerance,
         weights=np.full(
             block.n_per_t,
-            1.0 / float(block.n_per_t * block.n_simulations),
-            dtype=np.float64,
+            1.0 / (block.n_per_t * block.n_simulations),
         ),
         activity=activity,
     )
     theta = fit.theta_named()
-    beta_hat = np.asarray(theta["beta"], dtype=np.float64)
-    item_hat = np.asarray(theta["item"], dtype=np.float64)
-    beta_true = np.asarray(arrays["beta_true"], dtype=np.float64)
-    delta_true = np.asarray(arrays["delta_true"][block_index], dtype=np.float64)
+    beta_hat = theta["beta"]
+    item_hat = theta["item"]
+    beta_true = arrays["beta_true"]
+    delta_true = arrays["delta_true"][block_index]
     item_error = item_hat - delta_true
     return {
         "t": t,
@@ -385,10 +381,8 @@ def fit_t(
         "item_hat": item_hat.tolist(),
         "item_true": delta_true.tolist(),
         "item_rmse": float(np.sqrt(np.mean(item_error**2))),
-        "prices": np.asarray(arrays["prices"][block_index], dtype=np.float64).tolist(),
-        "instruments": np.asarray(
-            arrays["instruments"][block_index], dtype=np.float64
-        ).tolist(),
+        "prices": arrays["prices"][block_index].tolist(),
+        "instruments": arrays["instruments"][block_index].tolist(),
     }
 
 
@@ -408,7 +402,7 @@ def _gather_rows(
             gathered.extend(payload)
     if transport.rank != 0:
         return None
-    return sorted(gathered, key=lambda row: int(row["t"]))
+    return sorted(gathered, key=lambda row: row["t"])
 
 
 def summarize_rows(
@@ -502,7 +496,7 @@ def run_example(
     local_rows = [
         fit_t(
             block,
-            int(i),
+            i,
             max_iterations=max_iterations,
             tolerance=tolerance,
             progress=progress,

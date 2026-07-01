@@ -40,53 +40,48 @@ def main() -> None:
 
         observed = np.zeros((n_obs, n_items), dtype=np.float64)
         for i in range(n_obs):
-            scores = [
-                float(theta_true @ b + shocks[i, 0] @ b)
-                for b in bundles
-            ]
-            observed[i] = bundles[int(np.argmax(scores))]
+            scores = bundles @ (theta_true + shocks[i, 0])
+            observed[i] = bundles[np.argmax(scores)]
 
         class TinyOracle(cb.Oracle):
             def __init__(self, shocks: np.ndarray, bundles: np.ndarray) -> None:
-                self.shocks = np.asarray(shocks, dtype=np.float64)
-                self.bundles = np.asarray(bundles, dtype=np.float64)
+                self.shocks = shocks
+                self.bundles = bundles
                 self.n_obs = self.shocks.shape[0]
 
             def price(self, theta: np.ndarray, agent_id: int) -> cb.Demand:
-                i = int(agent_id) % self.n_obs
-                s = int(agent_id) // self.n_obs
-                scores = self.bundles @ np.asarray(theta, dtype=np.float64)
+                i = agent_id % self.n_obs
+                s = agent_id // self.n_obs
+                scores = self.bundles @ theta
                 scores = scores + self.bundles @ self.shocks[i, s]
-                j = int(np.argmax(scores))
-                return cb.Demand.exact(self.bundles[j], float(scores[j]))
+                j = np.argmax(scores)
+                return cb.Demand.exact(self.bundles[j], scores[j])
 
             def price_batch(
                 self, theta: np.ndarray, local_ids: np.ndarray
             ) -> dict[int, cb.Demand]:
                 return {
-                    int(agent_id): self.price(theta, int(agent_id))
-                    for agent_id in np.asarray(local_ids, dtype=np.int64)
+                    agent_id: self.price(theta, agent_id)
+                    for agent_id in local_ids
                 }
 
         class BundleFeatures(cb.FeatureMap):
             def setup_observed(
                 self, transport: cb.Transport, observation_ids: np.ndarray
             ) -> None:
-                self.observation_ids = np.asarray(observation_ids, dtype=np.int64)
+                pass
 
             def features(
                 self, agent_id: int, bundle: np.ndarray
             ) -> tuple[np.ndarray, float]:
-                i = int(agent_id) % n_obs
-                s = int(agent_id) // n_obs
-                b = np.asarray(bundle, dtype=np.float64)
-                return b, float(shocks[i, s] @ b)
+                i = agent_id % n_obs
+                s = agent_id // n_obs
+                return bundle, shocks[i, s] @ bundle
 
             def observed_features_batch(
                 self, observation_ids: np.ndarray
             ) -> np.ndarray:
-                ids = np.asarray(observation_ids, dtype=np.int64)
-                return np.ascontiguousarray(observed[ids], dtype=np.float64)
+                return np.ascontiguousarray(observed[observation_ids], dtype=np.float64)
 
         params = cb.Parameters({"taste": (-2.0, 2.0, n_items)})
         features = BundleFeatures()
