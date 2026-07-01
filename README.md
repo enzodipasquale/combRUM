@@ -103,6 +103,9 @@ indices are wave-local.
 - `notebooks/05_peer_effects_large_network.ipynb`: large-network peer-effects
   example with MPI row generation and a persistent NSlack master over a sigma
   grid.
+- `notebooks/06_combinatorial_auction.ipynb`: combinatorial auction with
+  assignment valuations. This is not an estimation notebook. It uses the
+  row-generation algorithm in combRUM to compute Walrasian prices and allocation.
 
 The BLP and network-formation notebooks are substantive applied examples and
 can take longer than the quickstart. The OneSlack notebook is the larger
