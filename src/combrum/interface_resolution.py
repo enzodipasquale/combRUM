@@ -29,11 +29,7 @@ CONTINUOUS_TOL: float = 1e-13
 def _continuous_drift(opt: np.ndarray, ref: np.ndarray) -> float:
     if not opt.size:
         return 0.0
-    same_inf = (
-        np.isinf(opt)
-        & np.isinf(ref)
-        & (np.signbit(opt) == np.signbit(ref))
-    )
+    same_inf = np.isinf(opt) & np.isinf(ref) & (np.signbit(opt) == np.signbit(ref))
     diff = np.zeros_like(opt, dtype=np.float64)
     np.subtract(opt, ref, out=diff, where=~same_inf)
     return float(np.max(np.abs(diff)))
@@ -87,8 +83,7 @@ class Resolution:
 def needs_conformance_guard(*resolutions: object) -> bool:
     """Whether any resolved method pair can run a strict BOTH check."""
     return any(
-        getattr(resolution, "mode", None) is Mode.BOTH
-        for resolution in resolutions
+        getattr(resolution, "mode", None) is Mode.BOTH for resolution in resolutions
     )
 
 
@@ -258,14 +253,14 @@ def assert_conforms(
             f"method-pair conformance for {surface!r}: optimized produced"
             f" {len(optimized)} items, per-agent produced {len(reference)}"
         )
-    for pos, (opt_fields, ref_fields) in enumerate(
-        zip(optimized, reference)
-    ):
+    for pos, (opt_fields, ref_fields) in enumerate(zip(optimized, reference)):
         for idx in discrete:
             opt = np.asarray(opt_fields[idx])
             ref = np.asarray(ref_fields[idx])
-            if opt.shape != ref.shape or opt.dtype != ref.dtype or not (
-                opt.tobytes() == ref.tobytes()
+            if (
+                opt.shape != ref.shape
+                or opt.dtype != ref.dtype
+                or not (opt.tobytes() == ref.tobytes())
             ):
                 raise AssertionError(
                     f"method-pair conformance for {surface!r}: discrete field"
@@ -292,9 +287,8 @@ def assert_conforms(
 
 # Type alias for FeatureMap.features_batch, the batched feature-row surface.
 # (Batch pricing is a separate surface, Oracle.price_batch.)
-FeatureMapBatch = Callable[
-    [np.ndarray, np.ndarray], "tuple[np.ndarray, np.ndarray]"
-]
+FeatureMapBatch = Callable[[np.ndarray, np.ndarray], "tuple[np.ndarray, np.ndarray]"]
+
 
 class FeatureMap:
     """Base class for the features surface.
@@ -313,13 +307,10 @@ class FeatureMap:
     per-agent member is the divergence fallback.
     """
 
-    def features(
-        self, agent_id: int, bundle: np.ndarray
-    ) -> tuple[np.ndarray, float]:
+    def features(self, agent_id: int, bundle: np.ndarray) -> tuple[np.ndarray, float]:
         """Per-agent feature row ``(phi (K,), eps)``; default raises."""
         raise NotImplementedError(
-            "FeatureMap.features is not overridden;"
-            " override features or features_batch"
+            "FeatureMap.features is not overridden; override features or features_batch"
         )
 
     def features_batch(
@@ -468,8 +459,7 @@ def _batched_rows(
             f" {len(ids)} ids; the batch return must be in ids order"
         )
     return [
-        (np.ascontiguousarray(phi_mat[r]), float(eps_vec[r]))
-        for r in range(len(ids))
+        (np.ascontiguousarray(phi_mat[r]), float(eps_vec[r])) for r in range(len(ids))
     ]
 
 

@@ -38,10 +38,10 @@ from combrum.engine.agreement import (
     callback_convergence_floor,
     collective_call,
 )
-from combrum.interface_resolution import Resolution, resolve
 from combrum.engine.fitstep import fit_step
 from combrum.formulation import FormulationResult
 from combrum.informed_schedule import DualConcentration
+from combrum.interface_resolution import Resolution, resolve
 from combrum.oracle import Oracle
 from combrum.rowgen import RowGenStep
 from combrum.schedule import RepricingSchedule, ResolveAll
@@ -123,13 +123,11 @@ def _validate_loop_controls(
     # published duals would be multipliers of a penalized problem.
     if qp_value > 0.0 and decay <= 0:
         raise ValueError(
-            "qp_weight>0 needs decay>=1 so the weight reaches 0;"
-            f" got decay={decay!r}"
+            f"qp_weight>0 needs decay>=1 so the weight reaches 0; got decay={decay!r}"
         )
     if penalty_ref not in ("dynamic", "static"):
         raise ValueError(
-            "penalty_ref must be 'dynamic' or 'static';"
-            f" got {penalty_ref!r}"
+            f"penalty_ref must be 'dynamic' or 'static'; got {penalty_ref!r}"
         )
 
 
@@ -318,9 +316,7 @@ def run_fit(
     # Last iteration each agent was re-priced; only scheduled fits need this
     # dense bookkeeping.
     last_resolved = (
-        np.full(n_agents, -1, dtype=np.int64)
-        if schedule is not None
-        else None
+        np.full(n_agents, -1, dtype=np.int64) if schedule is not None else None
     )
     # First sweep is always full: no dual signal yet, and a partial sweep that
     # reports convergence must be re-certified by a full sweep (unpriced agents
@@ -335,9 +331,7 @@ def run_fit(
     last_violation: float | None = None
     last_logged_gap: float | None = None
     try:
-        collective_call(
-            transport, lambda: oracle.setup(transport, local_ids)
-        )
+        collective_call(transport, lambda: oracle.setup(transport, local_ids))
         formulation.setup(ctx)
         # Resolve the price interface once, after setup's collective.
         price_resolution = _resolve_price(oracle, transport)
@@ -367,9 +361,7 @@ def run_fit(
                     if transport.rank != owner_rank:
                         return None
                     assert master is not None
-                    return DualConcentration.from_cut_duals(
-                        master.dual_values()
-                    )
+                    return DualConcentration.from_cut_duals(master.dual_values())
 
                 payload = collective_call(transport, _dual_payload)
                 payload = transport.bcast(payload, root=owner_rank)
@@ -468,9 +460,7 @@ def run_fit(
                             if last_logged_gap is None
                             else float(step.violation) - last_logged_gap
                         ),
-                        objective=(
-                            None if objective is None else float(objective)
-                        ),
+                        objective=(None if objective is None else float(objective)),
                         active_cuts=int(active_cuts),
                         cuts_added=int(step.progressed),
                         violation_count=int(step.n_candidates),
@@ -487,9 +477,7 @@ def run_fit(
                         ),
                         price_seconds=float(step.pricing_seconds),
                         master_seconds=float(step.master_seconds),
-                        iteration_seconds=(
-                            float(now - iter_t0) if iter_t0 else None
-                        ),
+                        iteration_seconds=(float(now - iter_t0) if iter_t0 else None),
                         total_seconds=(
                             float(now - run_t0) if run_t0 is not None else None
                         ),
@@ -526,9 +514,11 @@ def run_fit(
                     termination_reason=(
                         "converged"
                         if converged
-                        else "max_iterations"
-                        if iterations >= max_iterations
-                        else "stopped"
+                        else (
+                            "max_iterations"
+                            if iterations >= max_iterations
+                            else "stopped"
+                        )
                     ),
                     iterations=int(iterations),
                     final_gap=last_violation,

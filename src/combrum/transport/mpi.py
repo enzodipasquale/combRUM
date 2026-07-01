@@ -30,10 +30,20 @@ import numpy as np
 from combrum.reductions import canonical_sum, canonical_sum_window_rows
 from combrum.transport._common import (
     agent_owner_rank as _agent_owner_rank,
-    route_geometry_validated as _route_geometry_validated,
-    route_local_ids_shape_validated as _route_local_ids_shape_validated,
-    route_values_validated as _route_values_validated,
+)
+from combrum.transport._common import (
     ids_validated as _ids_validated,
+)
+from combrum.transport._common import (
+    route_geometry_validated as _route_geometry_validated,
+)
+from combrum.transport._common import (
+    route_local_ids_shape_validated as _route_local_ids_shape_validated,
+)
+from combrum.transport._common import (
+    route_values_validated as _route_values_validated,
+)
+from combrum.transport._common import (
     scatter_arrays_validated as _scatter_arrays_validated,
 )
 from combrum.transport.base import (
@@ -99,8 +109,7 @@ def _chunk_spans(
         return []
     rows_per = max(1, chunk_bytes // row_nbytes)
     return [
-        (start, min(start + rows_per, n_rows))
-        for start in range(0, n_rows, rows_per)
+        (start, min(start + rows_per, n_rows)) for start in range(0, n_rows, rows_per)
     ]
 
 
@@ -130,14 +139,10 @@ def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
     rows: list[CutRow] = []
     offset = 0
     while offset < len(view):
-        rep_id, agent_id, epsilon, k, key_len = _CUT_HEADER.unpack_from(
-            view, offset
-        )
+        rep_id, agent_id, epsilon, k, key_len = _CUT_HEADER.unpack_from(view, offset)
         offset += _CUT_HEADER.size
         # Copy detaches phi so a row does not pin the whole receive buffer.
-        phi = np.frombuffer(
-            view, dtype=np.float64, count=k, offset=offset
-        ).copy()
+        phi = np.frombuffer(view, dtype=np.float64, count=k, offset=offset).copy()
         offset += 8 * k
         key = bytes(view[offset : offset + key_len])
         offset += key_len
@@ -169,8 +174,7 @@ def _scatter_verdict(
     try:
         if arrays is None:
             raise ValueError(
-                f"scatter_by_agent: rank {root} must pass the full arrays;"
-                " got None"
+                f"scatter_by_agent: rank {root} must pass the full arrays; got None"
             )
         for r in range(size):
             if r == root:
@@ -183,10 +187,7 @@ def _scatter_verdict(
         normalized, n_global = _scatter_arrays_validated(arrays)
         for _, ids in gathered:
             _ids_validated(ids, n_global, "scatter_by_agent")
-        header = [
-            (key, full.dtype, full.shape[1:])
-            for key, full in normalized.items()
-        ]
+        header = [(key, full.dtype, full.shape[1:]) for key, full in normalized.items()]
         return normalized, ("ok", header)
     except ValueError as exc:
         return {}, ("error", str(exc))
@@ -206,16 +207,13 @@ def _node_arrays_validated(arrays: object) -> dict[str, np.ndarray]:
     staged: dict[str, np.ndarray] = {}
     for key, value in arrays.items():
         if not isinstance(key, str):
-            raise ValueError(
-                f"node_shared: array keys must be str; got {key!r}"
-            )
+            raise ValueError(f"node_shared: array keys must be str; got {key!r}")
         arr = np.asarray(value)
         if arr.dtype == object:
             # Read-only flags cannot protect object-array contents, so a
             # shared object array would break the immutable-copy promise.
             raise ValueError(
-                f"node_shared: array {key!r} must be numeric;"
-                " got dtype object"
+                f"node_shared: array {key!r} must be numeric; got dtype object"
             )
         staged[key] = arr
     return staged
@@ -262,8 +260,7 @@ class MpiTransport(Transport):
         mpi = _mpi()
         if scatter_chunk_bytes < 1:
             raise ValueError(
-                "scatter_chunk_bytes must be >= 1;"
-                f" got {scatter_chunk_bytes}"
+                f"scatter_chunk_bytes must be >= 1; got {scatter_chunk_bytes}"
             )
         self._mpi: Any = mpi
         self._comm: Intracomm = mpi.COMM_WORLD if comm is None else comm
@@ -274,9 +271,7 @@ class MpiTransport(Transport):
         self._size: int = int(self._comm.Get_size())
         # Ranks sharing a memory domain form one node.
         self._tick("split_type")
-        self._node_comm: Intracomm | None = self._comm.Split_type(
-            mpi.COMM_TYPE_SHARED
-        )
+        self._node_comm: Intracomm | None = self._comm.Split_type(mpi.COMM_TYPE_SHARED)
         node_rank = int(self._node_comm.Get_rank())
         node_size = int(self._node_comm.Get_size())
         # Split_type breaks key ties by parent rank, so in-node rank 0 is the
@@ -377,13 +372,9 @@ class MpiTransport(Transport):
         # received copies are private; the root gets its own object back.
         return self._comm.bcast(obj if self._rank == root else None, root=root)
 
-    def send_to_root(
-        self, obj: _T | None, *, source: int, root: int = 0
-    ) -> _T | None:
+    def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         if not 0 <= source < self._size:
-            raise ValueError(
-                f"source must lie in [0, {self._size}); got {source}"
-            )
+            raise ValueError(f"source must lie in [0, {self._size}); got {source}")
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}); got {root}")
         if source == root:
@@ -453,9 +444,7 @@ class MpiTransport(Transport):
         comm.Allgather([meta_local, mpi.INT64_T], [meta, mpi.INT64_T])
         counts = meta[:, 0]
         non_empty = counts > 0
-        non_empty_shapes = {
-            (bool(row[1]), int(row[2])) for row in meta[non_empty]
-        }
+        non_empty_shapes = {(bool(row[1]), int(row[2])) for row in meta[non_empty]}
         if len(non_empty_shapes) > 1:
             raise ValueError(
                 "sum_reproducible: non-empty ranks must agree on"
@@ -592,9 +581,7 @@ class MpiTransport(Transport):
         if tag == "error":
             raise ValueError(header)
         if self._rank == root and gathered is not None:
-            return self._scatter_stream_root(
-                normalized, gathered, chunk_bytes, root
-            )
+            return self._scatter_stream_root(normalized, gathered, chunk_bytes, root)
         return self._scatter_recv(header, int(ids.shape[0]), chunk_bytes, root)
 
     def _scatter_stream_root(
@@ -624,9 +611,7 @@ class MpiTransport(Transport):
             own.setflags(write=False)
             out[key] = own
             spans = [
-                _chunk_spans(
-                    int(np.asarray(ids).shape[0]), row_nbytes, chunk_bytes
-                )
+                _chunk_spans(int(np.asarray(ids).shape[0]), row_nbytes, chunk_bytes)
                 for _, ids in gathered
             ]
             depth = max(
@@ -668,9 +653,7 @@ class MpiTransport(Transport):
         byte = self._mpi.BYTE
         out: dict[str, np.ndarray] = {}
         for key, dtype, trailing in header:
-            row_nbytes = int(dtype.itemsize) * int(
-                np.prod(trailing, dtype=np.int64)
-            )
+            row_nbytes = int(dtype.itemsize) * int(np.prod(trailing, dtype=np.int64))
             recv = np.empty((n_local, *trailing), dtype=dtype)
             for start, stop in _chunk_spans(n_local, row_nbytes, chunk_bytes):
                 self._tick("p2p_recv")
@@ -710,9 +693,7 @@ class MpiTransport(Transport):
                 "gather_agent_values: values and global_ids must have the same"
                 f" shape; rank {self._rank} has {vals.shape} and {ids.shape}"
             )
-        if ids.size and (
-            int(ids.min()) < 0 or int(ids.max()) >= int(n_global)
-        ):
+        if ids.size and (int(ids.min()) < 0 or int(ids.max()) >= int(n_global)):
             raise ValueError(
                 "gather_agent_values: global_ids must lie in"
                 f" [0, {n_global}); rank {self._rank} got range"
@@ -722,9 +703,7 @@ class MpiTransport(Transport):
         meta_local = np.array([vals.size, int(n_global)], dtype=np.int64)
         meta = np.empty((self._size, 2), dtype=np.int64)
         self._tick("allgather")
-        self._comm.Allgather(
-            [meta_local, self._mpi.INT64_T], [meta, self._mpi.INT64_T]
-        )
+        self._comm.Allgather([meta_local, self._mpi.INT64_T], [meta, self._mpi.INT64_T])
         sizes = set(int(v) for v in meta[:, 1])
         if len(sizes) != 1:
             raise ValueError(
@@ -788,13 +767,11 @@ class MpiTransport(Transport):
         self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
         if int(out[0]) != -int(out[1]):
             raise ValueError(
-                "route_agent_values: n_observations must be identical on"
-                " every rank"
+                "route_agent_values: n_observations must be identical on every rank"
             )
         if int(out[2]) != -int(out[3]):
             raise ValueError(
-                "route_agent_values: n_simulations must be identical on"
-                " every rank"
+                "route_agent_values: n_simulations must be identical on every rank"
             )
         if int(out[4]) != -int(out[5]):
             raise ValueError(
@@ -865,15 +842,11 @@ class MpiTransport(Transport):
         n_agents = n_obs * n_sims
 
         if self._rank == src:
-            buckets: list[list[tuple[int, float]]] = [
-                [] for _ in range(self._size)
-            ]
+            buckets: list[list[tuple[int, float]]] = [[] for _ in range(self._size)]
             for gid, value in sorted(normalized.items()):
                 owner = _agent_owner_rank(gid, n_obs, self._size)
                 buckets[owner].append((gid, value))
-            send_counts = np.array(
-                [len(bucket) for bucket in buckets], dtype=np.int64
-            )
+            send_counts = np.array([len(bucket) for bucket in buckets], dtype=np.int64)
             send = np.empty(int(send_counts.sum()), dtype=_ROUTE_VALUE_DTYPE)
             offset = 0
             for bucket in buckets:
@@ -890,12 +863,8 @@ class MpiTransport(Transport):
         itemsize = int(_ROUTE_VALUE_DTYPE.itemsize)
         send_byte_counts = send_counts * itemsize
         recv_byte_counts = recv_counts * itemsize
-        send_byte_displs = np.concatenate(
-            ([0], np.cumsum(send_byte_counts)[:-1])
-        )
-        recv_byte_displs = np.concatenate(
-            ([0], np.cumsum(recv_byte_counts)[:-1])
-        )
+        send_byte_displs = np.concatenate(([0], np.cumsum(send_byte_counts)[:-1]))
+        recv_byte_displs = np.concatenate(([0], np.cumsum(recv_byte_counts)[:-1]))
         recv = np.empty(int(recv_counts.sum()), dtype=_ROUTE_VALUE_DTYPE)
         byte = self._mpi.BYTE
         self._tick("alltoallv")
@@ -914,17 +883,14 @@ class MpiTransport(Transport):
                 break
             if _agent_owner_rank(gid, n_obs, self._size) != self._rank:
                 local_error = (
-                    f"{what}: received agent {gid} on non-owner rank"
-                    f" {self._rank}"
+                    f"{what}: received agent {gid} on non-owner rank {self._rank}"
                 )
                 break
             out[gid] = value
         self._agree_route_error(local_error)
         return out
 
-    def node_shared(
-        self, arrays: dict[str, np.ndarray]
-    ) -> Mapping[str, np.ndarray]:
+    def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         node_comm = self._node_comm
         if node_comm is None:
             raise RuntimeError(
@@ -949,8 +915,7 @@ class MpiTransport(Transport):
             # allgather is rank-ordered, so `next` elects the lowest failer.
             origin, message = failure
             raise ValueError(
-                f"node_shared: publishing failed on rank {origin}:"
-                f" {message}"
+                f"node_shared: publishing failed on rank {origin}: {message}"
             )
         # The publisher alone defines the layout; peers learn it in one
         # node-local broadcast.
@@ -974,9 +939,7 @@ class MpiTransport(Transport):
         buf, _ = win.Shared_query(0)
         if self._node.node_rank == 0:
             writable = memoryview(buf)
-            for (_key, dtype, shape, offset), src in zip(
-                layout, staged.values()
-            ):
+            for (_key, dtype, shape, offset), src in zip(layout, staged.values()):
                 count = int(np.prod(shape, dtype=np.int64))
                 dest = np.frombuffer(
                     writable, dtype=dtype, count=count, offset=offset
@@ -1064,9 +1027,7 @@ class MpiTransport(Transport):
             canon = np.empty(0, dtype=np.int64)
         else:
             canon = np.ascontiguousarray(arr, dtype=np.int64)
-            if canon.size and (
-                int(canon.min()) < 0 or int(canon.max()) >= self._size
-            ):
+            if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= self._size):
                 error = (
                     "owner_sum: owners must lie in [0, size) ="
                     f" [0, {self._size}); got range"
@@ -1113,8 +1074,7 @@ class MpiTransport(Transport):
             )
         if int(out[3]) != -int(out[4]) or int(out[5]) != -int(out[6]):
             raise ValueError(
-                "owner_sum: values must have the same (B, M) shape on"
-                " every rank"
+                "owner_sum: values must have the same (B, M) shape on every rank"
             )
         return np.ascontiguousarray(vals, dtype=np.float64), canon
 
@@ -1132,9 +1092,7 @@ class MpiTransport(Transport):
             canon = np.empty(0, dtype=np.int64)
         else:
             canon = np.ascontiguousarray(arr, dtype=np.int64)
-            if canon.size and (
-                int(canon.min()) < 0 or int(canon.max()) >= self._size
-            ):
+            if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= self._size):
                 error = (
                     "exchange_cuts: owners must lie in"
                     f" [0, size) = [0, {self._size}); got range"

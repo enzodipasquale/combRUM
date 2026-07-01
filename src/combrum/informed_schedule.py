@@ -50,9 +50,7 @@ class DualConcentration:
 
     def __post_init__(self) -> None:
         agent_ids = np.array(self.agent_ids)
-        if agent_ids.ndim != 1 or not np.issubdtype(
-            agent_ids.dtype, np.integer
-        ):
+        if agent_ids.ndim != 1 or not np.issubdtype(agent_ids.dtype, np.integer):
             raise ValueError(
                 "agent_ids must be a 1-D integer array;"
                 f" got shape {agent_ids.shape}, dtype {agent_ids.dtype}"
@@ -60,15 +58,13 @@ class DualConcentration:
         if agent_ids.size:
             if int(agent_ids.min()) < 0:
                 raise ValueError(
-                    f"agent_ids must be >= 0;"
-                    f" got {agent_ids[agent_ids < 0].tolist()}"
+                    f"agent_ids must be >= 0; got {agent_ids[agent_ids < 0].tolist()}"
                 )
             if np.any(np.diff(agent_ids) <= 0):
                 # Strictly increasing ids keep serialization deterministic:
                 # equal dual states produce equal payload bytes.
                 raise ValueError(
-                    "agent_ids must be strictly increasing;"
-                    f" got {agent_ids.tolist()}"
+                    f"agent_ids must be strictly increasing; got {agent_ids.tolist()}"
                 )
         max_weights = np.array(self.max_weights, dtype=np.float64)
         if max_weights.shape != agent_ids.shape:
@@ -83,9 +79,7 @@ class DualConcentration:
                 "max_weights are normalized single-cut shares and must"
                 f" lie in (0, 1]; got {max_weights.tolist()}"
             )
-        object.__setattr__(
-            self, "agent_ids", _frozen(agent_ids.astype(np.int64))
-        )
+        object.__setattr__(self, "agent_ids", _frozen(agent_ids.astype(np.int64)))
         object.__setattr__(self, "max_weights", _frozen(max_weights))
 
     @classmethod
@@ -106,10 +100,7 @@ class DualConcentration:
             if pi > _SUPPORT_ATOL:
                 per_agent.setdefault(int(agent_id), []).append(float(pi))
         agent_ids = sorted(per_agent)
-        weights = [
-            max(per_agent[agent]) / sum(per_agent[agent])
-            for agent in agent_ids
-        ]
+        weights = [max(per_agent[agent]) / sum(per_agent[agent]) for agent in agent_ids]
         return cls(
             agent_ids=np.asarray(agent_ids, dtype=np.int64),
             max_weights=np.asarray(weights, dtype=np.float64),
@@ -161,13 +152,10 @@ class DualInformed(RepricingSchedule):
             return np.ones(n_agents, dtype=bool)
         if not isinstance(dual, DualConcentration):
             raise ValueError(
-                "dual must be a DualConcentration payload;"
-                f" got {type(dual).__name__}"
+                f"dual must be a DualConcentration payload; got {type(dual).__name__}"
             )
         last = np.asarray(last_resolved)
-        if last.shape != (n_agents,) or not np.issubdtype(
-            last.dtype, np.integer
-        ):
+        if last.shape != (n_agents,) or not np.issubdtype(last.dtype, np.integer):
             raise ValueError(
                 "last_resolved must be a (n_agents,) integer array;"
                 f" got shape {last.shape}, dtype {last.dtype}"

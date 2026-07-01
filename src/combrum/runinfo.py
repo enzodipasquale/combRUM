@@ -121,6 +121,7 @@ def collect_provenance(
     """
     try:
         from mpi4py import MPI as _MPI  # noqa: PLC0415
+
         mpi_lib: str | None = _MPI.Get_library_version()
     except ImportError:
         mpi_lib = None
@@ -140,6 +141,7 @@ def collect_provenance(
 
     try:
         import gurobipy as _grb  # noqa: PLC0415
+
         _v = _grb.gurobi.version()
         gurobi_version: str | None = ".".join(str(x) for x in _v)
     except Exception:

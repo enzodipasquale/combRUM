@@ -66,9 +66,7 @@ class GapTally:
                     worst = gap
         self.observe_counts(priced, inexact, worst)
 
-    def observe_counts(
-        self, n_priced: int, n_inexact: int, worst_gap: float
-    ) -> None:
+    def observe_counts(self, n_priced: int, n_inexact: int, worst_gap: float) -> None:
         """Fold pre-counted price-phase gap totals into the tally."""
         self._n_priced += int(n_priced)
         self._n_inexact += int(n_inexact)

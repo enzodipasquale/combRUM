@@ -142,6 +142,7 @@ def fit_step(
 
     Returns the :class:`StepResult`.
     """
+
     def _price_and_contribute():
         demands: Mapping[int, Demand] = price_demands(
             price_resolution, theta, scheduled_local_ids
@@ -153,9 +154,7 @@ def fit_step(
             gap_arr = np.asarray(gaps, dtype=np.float64)
             inexact = gap_arr > 0.0
             n_inexact = int(np.count_nonzero(inexact))
-            worst_gap = (
-                float(np.max(gap_arr[inexact])) if n_inexact else 0.0
-            )
+            worst_gap = float(np.max(gap_arr[inexact])) if n_inexact else 0.0
         else:
             n_inexact = 0
             worst_gap = 0.0
@@ -189,16 +188,12 @@ def fit_step(
                 worst_gap,
             ) = _price_and_contribute()
     else:
-        demands, contribution, n_priced, n_inexact, worst_gap = (
-            _price_and_contribute()
-        )
+        demands, contribution, n_priced, n_inexact, worst_gap = _price_and_contribute()
     price_t1 = time.perf_counter()
     reduced, reduce_rounds, exchange_rounds = reduce_contribution(
         transport, contribution, owner_rank=owner_rank
     )
-    n_candidates = (
-        len(reduced.received_rows) if isinstance(reduced, MaxReduced) else 1
-    )
+    n_candidates = len(reduced.received_rows) if isinstance(reduced, MaxReduced) else 1
     outcome: StepOutcome = formulation.finalise(reduced)
     master_t0 = time.perf_counter()
     if before_apply is not None:

@@ -25,11 +25,21 @@ import numpy as np
 
 from combrum.reductions import canonical_sum
 from combrum.transport._common import (
-    route_bucket_for_rank as _route_bucket_for_rank,
-    route_geometry_validated as _route_geometry_validated,
-    route_local_ids_shape_validated as _route_local_ids_shape_validated,
-    route_values_validated as _route_values_validated,
     ids_validated as _ids_validated,
+)
+from combrum.transport._common import (
+    route_bucket_for_rank as _route_bucket_for_rank,
+)
+from combrum.transport._common import (
+    route_geometry_validated as _route_geometry_validated,
+)
+from combrum.transport._common import (
+    route_local_ids_shape_validated as _route_local_ids_shape_validated,
+)
+from combrum.transport._common import (
+    route_values_validated as _route_values_validated,
+)
+from combrum.transport._common import (
     scatter_arrays_validated as _scatter_arrays_validated,
 )
 from combrum.transport.base import (
@@ -250,9 +260,7 @@ def _combine_agent_values(
         values_parts.append(vals)
         ids_parts.append(gids.astype(np.int64, copy=False))
     all_ids = (
-        np.concatenate(ids_parts, axis=0)
-        if ids_parts
-        else np.empty(0, dtype=np.int64)
+        np.concatenate(ids_parts, axis=0) if ids_parts else np.empty(0, dtype=np.int64)
     )
     if all_ids.size:
         unique, counts = np.unique(all_ids, return_counts=True)
@@ -286,16 +294,13 @@ def _publish_node_arrays(arrays: object) -> dict[str, np.ndarray]:
     published: dict[str, np.ndarray] = {}
     for key, value in arrays.items():
         if not isinstance(key, str):
-            raise ValueError(
-                f"node_shared: array keys must be str; got {key!r}"
-            )
+            raise ValueError(f"node_shared: array keys must be str; got {key!r}")
         buf = np.array(value, copy=True)
         if buf.dtype == object:
             # Read-only flags do not protect object-array contents, so
             # sharing one would break immutability.
             raise ValueError(
-                f"node_shared: array {key!r} must be numeric;"
-                " got dtype object"
+                f"node_shared: array {key!r} must be numeric; got dtype object"
             )
         published[key] = _readonly(buf)
     return published
@@ -306,9 +311,7 @@ def _node_view(
 ) -> Mapping[str, np.ndarray]:
     # Per-rank views over one read-only base: the in-process analogue of a
     # node-shared memory window.
-    return MappingProxyType(
-        {key: value.view() for key, value in published.items()}
-    )
+    return MappingProxyType({key: value.view() for key, value in published.items()})
 
 
 # serial double
@@ -347,9 +350,7 @@ class SerialTransport(Transport):
             raise ValueError(f"root must lie in [0, 1); got {root}")
         return obj  # type: ignore[return-value]
 
-    def send_to_root(
-        self, obj: _T | None, *, source: int, root: int = 0
-    ) -> _T | None:
+    def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         if source != 0:
             raise ValueError(f"source must lie in [0, 1); got {source}")
         if root != 0:
@@ -378,8 +379,7 @@ class SerialTransport(Transport):
             raise ValueError(f"root must lie in [0, 1); got {root}")
         if arrays is None:
             raise ValueError(
-                "scatter_by_agent: rank 0 must pass the full arrays;"
-                " got None"
+                "scatter_by_agent: rank 0 must pass the full arrays; got None"
             )
         normalized, n_global = _scatter_arrays_validated(arrays)
         ids = _ids_validated(local_ids, n_global, "scatter_by_agent")
@@ -426,9 +426,7 @@ class SerialTransport(Transport):
         )
         return bucket
 
-    def node_shared(
-        self, arrays: dict[str, np.ndarray]
-    ) -> Mapping[str, np.ndarray]:
+    def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         return _node_view(_publish_node_arrays(arrays))
 
     def batched_max(self, values: np.ndarray) -> np.ndarray:
@@ -465,9 +463,7 @@ class _Rendezvous:
         self._slots: list[tuple[str, object] | None] = [None] * size
         self._barrier = threading.Barrier(size, timeout=timeout)
 
-    def exchange(
-        self, rank: int, tag: str, payload: object
-    ) -> tuple[object, ...]:
+    def exchange(self, rank: int, tag: str, payload: object) -> tuple[object, ...]:
         self._slots[rank] = (tag, payload)
         self._wait(rank)
         snapshot = tuple(self._slots)
@@ -542,9 +538,7 @@ class LocalMultirankTransport(Transport):
             verdict = (exc.rank, exc.message)
         else:
             verdict = (self._rank, f"{type(exc).__name__}: {exc}")
-        gathered = self._rendezvous.exchange(
-            self._rank, "collective.agree", verdict
-        )
+        gathered = self._rendezvous.exchange(self._rank, "collective.agree", verdict)
         failures = [v for v in gathered if v is not None]
         if failures:
             # Rank-ordered slots: lowest-ranked report is the same agreed
@@ -564,13 +558,9 @@ class LocalMultirankTransport(Transport):
         # mutate another's state, a coupling no real transport has.
         return copy.deepcopy(gathered[root])  # type: ignore[return-value]
 
-    def send_to_root(
-        self, obj: _T | None, *, source: int, root: int = 0
-    ) -> _T | None:
+    def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         if not 0 <= source < self._size:
-            raise ValueError(
-                f"source must lie in [0, {self._size}); got {source}"
-            )
+            raise ValueError(f"source must lie in [0, {self._size}); got {source}")
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}); got {root}")
         gathered = self._rendezvous.exchange(
@@ -584,9 +574,7 @@ class LocalMultirankTransport(Transport):
         return obj if source == root else copy.deepcopy(payload)  # type: ignore[return-value]
 
     def allreduce_max(self, value: float) -> float:
-        gathered = self._rendezvous.exchange(
-            self._rank, "allreduce_max", float(value)
-        )
+        gathered = self._rendezvous.exchange(self._rank, "allreduce_max", float(value))
         return float(np.max(np.asarray(gathered, dtype=np.float64)))
 
     def sum_reproducible(
@@ -596,9 +584,7 @@ class LocalMultirankTransport(Transport):
             np.asarray(values, dtype=np.float64),
             np.asarray(global_ids),
         )
-        gathered = self._rendezvous.exchange(
-            self._rank, "sum_reproducible", payload
-        )
+        gathered = self._rendezvous.exchange(self._rank, "sum_reproducible", payload)
         return _combine_sum(
             [entry[0] for entry in gathered],  # type: ignore[index]
             [entry[1] for entry in gathered],  # type: ignore[index]
@@ -635,8 +621,7 @@ class LocalMultirankTransport(Transport):
                 )
         if root_arrays is None:
             raise ValueError(
-                f"scatter_by_agent: rank {root} must pass the full arrays;"
-                " got None"
+                f"scatter_by_agent: rank {root} must pass the full arrays; got None"
             )
         normalized, n_global = _scatter_arrays_validated(root_arrays)
         # Validate every rank's ids on every rank: a divergent caller bug
@@ -695,9 +680,7 @@ class LocalMultirankTransport(Transport):
             n_simulations,
             source,
         )
-        gathered = self._rendezvous.exchange(
-            self._rank, "route_agent_values", payload
-        )
+        gathered = self._rendezvous.exchange(self._rank, "route_agent_values", payload)
         geometries = {
             (entry[2], entry[3], entry[4]) for entry in gathered  # type: ignore[index]
         }
@@ -716,7 +699,8 @@ class LocalMultirankTransport(Transport):
         )
         for entry in gathered:
             _route_local_ids_shape_validated(
-                entry[1], what="route_agent_values"  # type: ignore[index]
+                entry[1],
+                what="route_agent_values",  # type: ignore[index]
             )
         normalized_by_rank = [
             _route_values_validated(
@@ -737,9 +721,7 @@ class LocalMultirankTransport(Transport):
         )
         return bucket
 
-    def node_shared(
-        self, arrays: dict[str, np.ndarray]
-    ) -> Mapping[str, np.ndarray]:
+    def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         if self._node.node_rank == 0:
             try:
                 payload: tuple[str, object] = (
@@ -752,9 +734,7 @@ class LocalMultirankTransport(Transport):
                 payload = ("error", f"{type(exc).__name__}: {exc}")
         else:
             payload = ("peer", None)
-        gathered = self._rendezvous.exchange(
-            self._rank, "node_shared", payload
-        )
+        gathered = self._rendezvous.exchange(self._rank, "node_shared", payload)
         errors = [
             (r, entry[1])  # type: ignore[index]
             for r, entry in enumerate(gathered)
@@ -762,9 +742,7 @@ class LocalMultirankTransport(Transport):
         ]
         if errors:
             r0, message = errors[0]
-            raise ValueError(
-                f"node_shared: publishing failed on rank {r0}: {message}"
-            )
+            raise ValueError(f"node_shared: publishing failed on rank {r0}: {message}")
         # Nodes are contiguous rank blocks, so the publisher sits
         # node_rank slots below this rank.
         leader_rank = self._rank - self._node.node_rank
@@ -800,9 +778,7 @@ class LocalMultirankTransport(Transport):
         self, rows: Sequence[CutRow], owners: np.ndarray
     ) -> tuple[CutRow, ...]:
         payload = (tuple(rows), np.asarray(owners))
-        gathered = self._rendezvous.exchange(
-            self._rank, "exchange_cuts", payload
-        )
+        gathered = self._rendezvous.exchange(self._rank, "exchange_cuts", payload)
         agreed = _agreed_owners(
             [entry[1] for entry in gathered],  # type: ignore[index]
             self._size,
@@ -840,9 +816,7 @@ class LocalCluster:
         if ranks_per_node is None:
             ranks_per_node = size
         if ranks_per_node < 1:
-            raise ValueError(
-                f"ranks_per_node must be >= 1; got {ranks_per_node}"
-            )
+            raise ValueError(f"ranks_per_node must be >= 1; got {ranks_per_node}")
         if not rendezvous_timeout > 0:
             raise ValueError(
                 f"rendezvous_timeout must be > 0; got {rendezvous_timeout}"

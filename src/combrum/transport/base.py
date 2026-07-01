@@ -125,31 +125,21 @@ class CutRow:
 
     def __post_init__(self) -> None:
         if not isinstance(self.rep_id, (int, np.integer)) or self.rep_id < 0:
-            raise ValueError(
-                f"rep_id must be an integer >= 0; got {self.rep_id!r}"
-            )
+            raise ValueError(f"rep_id must be an integer >= 0; got {self.rep_id!r}")
         object.__setattr__(self, "rep_id", int(self.rep_id))
-        if (
-            not isinstance(self.agent_id, (int, np.integer))
-            or self.agent_id < 0
-        ):
-            raise ValueError(
-                f"agent_id must be an integer >= 0; got {self.agent_id!r}"
-            )
+        if not isinstance(self.agent_id, (int, np.integer)) or self.agent_id < 0:
+            raise ValueError(f"agent_id must be an integer >= 0; got {self.agent_id!r}")
         object.__setattr__(self, "agent_id", int(self.agent_id))
         phi = np.asarray(self.phi, dtype=np.float64)
         if phi.ndim != 1:
-            raise ValueError(
-                f"phi must be one-dimensional (K,); got shape {phi.shape}"
-            )
+            raise ValueError(f"phi must be one-dimensional (K,); got shape {phi.shape}")
         # A frozen dataclass with a mutable ndarray payload is not frozen.
         phi.setflags(write=False)
         object.__setattr__(self, "phi", phi)
         object.__setattr__(self, "epsilon", float(self.epsilon))
         if not isinstance(self.bundle_key, bytes):
             raise ValueError(
-                "bundle_key must be bytes;"
-                f" got {type(self.bundle_key).__name__}"
+                f"bundle_key must be bytes; got {type(self.bundle_key).__name__}"
             )
         if not self.bundle_key:
             raise ValueError("bundle_key must be nonempty")
@@ -238,9 +228,7 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def send_to_root(
-        self, obj: _T | None, *, source: int, root: int = 0
-    ) -> _T | None:
+    def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         """Deliver one object from ``source`` to ``root`` only.
 
         Only ``source``'s ``obj`` is meaningful and only ``root`` receives it;
@@ -358,9 +346,7 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def node_shared(
-        self, arrays: dict[str, np.ndarray]
-    ) -> Mapping[str, np.ndarray]:
+    def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         """Publish read-only data once per node.
 
         The node's publishing member (``node.node_rank == 0``) provides

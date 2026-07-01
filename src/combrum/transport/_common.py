@@ -20,9 +20,7 @@ def scatter_arrays_validated(
     n_global: int | None = None
     for key, value in arrays.items():
         if not isinstance(key, str):
-            raise ValueError(
-                f"scatter_by_agent: array keys must be str; got {key!r}"
-            )
+            raise ValueError(f"scatter_by_agent: array keys must be str; got {key!r}")
         full = np.asarray(value)
         if full.ndim < 1:
             raise ValueError(
@@ -31,8 +29,7 @@ def scatter_arrays_validated(
             )
         if full.dtype == object:
             raise ValueError(
-                f"scatter_by_agent: array {key!r} must be numeric;"
-                " got dtype object"
+                f"scatter_by_agent: array {key!r} must be numeric; got dtype object"
             )
         if n_global is None:
             n_global = full.shape[0]
@@ -46,9 +43,7 @@ def scatter_arrays_validated(
     return normalized, n_global
 
 
-def ids_validated(
-    local_ids: object, n_global: int | None, what: str
-) -> np.ndarray:
+def ids_validated(local_ids: object, n_global: int | None, what: str) -> np.ndarray:
     ids = np.asarray(local_ids)
     if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
         raise ValueError(
@@ -72,9 +67,7 @@ def observation_owner_rank(obs_id: int, n_observations: int, size: int) -> int:
         raise ValueError(f"size must be > 0; got {size}")
     obs = int(obs_id)
     if obs < 0 or obs >= n_observations:
-        raise ValueError(
-            "obs_id must lie in" f" [0, {n_observations}); got {obs_id}"
-        )
+        raise ValueError(f"obs_id must lie in [0, {n_observations}); got {obs_id}")
     base, extra = divmod(int(n_observations), int(size))
     front = (base + 1) * extra
     if obs < front:
@@ -103,8 +96,7 @@ def route_geometry_validated(
         or int(n_observations) <= 0
     ):
         raise ValueError(
-            f"{what}: n_observations must be an integer > 0;"
-            f" got {n_observations!r}"
+            f"{what}: n_observations must be an integer > 0; got {n_observations!r}"
         )
     if (
         isinstance(n_simulations, (bool, np.bool_))
@@ -112,17 +104,14 @@ def route_geometry_validated(
         or int(n_simulations) <= 0
     ):
         raise ValueError(
-            f"{what}: n_simulations must be an integer > 0;"
-            f" got {n_simulations!r}"
+            f"{what}: n_simulations must be an integer > 0; got {n_simulations!r}"
         )
     if (
         isinstance(source, (bool, np.bool_))
         or not isinstance(source, (int, np.integer))
         or not 0 <= int(source) < int(size)
     ):
-        raise ValueError(
-            f"{what}: source must lie in [0, {size}); got {source!r}"
-        )
+        raise ValueError(f"{what}: source must lie in [0, {size}); got {source!r}")
     n_obs = int(n_observations)
     n_sims = int(n_simulations)
     return n_obs, n_sims, n_obs * n_sims, int(source)
@@ -135,8 +124,7 @@ def route_local_ids_shape_validated(
 ) -> np.ndarray:
     if not isinstance(local_ids, np.ndarray):
         raise ValueError(
-            f"{what}: local_ids must be a numpy ndarray; got"
-            f" {type(local_ids).__name__}"
+            f"{what}: local_ids must be a numpy ndarray; got {type(local_ids).__name__}"
         )
     ids = local_ids
     if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
@@ -164,8 +152,7 @@ def route_values_validated(
         return {}
     if values is None:
         raise ValueError(
-            f"{what}: source rank {source} must pass a mapping of values;"
-            " got None"
+            f"{what}: source rank {source} must pass a mapping of values; got None"
         )
     if not isinstance(values, Mapping):
         raise ValueError(
@@ -181,8 +168,7 @@ def route_values_validated(
             or int(key) >= int(n_agents)
         ):
             raise ValueError(
-                f"{what}: value keys must lie in [0, {n_agents});"
-                f" got {key!r}"
+                f"{what}: value keys must lie in [0, {n_agents}); got {key!r}"
             )
         gid = int(key)
         if gid in normalized:

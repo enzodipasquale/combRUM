@@ -46,16 +46,12 @@ class CutReadings:
     def dual_map(self) -> dict[tuple[int, bytes], float]:
         if self.dual is None:
             raise ValueError("CutReadings carries no dual readings")
-        return {
-            key: float(value) for key, value in zip(self.keys, self.dual)
-        }
+        return {key: float(value) for key, value in zip(self.keys, self.dual)}
 
     def slack_map(self) -> dict[tuple[int, bytes], float]:
         if self.slack is None:
             raise ValueError("CutReadings carries no slack readings")
-        return {
-            key: float(value) for key, value in zip(self.keys, self.slack)
-        }
+        return {key: float(value) for key, value in zip(self.keys, self.slack)}
 
 
 class MasterBackend(ABC):
@@ -129,9 +125,7 @@ class MasterBackend(ABC):
         """
         return frozenset(self.dual_values())
 
-    def cut_readings(
-        self, *, dual: bool = False, slack: bool = False
-    ) -> CutReadings:
+    def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
         """Read solver-owned row signals for the last solved relaxation.
 
         Per-cut signals keyed by ``(agent_id, bundle_key)``, sourced from the
@@ -147,9 +141,7 @@ class MasterBackend(ABC):
         duals = self.dual_values() if dual else {}
         keys = tuple(sorted(duals if dual else self.solved_cut_keys()))
         dual_arr = (
-            np.asarray([duals[key] for key in keys], dtype=np.float64)
-            if dual
-            else None
+            np.asarray([duals[key] for key in keys], dtype=np.float64) if dual else None
         )
         return CutReadings(keys=keys, dual=dual_arr)
 

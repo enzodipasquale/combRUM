@@ -95,9 +95,7 @@ class GurobiMaster(MasterBackend):
             K, theta_bounds, c_theta
         )
         if not callable(u_coef):
-            raise ValueError(
-                f"u_coef must be callable; got {type(u_coef).__name__}"
-            )
+            raise ValueError(f"u_coef must be callable; got {type(u_coef).__name__}")
         self._u_coef = u_coef
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
@@ -148,13 +146,9 @@ class GurobiMaster(MasterBackend):
             # agent's u sits at lb=0 -> 0, so the estimate is unchanged.
             u_obj = np.empty(self._n_agents, dtype=np.float64)
             for agent_id in range(self._n_agents):
-                coef = self._u_obj.setdefault(
-                    agent_id, float(self._u_coef(agent_id))
-                )
+                coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
                 if not np.isfinite(coef):
-                    raise ValueError(
-                        f"u_coef({agent_id}) must be finite; got {coef!r}"
-                    )
+                    raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
                 u_obj[agent_id] = coef
             self._u_mvar = model.addMVar(
                 self._n_agents,
@@ -210,16 +204,12 @@ class GurobiMaster(MasterBackend):
                 row.agent_id, float(self._u_coef(row.agent_id))
             )
             if not np.isfinite(coef):
-                raise ValueError(
-                    f"u_coef({row.agent_id}) must be finite; got {coef!r}"
-                )
+                raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
             u_var = self._model.addVar(lb=self._u_lb(), obj=coef)
             self._u_vars[row.agent_id] = u_var
-        expr = self._gp.LinExpr(
-            [1.0, *(-row.phi)], [u_var, *self._theta_vars]
-        )
-        self._constrs[(row.agent_id, row.bundle_key)] = (
-            self._model.addConstr(expr >= row.epsilon)
+        expr = self._gp.LinExpr([1.0, *(-row.phi)], [u_var, *self._theta_vars])
+        self._constrs[(row.agent_id, row.bundle_key)] = self._model.addConstr(
+            expr >= row.epsilon
         )
 
     def _u_lb(self) -> float:
@@ -271,9 +261,7 @@ class GurobiMaster(MasterBackend):
         for key, new_eps in updates.items():
             self._constrs[key].RHS = float(new_eps)
             # Mirror the new RHS into the installed row; phi is untouched.
-            self._installed[key] = replace(
-                self._installed[key], epsilon=float(new_eps)
-            )
+            self._installed[key] = replace(self._installed[key], epsilon=float(new_eps))
 
     # -- solving and reporting ----------------------------------------------
 
@@ -286,9 +274,7 @@ class GurobiMaster(MasterBackend):
                 "master solve terminated"
                 f" {_status_name(self._gp, status)}; expected OPTIMAL"
             )
-        theta = np.array(
-            [var.X for var in self._theta_vars], dtype=np.float64
-        )
+        theta = np.array([var.X for var in self._theta_vars], dtype=np.float64)
         theta.setflags(write=False)
         self._solution = _Solution(
             theta=theta,
@@ -337,10 +323,7 @@ class GurobiMaster(MasterBackend):
         vals = self._model.getAttr(
             "X", [self._u_vars[agent_id] for agent_id in agent_ids]
         )
-        return {
-            int(agent_id): float(value)
-            for agent_id, value in zip(agent_ids, vals)
-        }
+        return {int(agent_id): float(value) for agent_id, value in zip(agent_ids, vals)}
 
     def dual_values(self) -> dict[tuple[int, bytes], float]:
         self._last()
@@ -351,14 +334,10 @@ class GurobiMaster(MasterBackend):
             else:
                 assert block is not None
                 pis = block.getAttr("Pi")
-                self._cut_duals = {
-                    key: float(pi) for key, pi in zip(keys, pis)
-                }
+                self._cut_duals = {key: float(pi) for key, pi in zip(keys, pis)}
         return dict(self._cut_duals)
 
-    def cut_readings(
-        self, *, dual: bool = False, slack: bool = False
-    ) -> CutReadings:
+    def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
         self._last()
         keys, block = self._solved_block_now()
         if not keys:
@@ -368,9 +347,7 @@ class GurobiMaster(MasterBackend):
                 slack=np.empty(0, dtype=np.float64) if slack else None,
             )
         assert block is not None
-        dual_arr = (
-            np.asarray(block.getAttr("Pi"), dtype=np.float64) if dual else None
-        )
+        dual_arr = np.asarray(block.getAttr("Pi"), dtype=np.float64) if dual else None
         slack_arr = None
         if slack:
             # Gurobi's row-sense Slack is negative for loose ``>=`` rows; negate
@@ -405,9 +382,7 @@ class GurobiMaster(MasterBackend):
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.array(ref, dtype=np.float64)
         if ref.shape != (self._K,):
-            raise ValueError(
-                f"ref must have shape ({self._K},); got {ref.shape}"
-            )
+            raise ValueError(f"ref must have shape ({self._K},); got {ref.shape}")
         if weight <= 0:
             if self._penalty is not None:
                 self._penalty = None
@@ -424,13 +399,9 @@ class GurobiMaster(MasterBackend):
     def _linear_variables(self) -> list[object]:
         return [*self._theta_vars, *self._u_vars.values()]
 
-    def _linear_coefficients(
-        self, theta_delta: np.ndarray | None = None
-    ) -> np.ndarray:
+    def _linear_coefficients(self, theta_delta: np.ndarray | None = None) -> np.ndarray:
         coeffs = np.empty(self._K + len(self._u_vars), dtype=np.float64)
-        coeffs[: self._K] = (
-            self._c if theta_delta is None else self._c + theta_delta
-        )
+        coeffs[: self._K] = self._c if theta_delta is None else self._c + theta_delta
         for offset, agent_id in enumerate(self._u_vars, start=self._K):
             coeffs[offset] = self._u_obj[agent_id]
         return coeffs
@@ -463,9 +434,7 @@ class GurobiMaster(MasterBackend):
         if self._theta_eye is None:
             from scipy import sparse
 
-            self._theta_eye = sparse.eye(
-                self._K, format="csr", dtype=np.float64
-            )
+            self._theta_eye = sparse.eye(self._K, format="csr", dtype=np.float64)
         return self._theta_eye
 
     # -- lifecycle ------------------------------------------------------------

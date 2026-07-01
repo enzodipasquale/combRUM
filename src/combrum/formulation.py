@@ -73,17 +73,14 @@ class FormulationResult:
         theta_hat = np.asarray(self.theta_hat, dtype=np.float64)
         if theta_hat.ndim != 1:
             raise ValueError(
-                f"theta_hat must be one-dimensional (K,);"
-                f" got shape {theta_hat.shape}"
+                f"theta_hat must be one-dimensional (K,); got shape {theta_hat.shape}"
             )
         if np.any(~np.isfinite(theta_hat)):
             raise ValueError("theta_hat must be finite")
         object.__setattr__(self, "theta_hat", _readonly(theta_hat))
         object.__setattr__(self, "objective", float(self.objective))
         if self.n_active_cuts < 0:
-            raise ValueError(
-                f"n_active_cuts must be >= 0; got {self.n_active_cuts}"
-            )
+            raise ValueError(f"n_active_cuts must be >= 0; got {self.n_active_cuts}")
         if self.slack is not None:
             object.__setattr__(
                 self,

@@ -9,8 +9,8 @@ on slot or order.
 
 from __future__ import annotations
 
-import operator
 import math
+import operator
 from dataclasses import dataclass
 
 import numpy as np
@@ -106,9 +106,7 @@ def bootstrap_observation_weights(
     """Observation-axis multiplier weights, normalized to sum to ``N``."""
     n = operator.index(n_observations)
     if n < 1:
-        raise ValueError(
-            f"n_observations must be >= 1; got {n_observations!r}"
-        )
+        raise ValueError(f"n_observations must be >= 1; got {n_observations!r}")
     raw = np.array(
         [bootstrap_multiplier(base_seed, rep_id, obs_id) for obs_id in range(n)],
         dtype=np.float64,
@@ -130,9 +128,7 @@ class ReplayedWeights:
     def __post_init__(self) -> None:
         matrix = np.array(self.matrix, dtype=np.float64)
         if matrix.ndim != 2:
-            raise ValueError(
-                f"matrix must be 2-D (B, N); got shape {matrix.shape}"
-            )
+            raise ValueError(f"matrix must be 2-D (B, N); got shape {matrix.shape}")
         if matrix.shape[0] < 1 or matrix.shape[1] < 1:
             raise ValueError(
                 "matrix must hold at least one replication of at least"

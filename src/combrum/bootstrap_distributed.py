@@ -39,18 +39,18 @@ from combrum.engine.agreement import (
     require_public_object_agreement,
 )
 from combrum.engine.certify import GapTally, certification_metadata
-from combrum.interface_resolution import (
-    Resolution,
-    needs_conformance_guard,
-    price_demands,
-    resolve,
-)
 from combrum.engine.distributed_context import (
     DistributedObservedPrep,
     build_distributed_fit_context,
     prepare_distributed_observed,
 )
 from combrum.formulations import NSlack
+from combrum.interface_resolution import (
+    Resolution,
+    needs_conformance_guard,
+    price_demands,
+    resolve,
+)
 from combrum.masters import resolve_master_backend
 from combrum.model import Model
 from combrum.oracle import Oracle
@@ -69,6 +69,7 @@ from combrum.rowgen import (
     SumReduced,
 )
 from combrum.transport.base import CutRow, Transport
+
 
 class ThetaEstimate(Protocol):
     """A published estimate whose ``theta_hat`` anchors each rep's ``theta_init``.
@@ -94,8 +95,7 @@ def _coerce_max_live_reps(value: object) -> int:
         cap = operator.index(value)
     except TypeError as exc:
         raise TypeError(
-            "max_live_reps must be an integer >= 1;"
-            f" got {type(value).__name__}"
+            f"max_live_reps must be an integer >= 1; got {type(value).__name__}"
         ) from exc
     if cap < 1:
         raise ValueError(f"max_live_reps must be >= 1; got {value!r}")
@@ -213,9 +213,7 @@ def batched_reduce(
             _require_kind(contribution, MaxContribution, slot)
             worsts[slot] = contribution.worst
             all_rows.extend(_restamp(contribution.local_rows, slot))
-        global_worsts = np.asarray(
-            transport.batched_max(worsts), dtype=np.float64
-        )
+        global_worsts = np.asarray(transport.batched_max(worsts), dtype=np.float64)
         received = transport.exchange_cuts(all_rows, owners)
         # Rows arrive in canonical (rep_id, agent_id, bundle_key) order; one
         # pass preserves it per slot.
@@ -261,9 +259,7 @@ def batched_reduce(
     )
 
 
-def _store_dual(
-    writer: DualStoreWriter, rep_id: int, dual: DualSolution | None
-) -> int:
+def _store_dual(writer: DualStoreWriter, rep_id: int, dual: DualSolution | None) -> int:
     """Re-stamp one replication's dual onto its global id and persist it.
 
     Returns 1 when a dual was written, 0 when ``dual is None``. The dual is
@@ -279,9 +275,7 @@ def _store_dual(
     return 1
 
 
-def _require_kind(
-    contribution: Contribution, expected: type, slot: int
-) -> None:
+def _require_kind(contribution: Contribution, expected: type, slot: int) -> None:
     if not isinstance(contribution, expected):
         raise AssertionError(
             "batched_reduce: mixed contribution kinds across the live set"
@@ -378,9 +372,7 @@ def _run_bfold(
     rep_gaps = np.full(n_reps, np.nan, dtype=np.float64) if log_details else None
 
     # Dual store: one writer, built once; each dual is streamed and dropped.
-    writer = (
-        DualStoreWriter(dual_store_dir) if dual_store_dir is not None else None
-    )
+    writer = DualStoreWriter(dual_store_dir) if dual_store_dir is not None else None
     stored = 0
 
     needs_prereduce_guard = transport.size > 1 or any(
@@ -410,6 +402,7 @@ def _run_bfold(
             # Phase 1: solve + contribute each live rep, then release its
             # priced demands (no (B, n_agents) object ever resident).
             price_t0 = perf_counter() if log_details else None
+
             def _price_live() -> dict[int, Contribution]:
                 contributions: dict[int, Contribution] = {}
                 for slot in live_slots:
@@ -423,9 +416,7 @@ def _run_bfold(
                     )
                     if gap_tally is not None:
                         _observe_demands(gap_tally, demands)
-                    contributions[slot] = replica.formulation.contribute(
-                        demands
-                    )
+                    contributions[slot] = replica.formulation.contribute(demands)
                     del demands  # release priced demands once folded
                 return contributions
 
@@ -605,8 +596,7 @@ def _finish_bootstrap_reduction(
     if np.any(normalizers <= 0.0):
         bad = normalizers[normalizers <= 0.0]
         raise ValueError(
-            "bootstrap multiplier normalizer must be positive;"
-            f" got {bad.tolist()}"
+            f"bootstrap multiplier normalizer must be positive; got {bad.tolist()}"
         )
     scales = float(prep.N) / normalizers
     return reduced[:, 1:] * scales[:, None], normalizers
@@ -620,15 +610,11 @@ def _bootstrap_wave_c_theta_and_normalizers(
     transport: Transport,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Observation-axis bootstrap reductions for one live wave."""
-    local = _bootstrap_local_rows(
-        prep, base_seed=base_seed, rep_ids=rep_ids
-    )
+    local = _bootstrap_local_rows(prep, base_seed=base_seed, rep_ids=rep_ids)
     reduced = np.asarray(
         transport.sum_reproducible(local, prep.owned_obs), dtype=np.float64
     )
-    return _finish_bootstrap_reduction(
-        prep, reduced.reshape(len(rep_ids), prep.K + 1)
-    )
+    return _finish_bootstrap_reduction(prep, reduced.reshape(len(rep_ids), prep.K + 1))
 
 
 def _bootstrap_slack_coef(
@@ -771,9 +757,7 @@ def bootstrap_distributed(
             choices=("auto", "gurobi", "highs"),
         )
     )
-    n_bootstrap = agree_public_int(
-        "n_bootstrap", n_bootstrap, transport, lower=1
-    )
+    n_bootstrap = agree_public_int("n_bootstrap", n_bootstrap, transport, lower=1)
     max_iterations = agree_public_int(
         "max_iterations", max_iterations, transport, lower=1
     )
@@ -794,12 +778,8 @@ def bootstrap_distributed(
     master_params = require_public_object_agreement(
         "master_params", master_params, transport
     )
-    warm_cuts = require_public_object_agreement(
-        "warm_cuts", warm_cuts, transport
-    )
-    cut_policy = require_public_object_agreement(
-        "cut_policy", cut_policy, transport
-    )
+    warm_cuts = require_public_object_agreement("warm_cuts", warm_cuts, transport)
+    cut_policy = require_public_object_agreement("cut_policy", cut_policy, transport)
 
     prep = prepare_distributed_observed(
         model,
@@ -810,9 +790,7 @@ def bootstrap_distributed(
     K = prep.K
     # Warm-start theta is a public distributed input: every rank must agree
     # before any owner-local context validates or consumes it.
-    theta_init = agree_public_optional_theta(
-        "warm_start", warm_start, transport, K=K
-    )
+    theta_init = agree_public_optional_theta("warm_start", warm_start, transport, K=K)
 
     # Place rep b's master on owner(b) = b % size; several reps may share an
     # owning rank, kept apart by the rep_id envelope.
@@ -831,9 +809,7 @@ def bootstrap_distributed(
     if store_duals:
         local_store_dir = collective_call(
             transport,
-            lambda: (
-                Path(dual_store_dir) if transport.rank == 0 else None
-            ),
+            lambda: Path(dual_store_dir) if transport.rank == 0 else None,
         )
         root_dual_store_dir = transport.bcast(
             local_store_dir if transport.rank == 0 else None, root=0
@@ -879,9 +855,7 @@ def bootstrap_distributed(
 
         # The oracle and price surface are resolved once and shared across every
         # rep; only the weights differ per rep.
-        collective_call(
-            transport, lambda: oracle.setup(transport, prep.local_ids)
-        )
+        collective_call(transport, lambda: oracle.setup(transport, prep.local_ids))
         try:
             price_resolution = resolve(
                 oracle,

@@ -34,8 +34,7 @@ def _coerce_ids(values: object, *, name: str = "ids") -> np.ndarray:
         if np.any(raw != np.trunc(raw)):
             raise ValueError(f"{name} must be integer ids")
         if raw.size and (
-            float(raw.min()) < np.iinfo(np.int64).min
-            or float(raw.max()) >= 2.0**63
+            float(raw.min()) < np.iinfo(np.int64).min or float(raw.max()) >= 2.0**63
         ):
             raise ValueError(f"{name} exceed int64 range")
         return raw.astype(np.int64)
@@ -142,8 +141,7 @@ class DemandBatch(Mapping[int, Demand]):
             unique, counts = np.unique(ids, return_counts=True)
             if unique.size != ids.size:
                 raise ValueError(
-                    "ids must be unique; duplicated ids"
-                    f" {unique[counts > 1].tolist()}"
+                    f"ids must be unique; duplicated ids {unique[counts > 1].tolist()}"
                 )
 
         bundles = np.asarray(self.bundles)
@@ -174,9 +172,7 @@ class DemandBatch(Mapping[int, Demand]):
         object.__setattr__(self, "bundles", bundles)
         object.__setattr__(self, "payoffs", payoffs)
         object.__setattr__(self, "gaps", gaps)
-        object.__setattr__(
-            self, "_ids_strictly_increasing", ids_strictly_increasing
-        )
+        object.__setattr__(self, "_ids_strictly_increasing", ids_strictly_increasing)
 
     @classmethod
     def exact(

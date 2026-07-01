@@ -31,6 +31,7 @@ import numpy as np
 from combrum.context import FitContext, ResultPublication
 from combrum.demand import Demand, DemandBatch
 from combrum.dual import DualSolution
+from combrum.formulation import Evaluation, Formulation, FormulationResult
 from combrum.interface_resolution import (
     FeatureMap,
     Resolution,
@@ -38,7 +39,6 @@ from combrum.interface_resolution import (
     feature_rows,
     resolve_features,
 )
-from combrum.formulation import Evaluation, Formulation, FormulationResult
 from combrum.master import MasterBackend
 from combrum.policies import CutPolicyProfile, policy_profile
 from combrum.rowgen import MaxContribution, MaxReduced, StepOutcome
@@ -324,9 +324,7 @@ class NSlack(Formulation):
             if rc > self._ctx.tolerance:
                 violated_ids.append(agent)
                 violated_bundles.append(demand.bundle)
-        featured = feature_rows(
-            self._features_res, violated_ids, violated_bundles
-        )
+        featured = feature_rows(self._features_res, violated_ids, violated_bundles)
         if pending is not None:
             # Read the same `featured` rows the cut build below consumes, so
             # the capture is the value, not a recomputation.
@@ -369,9 +367,7 @@ class NSlack(Formulation):
         with self._transport.collective():
             if self._is_root:
                 policy = self._ctx.cut_policy
-                profile = (
-                    policy_profile(policy) if policy is not None else None
-                )
+                profile = policy_profile(policy) if policy is not None else None
                 if policy is not None:
                     if profile.needs_admit_violations or pending is not None:
                         # Violation of each received row at the current
@@ -381,9 +377,7 @@ class NSlack(Formulation):
                         violations = self._received_violations(received)
                     else:
                         violations = np.empty(0, dtype=np.float64)
-                    admitted = policy.admit(
-                        received, violations, self._iteration
-                    )
+                    admitted = policy.admit(received, violations, self._iteration)
                 elif pending is not None:
                     # No policy, so the live path needs no violations; the
                     # capture still wants the pre-admit signal over every
@@ -393,16 +387,13 @@ class NSlack(Formulation):
                 else:
                     admitted = received
                 installed_rows: tuple[CutRow, ...] = ()
-                if pending is not None or (
-                    policy is not None and profile.retires_cuts
-                ):
+                if pending is not None or (policy is not None and profile.retires_cuts):
                     installed_rows = self._master.extract_cuts()
                 if pending is not None:
                     # installed_before: the last-solved installed snapshot,
                     # before any retire/add edit in this step.
                     installed_before = frozenset(
-                        (row.agent_id, row.bundle_key)
-                        for row in installed_rows
+                        (row.agent_id, row.bundle_key) for row in installed_rows
                     )
                     pending.admit_violations = [
                         AdmitViolation(
@@ -414,9 +405,7 @@ class NSlack(Formulation):
                     ]
                 retired_keys: set[tuple[int, bytes]] = set()
                 if policy is not None and profile.retires_cuts:
-                    retired_keys = self._purge(
-                        policy, profile, installed_rows, pending
-                    )
+                    retired_keys = self._purge(policy, profile, installed_rows, pending)
                 n_new = self._master.add_cuts(admitted)
                 if pending is not None:
                     pending.install = InstallSnapshot(
@@ -518,8 +507,7 @@ class NSlack(Formulation):
                     bundle_key=row.bundle_key,
                     dual=(
                         float(duals[(row.agent_id, row.bundle_key)])
-                        if duals is not None
-                        and (row.agent_id, row.bundle_key) in duals
+                        if duals is not None and (row.agent_id, row.bundle_key) in duals
                         else None
                     ),
                     slack=(
@@ -564,9 +552,7 @@ class NSlack(Formulation):
             values[int(agent_id)] = float(value)
         return values
 
-    def _local_u(
-        self, full_u: Mapping[int, float] | None
-    ) -> dict[int, float] | None:
+    def _local_u(self, full_u: Mapping[int, float] | None) -> dict[int, float] | None:
         if self._ctx.weight_mode == "distributed":
             return self._transport.route_agent_values(
                 full_u if self._is_root else None,
@@ -578,9 +564,7 @@ class NSlack(Formulation):
         if self._owner_rank != 0:
             return None
         payload = {"u": self._dense_u(full_u or {})} if self._is_root else None
-        rows = self._transport.scatter_by_agent(payload, self._ctx.local_ids)[
-            "u"
-        ]
+        rows = self._transport.scatter_by_agent(payload, self._ctx.local_ids)["u"]
         return {
             int(agent_id): float(value)
             for agent_id, value in zip(self._ctx.local_ids, rows)
@@ -589,10 +573,7 @@ class NSlack(Formulation):
 
     def _local_slack_values(self) -> np.ndarray:
         return np.asarray(
-            [
-                self._u.get(int(agent_id), 0.0)
-                for agent_id in self._ctx.local_ids
-            ],
+            [self._u.get(int(agent_id), 0.0) for agent_id in self._ctx.local_ids],
             dtype=np.float64,
         )
 
@@ -663,17 +644,13 @@ class NSlack(Formulation):
 
         active = None
         dual_packet = None
-        if publication & (
-            ResultPublication.ACTIVE_SET | ResultPublication.DUAL
-        ):
+        if publication & (ResultPublication.ACTIVE_SET | ResultPublication.DUAL):
             packet = None
             with self._transport.collective():
                 if self._is_root:
                     rows = self._master.extract_cuts()
                     active = (
-                        rows
-                        if publication & ResultPublication.ACTIVE_SET
-                        else None
+                        rows if publication & ResultPublication.ACTIVE_SET else None
                     )
                     dual_packet = (
                         _dual_packet(

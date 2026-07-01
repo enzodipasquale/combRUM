@@ -33,19 +33,13 @@ def _rep_filename(rep_id: int) -> str:
 def _same_array_bits(x: np.ndarray, y: np.ndarray) -> bool:
     # tobytes() compares raw IEEE bits: value equality would collapse
     # signed zeros and NaN payloads that a format change can introduce.
-    return (
-        x.dtype == y.dtype
-        and x.shape == y.shape
-        and x.tobytes() == y.tobytes()
-    )
+    return x.dtype == y.dtype and x.shape == y.shape and x.tobytes() == y.tobytes()
 
 
 def _same_float_bits(a: Mapping[int, float], b: Mapping[int, float]) -> bool:
     if sorted(a) != sorted(b):
         return False
-    return all(
-        struct.pack("<d", a[k]) == struct.pack("<d", b[k]) for k in a
-    )
+    return all(struct.pack("<d", a[k]) == struct.pack("<d", b[k]) for k in a)
 
 
 def equal(a: DualSolution, b: DualSolution) -> bool:
@@ -128,9 +122,7 @@ class DualStoreReader:
         """All replication ids present, ascending."""
         if not self._dir.is_dir():
             # Raise rather than treat a missing/mistyped path as empty.
-            raise FileNotFoundError(
-                f"dual store directory does not exist: {self._dir}"
-            )
+            raise FileNotFoundError(f"dual store directory does not exist: {self._dir}")
         return tuple(
             sorted(
                 int(match.group(1))
@@ -196,8 +188,7 @@ class DualStoreReader:
                 pis=npz["pis"],
                 bundle_table=npz["bundle_table"],
                 bound_duals={
-                    int(c): float(v)
-                    for c, v in zip(coords.tolist(), values.tolist())
+                    int(c): float(v) for c, v in zip(coords.tolist(), values.tolist())
                 },
             )
 

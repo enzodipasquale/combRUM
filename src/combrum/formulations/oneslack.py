@@ -35,6 +35,7 @@ import numpy as np
 
 from combrum.context import FitContext
 from combrum.demand import Demand
+from combrum.formulation import Evaluation, Formulation, FormulationResult
 from combrum.interface_resolution import (
     FeatureMap,
     Mode,
@@ -44,7 +45,6 @@ from combrum.interface_resolution import (
     feature_rows,
     resolve_features,
 )
-from combrum.formulation import Evaluation, Formulation, FormulationResult
 from combrum.master import MasterBackend
 from combrum.rowgen import StepOutcome, SumContribution, SumReduced
 from combrum.steprecord import TraceSink, _Pending, priced_features_from
@@ -263,7 +263,8 @@ class OneSlack(Formulation):
         if featured:
             phi_mat = np.stack([phi for phi, _ in featured], axis=0)
             eps_vec = np.fromiter(
-                (eps for _, eps in featured), dtype=np.float64,
+                (eps for _, eps in featured),
+                dtype=np.float64,
                 count=len(featured),
             )
         else:
@@ -299,9 +300,7 @@ class OneSlack(Formulation):
             )
         else:
             violation = raw if raw > 0.0 else 0.0
-        return StepOutcome(
-            violation=violation, install_payload=(phi_agg, eps_agg)
-        )
+        return StepOutcome(violation=violation, install_payload=(phi_agg, eps_agg))
 
     def _violation_raw(self, phi_agg: np.ndarray, eps_agg: float) -> float:
         # Unclamped aggregate slack at the current (pre-update) master
@@ -319,10 +318,7 @@ class OneSlack(Formulation):
         phi_agg, eps_agg = install_payload  # type: ignore[misc]
         raw = self._violation_raw(phi_agg, eps_agg)
         violation = raw if raw > 0.0 else 0.0
-        install = (
-            violation > self._ctx.tolerance
-            or self._needs_initial_free_u_cut()
-        )
+        install = violation > self._ctx.tolerance or self._needs_initial_free_u_cut()
         packet: _MasterState | None = None
         with self._transport.collective():
             if self._is_root:
@@ -360,9 +356,7 @@ class OneSlack(Formulation):
             dtype=np.float64,
         )
         out = self.finalise(SumReduced(aggregate=agg))
-        return Evaluation(
-            violation=out.violation, payload=out.install_payload
-        )
+        return Evaluation(violation=out.violation, payload=out.install_payload)
 
     def update(self, step: Evaluation) -> int:
         return self.apply_step(step.payload)

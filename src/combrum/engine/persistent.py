@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
 from combrum.engine.context_builder import build_fit_context, resolve_master_backend
 from combrum.engine.driver import LoopConfig, run_fit
 from combrum.transport.base import CutRow, Transport
@@ -208,9 +209,7 @@ class PersistentMasterFit:
         # bakes into the master, so the guard compares apples to apples.
         if self._transport.rank == built.ctx.owner_rank:
             self._c_theta0 = np.array(built.c_theta, dtype=np.float64)
-            self._agent_weights0 = np.array(
-                built.ctx.agent_weights, dtype=np.float64
-            )
+            self._agent_weights0 = np.array(built.ctx.agent_weights, dtype=np.float64)
             lower, upper = built.ctx.theta_bounds
             self._theta_bounds0 = (
                 np.array(lower, dtype=np.float64),
@@ -219,9 +218,7 @@ class PersistentMasterFit:
         # psi-derived, not master-bound: stash on every rank so the guard is
         # rank-uniform. None means the caller opts out of G2.
         self._geometry0 = (
-            None
-            if self._geometry_signature is None
-            else self._geometry_signature(psi)
+            None if self._geometry_signature is None else self._geometry_signature(psi)
         )
 
         return self._publish(built, outcome)
@@ -314,9 +311,7 @@ class PersistentMasterFit:
             cuts = self._master.extract_cuts()
             self._master.set_rhs(
                 {
-                    (row.agent_id, row.bundle_key): float(
-                        self._rhs_transform(row, psi)
-                    )
+                    (row.agent_id, row.bundle_key): float(self._rhs_transform(row, psi))
                     for row in cuts
                 }
             )
@@ -413,8 +408,6 @@ def _signature_equal(a: Any, b: Any) -> bool:
     if len(a_t) != len(b_t):
         return False
     return all(
-        x.shape == y.shape
-        and x.dtype == y.dtype
-        and x.tobytes() == y.tobytes()
+        x.shape == y.shape and x.dtype == y.dtype and x.tobytes() == y.tobytes()
         for x, y in zip(a_t, b_t)
     )

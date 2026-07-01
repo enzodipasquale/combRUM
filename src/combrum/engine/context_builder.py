@@ -97,17 +97,14 @@ def build_fit_context(
         )
     if shocks.ndim < 2 or shocks.shape[0] != N:
         raise ValueError(
-            f"shocks must have shape (N, S, ...) with N = {N};"
-            f" got shape {shocks.shape}"
+            f"shocks must have shape (N, S, ...) with N = {N}; got shape {shocks.shape}"
         )
     S = int(shocks.shape[1])
     n_agents = N * S
 
     # Interleaved shard a % size == rank, matching run_fit's per-rank ownership
     # so every cut and reduction is keyed identically.
-    local_ids = np.arange(
-        transport.rank, n_agents, transport.size, dtype=np.int64
-    )
+    local_ids = np.arange(transport.rank, n_agents, transport.size, dtype=np.int64)
 
     # None means unit weights; one weight vector drives both c_theta (theta_coef)
     # and the per-agent epigraph/aggregate coefficients (agent_weights).
@@ -148,6 +145,7 @@ def build_fit_context(
         observed_features=observed_features,
         cache=observed_cache,
     )
+
     def _rank0_master() -> Any:
         if master is not None:
             # Persistent-master reuse: skip make_master and reinstall (build-only).

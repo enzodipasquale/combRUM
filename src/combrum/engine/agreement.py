@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 import operator
 import pickle
-from hashlib import sha256
 from collections.abc import Callable
+from hashlib import sha256
 from typing import Any, TypeVar
 
 import numpy as np
@@ -23,11 +23,7 @@ def _raise_token_error(token: tuple[bool, object, str, str]) -> None:
 
 
 def _token_value_label(value: object) -> str:
-    if (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[1], bytes)
-    ):
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], bytes):
         return f"(shape={value[0]!r}, nbytes={len(value[1])})"
     return repr(value)
 
@@ -98,9 +94,7 @@ def agree_public_int(
 ) -> int:
     """Normalize an integer public control and require rank-uniform value."""
 
-    return int(
-        _agree_token(name, _int_token(name, value, lower=lower), transport)
-    )
+    return int(_agree_token(name, _int_token(name, value, lower=lower), transport))
 
 
 def _float_token(
@@ -159,9 +153,7 @@ def agree_public_float(
     return float(
         _agree_token(
             name,
-            _float_token(
-                name, value, lower=lower, strict_lower=strict_lower
-            ),
+            _float_token(name, value, lower=lower, strict_lower=strict_lower),
             transport,
         )
     )
@@ -178,9 +170,7 @@ def _bool_token(name: str, value: object) -> tuple[bool, object, str, str]:
     return (True, bool(value), "", "")
 
 
-def agree_public_bool(
-    name: str, value: object, transport: Transport
-) -> bool:
+def agree_public_bool(name: str, value: object, transport: Transport) -> bool:
     """Normalize a boolean public control and require rank-uniform value."""
 
     return bool(_agree_token(name, _bool_token(name, value), transport))
@@ -212,9 +202,7 @@ def agree_public_choice(
 ) -> object:
     """Require every rank to pass the same value from a finite choice set."""
 
-    return _agree_token(
-        name, _choice_token(name, value, choices=choices), transport
-    )
+    return _agree_token(name, _choice_token(name, value, choices=choices), transport)
 
 
 def _optional_theta_token(
@@ -232,16 +220,14 @@ def _optional_theta_token(
             False,
             None,
             "TypeError",
-            f"{name} must be None or expose theta_hat;"
-            f" got {type(value).__name__}",
+            f"{name} must be None or expose theta_hat; got {type(value).__name__}",
         )
     except Exception as exc:
         return (
             False,
             None,
             "ValueError",
-            f"{name}.theta_hat could not be read;"
-            f" {type(exc).__name__}: {exc}",
+            f"{name}.theta_hat could not be read; {type(exc).__name__}: {exc}",
         )
     try:
         arr = np.asarray(theta, dtype=np.float64)
@@ -257,8 +243,7 @@ def _optional_theta_token(
             False,
             None,
             "ValueError",
-            f"{name}.theta_hat must have shape (K,) = ({K},);"
-            f" got {arr.shape}",
+            f"{name}.theta_hat must have shape (K,) = ({K},); got {arr.shape}",
         )
     if not np.all(np.isfinite(arr)):
         return (
@@ -280,9 +265,7 @@ def agree_public_optional_theta(
 ) -> np.ndarray | None:
     """Normalize optional ``theta_hat`` warm starts and require rank agreement."""
 
-    payload = _agree_token(
-        name, _optional_theta_token(name, value, K=K), transport
-    )
+    payload = _agree_token(name, _optional_theta_token(name, value, K=K), transport)
     if payload is None:
         return None
     shape, raw = payload
@@ -291,9 +274,7 @@ def agree_public_optional_theta(
     return theta
 
 
-def _pickle_digest_token(
-    name: str, value: object
-) -> tuple[bool, object, str, str]:
+def _pickle_digest_token(name: str, value: object) -> tuple[bool, object, str, str]:
     try:
         payload = pickle.dumps(value, protocol=5)
     except Exception as exc:
@@ -316,9 +297,7 @@ def _pickle_digest_token(
     )
 
 
-def require_public_object_agreement(
-    name: str, value: _T, transport: Transport
-) -> _T:
+def require_public_object_agreement(name: str, value: _T, transport: Transport) -> _T:
     """Require an object-valued public distributed input to match by digest."""
 
     if transport.size == 1:

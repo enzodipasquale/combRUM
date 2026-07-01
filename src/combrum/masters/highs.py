@@ -71,9 +71,7 @@ class HighsMaster(MasterBackend):
             K, theta_bounds, c_theta
         )
         if not callable(u_coef):
-            raise ValueError(
-                f"u_coef must be callable; got {type(u_coef).__name__}"
-            )
+            raise ValueError(f"u_coef must be callable; got {type(u_coef).__name__}")
         self._u_coef = u_coef
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
@@ -116,13 +114,9 @@ class HighsMaster(MasterBackend):
             # optimum. With the default lower bound, a cutless agent's u sits at
             # lb=0 -> 0, leaving the estimate unchanged.
             for agent_id in range(self._n_agents):
-                coef = self._u_obj.setdefault(
-                    agent_id, float(self._u_coef(agent_id))
-                )
+                coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
                 if not np.isfinite(coef):
-                    raise ValueError(
-                        f"u_coef({agent_id}) must be finite; got {coef!r}"
-                )
+                    raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
                 solver.addCol(
                     coef,
                     self._u_lb(),
@@ -157,9 +151,7 @@ class HighsMaster(MasterBackend):
                 row.agent_id, float(self._u_coef(row.agent_id))
             )
             if not np.isfinite(coef):
-                raise ValueError(
-                    f"u_coef({row.agent_id}) must be finite; got {coef!r}"
-                )
+                raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
             self._add_u_columns(row.agent_id, coef)
             u_col = self._u_cols[row.agent_id]
         # Pass only nonzero theta entries to the sparse interface.
@@ -218,17 +210,13 @@ class HighsMaster(MasterBackend):
         retired = [k for k in set(keys) if k in self._row_index]
         if not retired:
             return 0
-        idx = np.array(
-            sorted(self._row_index[k] for k in retired), dtype=np.int32
-        )
+        idx = np.array(sorted(self._row_index[k] for k in retired), dtype=np.int32)
         self._h.deleteRows(idx.size, idx)
         for k in retired:
             del self._installed[k]
             del self._row_index[k]
         # Recompact tracked indices to contiguous 0..n-1, sorted by old index.
-        for new_i, k in enumerate(
-            sorted(self._row_index, key=self._row_index.get)
-        ):
+        for new_i, k in enumerate(sorted(self._row_index, key=self._row_index.get)):
             self._row_index[k] = new_i
         self._row_keys = sorted(self._row_index, key=self._row_index.get)
         self._solution = None  # cached solve is stale after removal
@@ -258,9 +246,7 @@ class HighsMaster(MasterBackend):
                 )
             # Keep the installed-row mirror exact so extract_cuts/reinstall see
             # the new RHS; phi is untouched.
-            self._installed[key] = replace(
-                self._installed[key], epsilon=float(new_eps)
-            )
+            self._installed[key] = replace(self._installed[key], epsilon=float(new_eps))
 
     # -- solving and reporting ----------------------------------------------
 
@@ -268,9 +254,7 @@ class HighsMaster(MasterBackend):
         run_status = self._h.run()
         model_status = self._h.getModelStatus()
         optimal = self._highspy.HighsModelStatus.kOptimal
-        if run_status != self._highspy.HighsStatus.kOk or (
-            model_status != optimal
-        ):
+        if run_status != self._highspy.HighsStatus.kOk or (model_status != optimal):
             # anything but Optimal is solver distress here (see MasterBackend.solve).
             raise RuntimeError(
                 "master solve terminated"
@@ -339,20 +323,14 @@ class HighsMaster(MasterBackend):
     def dual_values(self) -> dict[tuple[int, bytes], float]:
         last = self._last()
         duals = self._row_duals(last)
-        return {
-            key: float(value) for key, value in zip(last.row_keys, duals)
-        }
+        return {key: float(value) for key, value in zip(last.row_keys, duals)}
 
-    def cut_readings(
-        self, *, dual: bool = False, slack: bool = False
-    ) -> CutReadings:
+    def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
         last = self._last()
         keys = last.sorted_row_keys
         order = last.sorted_row_order
         dual_arr = (
-            np.asarray(self._row_duals(last)[order], dtype=np.float64)
-            if dual
-            else None
+            np.asarray(self._row_duals(last)[order], dtype=np.float64) if dual else None
         )
         slack_arr = (
             np.asarray(self._row_slacks(last)[order], dtype=np.float64)
@@ -402,9 +380,7 @@ class HighsMaster(MasterBackend):
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.asarray(ref, dtype=np.float64)
         if ref.shape != (self._K,):
-            raise ValueError(
-                f"ref must have shape ({self._K},); got {ref.shape}"
-            )
+            raise ValueError(f"ref must have shape ({self._K},); got {ref.shape}")
         if weight <= 0:
             # Nothing to revert: this backend never holds a penalty.
             return

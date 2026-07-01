@@ -46,9 +46,7 @@ class DistributedObservedPrep:
                 arr.setflags(write=False)
 
 
-def owned_observation_ids(
-    n_observations: int, rank: int, size: int
-) -> np.ndarray:
+def owned_observation_ids(n_observations: int, rank: int, size: int) -> np.ndarray:
     """Contiguous observation shard owned by ``rank``."""
     N = int(n_observations)
     if N < 1:
@@ -106,16 +104,13 @@ def _surface_token(model: Model) -> tuple[str, str, str, bool, bool, bool]:
     )
 
 
-def _distributed_observed_surface(
-    model: Model, transport: Transport
-) -> object:
+def _distributed_observed_surface(model: Model, transport: Transport) -> object:
     token = _surface_token(model)
     with transport.collective():
         root_token = transport.bcast(token if transport.rank == 0 else None)
         if token != root_token:
             raise ValueError(
-                "distributed observed-feature surface must be identical on"
-                " every rank"
+                "distributed observed-feature surface must be identical on every rank"
             )
     source, _module, _qualname, has_setup, has_batch, has_legacy = token
     if source == "none" or not (has_setup and has_batch) or has_legacy:
@@ -125,16 +120,10 @@ def _distributed_observed_surface(
             " observed_features_batch(observation_ids), and without the legacy"
             " observed_objective hook"
         )
-    return (
-        model.observed_features
-        if source == "observed_features"
-        else model.features
-    )
+    return model.observed_features if source == "observed_features" else model.features
 
 
-def _checked_distributed_phi(
-    value: object, *, n_rows: int, K: int
-) -> np.ndarray:
+def _checked_distributed_phi(value: object, *, n_rows: int, K: int) -> np.ndarray:
     if not isinstance(value, np.ndarray):
         raise ValueError(
             "observed_features_batch must return a numpy.ndarray;"
@@ -143,18 +132,14 @@ def _checked_distributed_phi(
     expected = (int(n_rows), int(K))
     if value.shape != expected:
         raise ValueError(
-            "observed_features_batch returned shape"
-            f" {value.shape}; expected {expected}"
+            f"observed_features_batch returned shape {value.shape}; expected {expected}"
         )
     if value.dtype != np.float64:
         raise ValueError(
-            "observed_features_batch must return float64 rows;"
-            f" got {value.dtype}"
+            f"observed_features_batch must return float64 rows; got {value.dtype}"
         )
     if not value.flags.c_contiguous:
-        raise ValueError(
-            "observed_features_batch must return a C-contiguous array"
-        )
+        raise ValueError("observed_features_batch must return a C-contiguous array")
     out = value.view()
     out.setflags(write=False)
     return out
@@ -168,12 +153,8 @@ def prepare_distributed_observed(
     transport: Transport,
 ) -> DistributedObservedPrep:
     """Prepare observation-owned feature rows and agent ids for distributed fits."""
-    N = agree_public_int(
-        "n_observations", n_observations, transport, lower=1
-    )
-    S = agree_public_int(
-        "n_simulations", n_simulations, transport, lower=1
-    )
+    N = agree_public_int("n_observations", n_observations, transport, lower=1)
+    S = agree_public_int("n_simulations", n_simulations, transport, lower=1)
     K = agree_public_int("model.parameters.K", model.parameters.K, transport, lower=1)
     owned_obs = owned_observation_ids(N, transport.rank, transport.size)
     local_ids = local_agent_ids_from_observations(owned_obs, N, S)
@@ -224,9 +205,7 @@ def distributed_c_theta(
             "obs_weights_local must have shape (len(owned_obs),) ="
             f" ({prep.owned_obs.size},); got {weights.shape}"
         )
-    local_rows = -float(prep.S) * (
-        weights[:, None] * prep.phi_obs_local
-    )
+    local_rows = -float(prep.S) * (weights[:, None] * prep.phi_obs_local)
     c_theta = np.asarray(
         transport.sum_reproducible(local_rows, prep.owned_obs),
         dtype=np.float64,
@@ -277,6 +256,7 @@ def build_distributed_fit_context(
         raise ValueError(
             f"owner_rank must lie in [0, {transport.size}); got {owner_rank}"
         )
+
     def _owner_master() -> object:
         params = master_params
         if params is None and master_backend == "gurobi":
@@ -326,6 +306,4 @@ def build_distributed_fit_context(
         if master_obj is not None:
             master_obj.close()
         raise
-    return BuiltContext(
-        ctx=ctx, c_theta=c, empirical_moment=prep.empirical_moment
-    )
+    return BuiltContext(ctx=ctx, c_theta=c, empirical_moment=prep.empirical_moment)

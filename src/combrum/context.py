@@ -129,9 +129,7 @@ class FitContext:
 
     def __post_init__(self) -> None:
         if self.K < 1:
-            raise ValueError(
-                f"K (parameter dimension) must be >= 1; got {self.K}"
-            )
+            raise ValueError(f"K (parameter dimension) must be >= 1; got {self.K}")
         if self.N < 1:
             raise ValueError(f"N (observations) must be >= 1; got {self.N}")
         if self.S < 1:
@@ -162,9 +160,7 @@ class FitContext:
                 "theta_bounds must satisfy lower <= upper elementwise;"
                 f" violated at indices {bad.tolist()}"
             )
-        object.__setattr__(
-            self, "theta_bounds", (_readonly(lower), _readonly(upper))
-        )
+        object.__setattr__(self, "theta_bounds", (_readonly(lower), _readonly(upper)))
 
         if self.weight_mode not in ("dense", "distributed"):
             raise ValueError(

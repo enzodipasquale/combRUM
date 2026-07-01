@@ -84,8 +84,7 @@ class DualSolution:
                 )
         if agent_ids.size and int(agent_ids.min()) < 0:
             raise ValueError(
-                f"agent_ids must be >= 0;"
-                f" got {agent_ids[agent_ids < 0].tolist()}"
+                f"agent_ids must be >= 0; got {agent_ids[agent_ids < 0].tolist()}"
             )
 
         pis = np.array(self.pis, dtype=np.float64)
@@ -131,9 +130,7 @@ class DualSolution:
                 )
             bound = float(value)
             if not math.isfinite(bound):
-                raise ValueError(
-                    f"bound_duals[{coord}] must be finite; got {value!r}"
-                )
+                raise ValueError(f"bound_duals[{coord}] must be finite; got {value!r}")
             bound_duals[coord] = bound
 
         object.__setattr__(self, "agent_ids", _frozen(agent_ids))
@@ -166,9 +163,7 @@ class DualSolution:
         """
         # Fancy indexing copies, so the float64 view never aliases the
         # frozen snapshot; n == 0 falls out as zeros(M).
-        rows = self.bundle_table[self.bundle_row_ids].astype(
-            np.float64, copy=False
-        )
+        rows = self.bundle_table[self.bundle_row_ids].astype(np.float64, copy=False)
         return self.pis @ rows
 
     def rows(self, *, n_obs: int) -> Iterator[CutDualRow]:

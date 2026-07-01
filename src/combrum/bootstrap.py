@@ -165,9 +165,7 @@ def bootstrap(
     resolved_master_backend = resolve_master_backend(
         master_backend, transport=transport
     )
-    local_ids = np.arange(
-        transport.rank, n_agents, transport.size, dtype=np.int64
-    )
+    local_ids = np.arange(transport.rank, n_agents, transport.size, dtype=np.int64)
     observed_cache = observed_objective_cache(
         K=K,
         N=n_obs,

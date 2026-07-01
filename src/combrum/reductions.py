@@ -19,9 +19,7 @@ def canonical_sum_window_rows(width: int) -> int:
     return max(1, _CANONICAL_SUM_WINDOW_BYTES // (8 * (w + 1)))
 
 
-def canonical_sum(
-    values: np.ndarray, global_ids: np.ndarray
-) -> np.ndarray | float:
+def canonical_sum(values: np.ndarray, global_ids: np.ndarray) -> np.ndarray | float:
     """Sum contributions in canonical (ascending global-id) order.
 
     Parameters
@@ -44,9 +42,7 @@ def canonical_sum(
     """
     ids = np.asarray(global_ids)
     if ids.ndim != 1:
-        raise ValueError(
-            f"global_ids must be one-dimensional; got shape {ids.shape}"
-        )
+        raise ValueError(f"global_ids must be one-dimensional; got shape {ids.shape}")
     if not np.issubdtype(ids.dtype, np.integer):
         raise ValueError(
             f"global_ids must have an integer dtype; got dtype {ids.dtype}"

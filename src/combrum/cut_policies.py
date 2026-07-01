@@ -118,12 +118,8 @@ class Compose(CutPolicy):
                 p.needs_admit_violations for p in self._admit_profiles
             ),
             retires_cuts=any(p.retires_cuts for p in self._purge_profiles),
-            needs_purge_duals=any(
-                p.needs_purge_duals for p in self._purge_profiles
-            ),
-            needs_purge_slacks=any(
-                p.needs_purge_slacks for p in self._purge_profiles
-            ),
+            needs_purge_duals=any(p.needs_purge_duals for p in self._purge_profiles),
+            needs_purge_slacks=any(p.needs_purge_slacks for p in self._purge_profiles),
         )
 
     @property
@@ -140,9 +136,7 @@ class Compose(CutPolicy):
         # Map violation by object identity so a thinning stage leaves the next
         # stage a violations array still parallel to its rows.
         if self._profile.needs_admit_violations:
-            viol_by_id = {
-                id(row): float(v) for row, v in zip(rows, violations)
-            }
+            viol_by_id = {id(row): float(v) for row, v in zip(rows, violations)}
         else:
             viol_by_id = {}
         for stage, profile in zip(self._admit_chain, self._admit_profiles):
@@ -165,14 +159,11 @@ class Compose(CutPolicy):
         retired_keys: set[tuple[int, bytes]] = set()
         for stage in self._purge_chain:
             retired_keys.update(
-                _key(row)
-                for row in stage.purge(installed, dual, slack, iteration)
+                _key(row) for row in stage.purge(installed, dual, slack, iteration)
             )
         return tuple(row for row in installed if _key(row) in retired_keys)
 
-    def validate_master_size(
-        self, *, n_parameters: int, n_agents: int
-    ) -> None:
+    def validate_master_size(self, *, n_parameters: int, n_agents: int) -> None:
         for stage in self._admit_chain + self._purge_chain:
             validator = getattr(stage, "validate_master_size", None)
             if callable(validator):
@@ -210,9 +201,7 @@ class PurgeInactive(CutPolicy):
 
     def __init__(self, max_age: int) -> None:
         if not isinstance(max_age, (int, np.integer)) or max_age < 1:
-            raise ValueError(
-                f"max_age must be an integer >= 1; got {max_age!r}"
-            )
+            raise ValueError(f"max_age must be an integer >= 1; got {max_age!r}")
         self._max_age = int(max_age)
         self._zero_streak: dict[tuple[int, bytes], int] = {}
 
@@ -288,9 +277,7 @@ class SlackStrip(CutPolicy):
     ) -> None:
         percentile = float(percentile)
         if not 0.0 < percentile <= 100.0 or math.isnan(percentile):
-            raise ValueError(
-                f"percentile must lie in (0, 100]; got {percentile!r}"
-            )
+            raise ValueError(f"percentile must lie in (0, 100]; got {percentile!r}")
         hard_threshold = float(hard_threshold)
         if math.isinf(hard_threshold):
             max_live_cuts = math.inf
@@ -333,9 +320,7 @@ class SlackStrip(CutPolicy):
     ) -> tuple[CutRow, ...]:
         if slack is None:
             return ()
-        signalled = [
-            (row, slack[_key(row)]) for row in installed if _key(row) in slack
-        ]
+        signalled = [(row, slack[_key(row)]) for row in installed if _key(row) in slack]
         if not signalled:
             return ()
         slacks = np.asarray([value for _, value in signalled])
@@ -349,14 +334,10 @@ class SlackStrip(CutPolicy):
             order = np.argsort(slacks, kind="stable")
             keep[order[: int(self._hard_threshold)]] = True
         return tuple(
-            row
-            for (row, _value), keep_row in zip(signalled, keep)
-            if not keep_row
+            row for (row, _value), keep_row in zip(signalled, keep) if not keep_row
         )
 
-    def validate_master_size(
-        self, *, n_parameters: int, n_agents: int
-    ) -> None:
+    def validate_master_size(self, *, n_parameters: int, n_agents: int) -> None:
         minimum = int(n_parameters) + int(n_agents)
         cap = self._hard_threshold
         if math.isinf(cap) or int(cap) >= minimum:
@@ -403,9 +384,7 @@ class MostViolated(CutPolicy):
     candidates. Retires nothing.
     """
 
-    def __init__(
-        self, k: int | None = None, fraction: float | None = None
-    ) -> None:
+    def __init__(self, k: int | None = None, fraction: float | None = None) -> None:
         if (k is None) == (fraction is None):
             raise ValueError("specify exactly one of k or fraction")
         if k is not None:
@@ -415,9 +394,7 @@ class MostViolated(CutPolicy):
         if fraction is not None:
             fraction = float(fraction)
             if not 0.0 < fraction <= 1.0:
-                raise ValueError(
-                    f"fraction must lie in (0, 1]; got {fraction!r}"
-                )
+                raise ValueError(f"fraction must lie in (0, 1]; got {fraction!r}")
         self._k = k
         self._fraction = fraction
 

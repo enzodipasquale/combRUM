@@ -25,9 +25,7 @@ def validated_construction(
     c = np.array(c_theta, dtype=np.float64)
     for name, arr in (("lower", lower), ("upper", upper), ("c_theta", c)):
         if arr.shape != (K,):
-            raise ValueError(
-                f"{name} must have shape ({K},); got {arr.shape}"
-            )
+            raise ValueError(f"{name} must have shape ({K},); got {arr.shape}")
         if not np.isfinite(arr).all():
             raise ValueError(f"{name} must be finite everywhere")
     if (lower > upper).any():

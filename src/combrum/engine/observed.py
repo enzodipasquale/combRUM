@@ -32,8 +32,7 @@ def _checked_phi_matrix(Phi: object, n_rows: int, K: int) -> np.ndarray:
     expected = (n_rows, K)
     if phi.shape != expected:
         raise ValueError(
-            f"observed feature rows have shape {phi.shape};"
-            f" expected {expected}"
+            f"observed feature rows have shape {phi.shape}; expected {expected}"
         )
     return phi
 
@@ -43,8 +42,7 @@ def _checked_eps_vector(Eps: object, n_rows: int) -> np.ndarray:
     expected = (n_rows,)
     if eps.shape != expected:
         raise ValueError(
-            f"features_batch returned Eps with shape {eps.shape};"
-            f" expected {expected}"
+            f"features_batch returned Eps with shape {eps.shape}; expected {expected}"
         )
     return eps
 
@@ -120,9 +118,7 @@ def observed_phi_rows(
 
     rows = [
         np.asarray(phi, dtype=np.float64)
-        for phi, _eps in (
-            resolution.active(int(a), b) for a, b in zip(ids, bundles)
-        )
+        for phi, _eps in (resolution.active(int(a), b) for a, b in zip(ids, bundles))
     ]
     return _checked_phi_matrix(np.stack(rows, axis=0), n_rows, K)
 

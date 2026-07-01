@@ -82,8 +82,7 @@ class Oracle(ABC):
         override this or :meth:`price`.
         """
         raise NotImplementedError(
-            "Oracle.price_batch is not overridden;"
-            " override price or price_batch"
+            "Oracle.price_batch is not overridden; override price or price_batch"
         )
 
     def teardown(self) -> None:

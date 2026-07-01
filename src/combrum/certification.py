@@ -24,14 +24,10 @@ class Certification:
 
     def __post_init__(self) -> None:
         if not isinstance(self.n_priced, (int, np.integer)) or self.n_priced < 0:
-            raise ValueError(
-                f"n_priced must be an integer >= 0; got {self.n_priced!r}"
-            )
+            raise ValueError(f"n_priced must be an integer >= 0; got {self.n_priced!r}")
         object.__setattr__(self, "n_priced", int(self.n_priced))
         if not isinstance(self.n_inexact, (int, np.integer)):
-            raise ValueError(
-                f"n_inexact must be an integer; got {self.n_inexact!r}"
-            )
+            raise ValueError(f"n_inexact must be an integer; got {self.n_inexact!r}")
         if not 0 <= self.n_inexact <= self.n_priced:
             raise ValueError(
                 "n_inexact must lie in [0, n_priced] ="

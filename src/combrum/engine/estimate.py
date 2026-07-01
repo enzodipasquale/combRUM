@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable, Sequence
 
 import numpy as np
+
 from combrum.activity import ActivityConfig, build_activity_run
 from combrum.context import ResultPublication
 from combrum.engine.agreement import (
@@ -27,8 +28,8 @@ from combrum.engine.distributed_context import (
     distributed_c_theta,
     prepare_distributed_observed,
 )
-from combrum.formulations import NSlack
 from combrum.engine.driver import LoopConfig, _validate_loop_controls, run_fit
+from combrum.formulations import NSlack
 from combrum.model import Data, Model
 from combrum.oracle import Oracle
 from combrum.policies import CutPolicy
@@ -337,18 +338,12 @@ def estimate_distributed(
     tolerance = agree_public_float(
         "tolerance", tolerance, transport, lower=0.0, strict_lower=True
     )
-    level = RunInfoLevel(
-        agree_public_int("level", level, transport, lower=0)
-    )
+    level = RunInfoLevel(agree_public_int("level", level, transport, lower=0))
     master_params = require_public_object_agreement(
         "master_params", master_params, transport
     )
-    warm_cuts = require_public_object_agreement(
-        "warm_cuts", warm_cuts, transport
-    )
-    cut_policy = require_public_object_agreement(
-        "cut_policy", cut_policy, transport
-    )
+    warm_cuts = require_public_object_agreement("warm_cuts", warm_cuts, transport)
+    cut_policy = require_public_object_agreement("cut_policy", cut_policy, transport)
 
     _validate_loop_controls(
         max_iterations, qp_weight, decay, penalty_ref, min_iterations

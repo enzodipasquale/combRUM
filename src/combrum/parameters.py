@@ -77,8 +77,7 @@ class Parameters:
             offset += block.size
         if not parsed:
             raise ValueError(
-                "Parameters requires at least one block; got an empty"
-                " specification"
+                "Parameters requires at least one block; got an empty specification"
             )
         object.__setattr__(self, "_blocks", tuple(parsed))
         object.__setattr__(self, "_by_name", by_name)
@@ -103,8 +102,7 @@ class Parameters:
             return self._by_name[name].slice
         except KeyError:
             raise KeyError(
-                f"unknown parameter block {name!r};"
-                f" known blocks: {list(self._by_name)}"
+                f"unknown parameter block {name!r}; known blocks: {list(self._by_name)}"
             ) from None
 
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -159,7 +157,9 @@ class Parameters:
         """Pickle payload; __reduce__ rebuilds through __init__, not __setstate__."""
         return tuple((b.name, (b.lb, b.ub, b.size)) for b in self._blocks)
 
-    def __reduce__(self) -> tuple[type[Parameters], tuple[tuple[tuple[str, BlockSpec], ...]]]:
+    def __reduce__(
+        self,
+    ) -> tuple[type[Parameters], tuple[tuple[tuple[str, BlockSpec], ...]]]:
         return (type(self), (self.__getstate__(),))
 
     def __eq__(self, other: object) -> bool:

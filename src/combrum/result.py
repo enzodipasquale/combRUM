@@ -6,6 +6,7 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
 import numpy as np
 
 from combrum.certification import Certification
@@ -23,8 +24,7 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
 def _certification_from_metadata(value: object) -> Certification:
     if not isinstance(value, dict):
         raise ValueError(
-            "certification metadata must be a dict;"
-            f" got {type(value).__name__}"
+            f"certification metadata must be a dict; got {type(value).__name__}"
         )
     unknown = bool(value.get("worst_gap_unknown", False))
     worst = np.inf if unknown else float(value.get("worst_gap", 0.0))
@@ -63,9 +63,7 @@ def _merge_certifications(
     n_priced = sum(cert.n_priced for cert in certifications)
     n_inexact = sum(cert.n_inexact for cert in certifications)
     worst_gap = (
-        0.0
-        if n_inexact == 0
-        else max(cert.worst_gap for cert in certifications)
+        0.0 if n_inexact == 0 else max(cert.worst_gap for cert in certifications)
     )
     return _certification_metadata(
         Certification(
@@ -106,8 +104,7 @@ class FitResult:
         theta_hat = np.asarray(self.theta_hat, dtype=np.float64)
         if theta_hat.shape != (K,):
             raise ValueError(
-                f"theta_hat must have shape (K,) = ({K},);"
-                f" got {theta_hat.shape}"
+                f"theta_hat must have shape (K,) = ({K},); got {theta_hat.shape}"
             )
         if np.any(~np.isfinite(theta_hat)):
             raise ValueError("theta_hat must be finite")
@@ -124,9 +121,7 @@ class FitResult:
         object.__setattr__(self, "empirical_moment", _readonly(empirical_moment))
 
         if self.n_active_cuts < 0:
-            raise ValueError(
-                f"n_active_cuts must be >= 0; got {self.n_active_cuts}"
-            )
+            raise ValueError(f"n_active_cuts must be >= 0; got {self.n_active_cuts}")
 
         if self.slack is not None:
             object.__setattr__(
@@ -322,7 +317,9 @@ class BootstrapResult:
         lo, hi = self.ci(level, only_converged=only_converged)
         lo_named = self.parameters.unpack(lo)
         hi_named = self.parameters.unpack(hi)
-        return {name: (lo_named[name], hi_named[name]) for name in self.parameters.names}
+        return {
+            name: (lo_named[name], hi_named[name]) for name in self.parameters.names
+        }
 
     @classmethod
     def concat(cls, results: Sequence[BootstrapResult]) -> BootstrapResult:
@@ -337,8 +334,7 @@ class BootstrapResult:
         results = tuple(results)
         if not results:
             raise ValueError(
-                "concat requires at least one BootstrapResult;"
-                " got an empty sequence"
+                "concat requires at least one BootstrapResult; got an empty sequence"
             )
         first = results[0]
         for other in results[1:]:
