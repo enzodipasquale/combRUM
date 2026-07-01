@@ -77,6 +77,13 @@ a `Data` object. Instead:
 - Provide observed features with `setup_observed(transport, observation_ids)`
   and `observed_features_batch(observation_ids)`.
 
+For high-performance computing runs, the `cb.Transport` object also provides
+helpers for moving data to the ranks. Use `transport.node_shared(...)` for large
+arrays that can be shared by ranks on the same compute node, such as covariates,
+shocks, graphs, or observed choices. Use `transport.scatter_by_agent(...)` when
+the root process has one row per simulated agent. Each rank passes its
+`local_ids` and receives the corresponding rows, in the same order.
+
 Distributed bootstrap weights are drawn for the `N` observed rows and reused
 across the `S` simulation draws for the same observation. The distributed entry
 points currently support `NSlack`. Use the serial path for other formulations.

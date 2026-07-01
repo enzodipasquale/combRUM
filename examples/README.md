@@ -41,6 +41,11 @@ The distributed APIs are `cb.estimate_distributed(...)` and
 `cb.bootstrap_distributed(...)`. Use them when observed rows are split across
 MPI ranks. Each rank prices its own simulated agents and provides observed
 features with `setup_observed(...)` and `observed_features_batch(...)`.
+
+The larger MPI examples use `transport.node_shared(...)` for large arrays that
+can be shared by ranks on the same compute node. Each rank then indexes those
+arrays by observation id or `local_ids`.
+
 Distributed bootstrap also accepts `max_live_reps` to control how many
 replications run in one wave.
 
