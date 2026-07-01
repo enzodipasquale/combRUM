@@ -29,7 +29,7 @@ The larger scripts mirror the worked notebooks:
 - `network_formation.py`: directed network formation with reciprocal links and
   a min-cut demand oracle.
 - `peer_effects_large_network.py`: peer effects on a large undirected network,
-  with estimation of non-linear shocks parameters.
+  with estimation of a nonlinear shock-correlation parameter.
 
 For the peer-effects MPI example:
 

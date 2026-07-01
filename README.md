@@ -1,9 +1,23 @@
 # combRUM
 
-`combRUM` estimates random-utility models where each choice is a bundle.
-Users provide an `Oracle` that solves the combinatorial problem, returning the
-optimal bundle at a given parameter vector. combRUM runs row generation on the
-implied master LP and returns the estimated structural parameters.
+`combRUM` estimates random-utility models where each observed choice solves
+
+$$
+d_i^* \in \arg\max_{d \in \mathcal C_i \subset \{0,1\}^M}
+\phi_i(d)^\top \theta + \varepsilon_i(d).
+$$
+
+The researcher supplies the model-specific parts: how to compute features
+$\phi_i(d)$ for a candidate choice $d$, and how to solve the combinatorial
+optimization at a candidate parameter vector. combRUM estimates $\theta$ by row
+generation, provides bootstrap inference, and can distribute large runs across
+multiple processes or compute nodes.
+
+combRUM is designed for models where $\mathcal C_i$ is too large to enumerate
+(already with $M=50$ items and $\mathcal C_i = \{0,1\}^M$, there are
+$2^{50} \approx 1.1 \times 10^{15}$ possible choices!). Estimation proceeds by
+row generation: combRUM iteratively queries the researcher's custom oracle and
+uses the returned choices to build the linear program.
 
 The distribution is named `combRUM`. The import root is lowercase:
 
@@ -103,7 +117,7 @@ Lower values use less memory and more wave setup.
 - `notebooks/04_unitdemand_blp_large.ipynb`: BLP inversion with many agents per
   market, an outside option, and market-item fixed effects.
 - `notebooks/05_peer_effects_large_network.ipynb`: peer effects on a large
-  network, with estimation of non-linear shocks parameters.
+  network, with estimation of a nonlinear shock-correlation parameter.
 - `notebooks/06_combinatorial_auction.ipynb`: a combinatorial auction example
   that uses combRUM to find equilibrium prices and an allocation.
 

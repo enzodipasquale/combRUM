@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "combRUM"
 dynamic = ["version"]
-description = "Random-utility estimation over combinatorial bundles."
+description = "Estimate combinatorial random utility models with large-scale linear programming."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Enzo Di Pasquale", email = "ed2189@nyu.edu" }]
@@ -62,7 +62,6 @@ packages = ["src/combrum"]
 [tool.hatch.build.targets.sdist]
 only-include = [
   ".gitignore",
-  "CHANGELOG.md",
   "CITATION.cff",
   "LICENSE",
   "README.md",

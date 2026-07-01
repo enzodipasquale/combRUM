@@ -1,11 +1,17 @@
 cff-version: 1.2.0
 message: "If combRUM supports your research, please cite this software."
 type: software
-title: "combRUM: Random-utility estimation over combinatorial bundles"
+title: "combRUM: Combinatorial Random Utility Estimation via Linear Programming"
 authors:
   - family-names: "Di Pasquale"
     given-names: "Enzo"
     email: "ed2189@nyu.edu"
 version: "0.1.0"
+date-released: "2026-06-25"
 license: "MIT"
 repository-code: "https://github.com/enzodipasquale/combRUM"
+keywords:
+  - econometrics
+  - random utility
+  - discrete choice
+  - combinatorial optimization
