@@ -80,6 +80,10 @@ class ThetaEstimate(Protocol):
     theta_hat: np.ndarray
 
 
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
 _DEFAULT_MAX_LIVE_REPS = 64
 
 
@@ -313,6 +317,7 @@ class _Replica:
     formulation: RowGenStep
     price_resolution: Resolution
     scheduled_local_ids: np.ndarray
+    master_backend: _Closable | None = None
 
 
 def _run_bfold(
@@ -532,7 +537,11 @@ def _run_bfold(
                 )
     finally:
         for replica in replicas:
-            replica.formulation.dispose()
+            try:
+                replica.formulation.dispose()
+            finally:
+                if replica.master_backend is not None:
+                    replica.master_backend.close()
     stored_total = (
         int(transport.bcast(stored if transport.rank == 0 else None, root=0))
         if writer is not None
@@ -702,6 +711,7 @@ def _build_distributed_replica(
         formulation=formulation,
         price_resolution=price_resolution,
         scheduled_local_ids=prep.local_ids,
+        master_backend=built.ctx.master_backend,
     )
 
 

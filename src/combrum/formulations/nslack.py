@@ -21,6 +21,7 @@ construction so model-specific code stays on the caller's side.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -304,7 +305,10 @@ class NSlack(Formulation):
 
         for agent_id, demand in demands.items():
             agent = int(agent_id)
-            rc = demand.payoff - self._u.get(agent, 0.0)
+            payoff = float(demand.payoff)
+            if not math.isfinite(payoff):
+                raise ValueError("demand payoffs must be finite")
+            rc = payoff - self._u.get(agent, 0.0)
             if rc > worst:
                 worst = rc
             if pending is not None:

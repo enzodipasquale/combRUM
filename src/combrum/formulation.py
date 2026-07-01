@@ -76,6 +76,8 @@ class FormulationResult:
                 f"theta_hat must be one-dimensional (K,);"
                 f" got shape {theta_hat.shape}"
             )
+        if np.any(~np.isfinite(theta_hat)):
+            raise ValueError("theta_hat must be finite")
         object.__setattr__(self, "theta_hat", _readonly(theta_hat))
         object.__setattr__(self, "objective", float(self.objective))
         if self.n_active_cuts < 0:

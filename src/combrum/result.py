@@ -109,6 +109,8 @@ class FitResult:
                 f"theta_hat must have shape (K,) = ({K},);"
                 f" got {theta_hat.shape}"
             )
+        if np.any(~np.isfinite(theta_hat)):
+            raise ValueError("theta_hat must be finite")
         object.__setattr__(self, "theta_hat", _readonly(theta_hat))
 
         empirical_moment = np.asarray(self.empirical_moment, dtype=np.float64)
@@ -117,6 +119,8 @@ class FitResult:
                 f"empirical_moment must have shape (K,) = ({K},);"
                 f" got {empirical_moment.shape}"
             )
+        if np.any(~np.isfinite(empirical_moment)):
+            raise ValueError("empirical_moment must be finite")
         object.__setattr__(self, "empirical_moment", _readonly(empirical_moment))
 
         if self.n_active_cuts < 0:
@@ -215,6 +219,8 @@ class BootstrapResult:
             raise ValueError(
                 f"B must be >= 1 replication; got thetas shape {thetas.shape}"
             )
+        if np.any(~np.isfinite(thetas)):
+            raise ValueError("thetas must be finite")
         object.__setattr__(self, "thetas", _readonly(thetas))
 
         converged = np.asarray(self.converged, dtype=bool)

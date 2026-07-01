@@ -215,8 +215,12 @@ def observed_objective_cache(
         transport=transport,
         phi_local=phi_local,
     )
+    phi_cache = np.array(phi_local, dtype=np.float64, copy=True)
+    empirical_moment = np.asarray(empirical_moment, dtype=np.float64)
+    phi_cache.setflags(write=False)
+    empirical_moment.setflags(write=False)
     return ObservedObjectiveCache(
-        phi_local=np.asarray(phi_local, dtype=np.float64),
+        phi_local=phi_cache,
         empirical_moment=empirical_moment,
     )
 

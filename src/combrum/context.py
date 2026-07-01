@@ -256,6 +256,8 @@ class FitContext:
                     f"theta_init must have shape (K,) = ({self.K},);"
                     f" got {theta_init.shape}"
                 )
+            if np.any(~np.isfinite(theta_init)):
+                raise ValueError("theta_init must be finite")
             object.__setattr__(self, "theta_init", _readonly(theta_init))
 
         if not isinstance(self.transport, Transport):

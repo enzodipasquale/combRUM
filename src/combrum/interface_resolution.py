@@ -65,7 +65,8 @@ class Resolution:
     mode: Mode
     active: Callable[..., Any]
     reference: Callable[..., Any] | None
-    # provider class qualname, folded into the rank-agreement token
+    # provider class identity, folded into the rank-agreement token
+    _module: str
     _qualname: str
 
     @property
@@ -74,13 +75,13 @@ class Resolution:
         return self.mode in (Mode.OPTIMIZED, Mode.BOTH)
 
     @property
-    def token(self) -> tuple[str, str, str]:
-        """Rank-agreement fingerprint ``(surface, qualname, mode)``.
+    def token(self) -> tuple[str, str, str, str]:
+        """Rank-agreement fingerprint ``(surface, module, qualname, mode)``.
 
         Identical on every rank by construction; fold into an existing
         setup broadcast and call :func:`check_agreement`.
         """
-        return (self.surface, self._qualname, self.mode.value)
+        return (self.surface, self._module, self._qualname, self.mode.value)
 
 
 def needs_conformance_guard(*resolutions: object) -> bool:
@@ -151,6 +152,7 @@ def resolve_local(
         mode=mode,
         active=active,
         reference=reference,
+        _module=cls.__module__,
         _qualname=cls.__qualname__,
     )
 
@@ -185,7 +187,7 @@ def resolve(
 
 
 def check_agreement(
-    local: tuple[str, str, str], root: tuple[str, str, str]
+    local: tuple[str, str, str, str], root: tuple[str, str, str, str]
 ) -> None:
     """Raise unless this rank's resolution token equals root's.
 
@@ -361,13 +363,17 @@ def resolve_features(features: object, surface: str = "features") -> Resolution:
             optimized_func=FeatureMap.features_batch,
         )
     if callable(features):
-        # No members to detect; the token keys on the callable's qualname.
+        # No members to detect; the token keys on the callable's identity.
+        module = getattr(features, "__module__", type(features).__module__)
+        if module is None:
+            module = type(features).__module__
         qualname = getattr(features, "__qualname__", type(features).__name__)
         return Resolution(
             surface=surface,
             mode=Mode.DEFAULT,
             active=features,
             reference=None,
+            _module=module,
             _qualname=qualname,
         )
     raise TypeError(

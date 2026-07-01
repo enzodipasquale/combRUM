@@ -13,6 +13,48 @@ def _strictly_increasing(values: np.ndarray) -> bool:
     return values.size < 2 or bool(np.all(values[1:] > values[:-1]))
 
 
+def _coerce_ids(values: object, *, name: str = "ids") -> np.ndarray:
+    raw = np.asarray(values)
+    if raw.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional; got {raw.shape}")
+    if np.issubdtype(raw.dtype, np.bool_):
+        raise ValueError(f"{name} must be integer ids, not bool")
+    if not isinstance(values, np.ndarray):
+        obj = np.asarray(values, dtype=object)
+        if any(isinstance(value, (bool, np.bool_)) for value in obj.flat):
+            raise ValueError(f"{name} must be integer ids, not bool")
+    if np.issubdtype(raw.dtype, np.integer):
+        if np.issubdtype(raw.dtype, np.unsignedinteger) and raw.size:
+            if int(raw.max()) > np.iinfo(np.int64).max:
+                raise ValueError(f"{name} exceed int64 range")
+        return np.asarray(raw, dtype=np.int64)
+    if np.issubdtype(raw.dtype, np.floating):
+        if np.any(~np.isfinite(raw)):
+            raise ValueError(f"{name} must be finite integer ids")
+        if np.any(raw != np.trunc(raw)):
+            raise ValueError(f"{name} must be integer ids")
+        if raw.size and (
+            float(raw.min()) < np.iinfo(np.int64).min
+            or float(raw.max()) >= 2.0**63
+        ):
+            raise ValueError(f"{name} exceed int64 range")
+        return raw.astype(np.int64)
+    raise ValueError(f"{name} must be integer ids; got dtype {raw.dtype}")
+
+
+def _coerce_id_key(agent_id: int) -> int:
+    if isinstance(agent_id, (bool, np.bool_)):
+        raise KeyError(agent_id)
+    if isinstance(agent_id, (int, np.integer)):
+        return int(agent_id)
+    if isinstance(agent_id, (float, np.floating)):
+        value = float(agent_id)
+        if math.isfinite(value) and value.is_integer():
+            if np.iinfo(np.int64).min <= value < 2.0**63:
+                return int(value)
+    raise KeyError(agent_id)
+
+
 @dataclass(frozen=True)
 class Demand:
     """One agent's priced outcome: chosen bundle, payoff, certified gap.
@@ -35,7 +77,10 @@ class Demand:
             raise ValueError("bundle must be a non-object ndarray payload")
         bundle.setflags(write=False)
         object.__setattr__(self, "bundle", bundle)
-        object.__setattr__(self, "payoff", float(self.payoff))
+        payoff = float(self.payoff)
+        if not math.isfinite(payoff):
+            raise ValueError(f"payoff must be finite; got {payoff}")
+        object.__setattr__(self, "payoff", payoff)
         gap = float(self.gap)
         # "not >=" also rejects NaN (compares False both ways).
         if not gap >= 0.0:
@@ -91,9 +136,7 @@ class DemandBatch(Mapping[int, Demand]):
     _ids_strictly_increasing: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        ids = np.asarray(self.ids, dtype=np.int64)
-        if ids.ndim != 1:
-            raise ValueError(f"ids must be one-dimensional; got {ids.shape}")
+        ids = _coerce_ids(self.ids)
         ids_strictly_increasing = _strictly_increasing(ids)
         if not ids_strictly_increasing:
             unique, counts = np.unique(ids, return_counts=True)
@@ -118,6 +161,8 @@ class DemandBatch(Mapping[int, Demand]):
             )
         if gaps.shape != (ids.size,):
             raise ValueError(f"gaps must have shape ({ids.size},); got {gaps.shape}")
+        if np.any(~np.isfinite(payoffs)):
+            raise ValueError("payoffs must be finite")
         if np.any(~np.isfinite(gaps)) or np.any(gaps < 0.0):
             raise ValueError("gaps must be finite values >= 0")
 
@@ -138,7 +183,7 @@ class DemandBatch(Mapping[int, Demand]):
         cls, ids: np.ndarray, bundles: np.ndarray, payoffs: np.ndarray
     ) -> DemandBatch:
         """Batch whose bundles are all exact optima (every gap zero)."""
-        ids_arr = np.asarray(ids, dtype=np.int64)
+        ids_arr = _coerce_ids(ids)
         return cls(
             ids=ids_arr,
             bundles=bundles,
@@ -153,7 +198,7 @@ class DemandBatch(Mapping[int, Demand]):
         return (int(agent_id) for agent_id in self.ids)
 
     def __getitem__(self, agent_id: int) -> Demand:
-        agent = int(agent_id)
+        agent = _coerce_id_key(agent_id)
         if self._ids_strictly_increasing:
             row = int(np.searchsorted(self.ids, agent))
             if row >= self.ids.size or int(self.ids[row]) != agent:
