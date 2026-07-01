@@ -560,26 +560,6 @@ def _run_bfold(
     )
 
 
-def _bootstrap_c_theta_and_normalizer(
-    prep: DistributedObservedPrep,
-    *,
-    base_seed: int,
-    rep_id: int,
-    transport: Transport,
-) -> tuple[np.ndarray, float]:
-    """One observation-axis reduction for a rep's normalizer and ``c_theta``."""
-    local = _bootstrap_local_rows(
-        prep, base_seed=base_seed, rep_ids=[rep_id]
-    )
-    reduced = np.asarray(
-        transport.sum_reproducible(local, prep.owned_obs), dtype=np.float64
-    )
-    c_theta, normalizer = _finish_bootstrap_reduction(
-        prep, np.atleast_2d(reduced)
-    )
-    return c_theta[0], float(normalizer[0])
-
-
 def _bootstrap_local_rows(
     prep: DistributedObservedPrep,
     *,

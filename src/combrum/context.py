@@ -21,20 +21,6 @@ from combrum.schedule import RepricingSchedule
 from combrum.transport.base import Transport
 
 
-def global_agent_id(
-    i: int | np.ndarray, s: int | np.ndarray, N: int
-) -> int | np.ndarray:
-    """Global agent id ``a = s * N + i`` (sim-major); broadcasts over arrays."""
-    return s * N + i
-
-
-def split_agent_id(
-    a: int | np.ndarray, N: int
-) -> tuple[int | np.ndarray, int | np.ndarray]:
-    """Inverse of :func:`global_agent_id`: ``(i, s)`` for a global id."""
-    return a % N, a // N
-
-
 class ResultPublication(IntFlag):
     """Final artifacts a formulation should publish after convergence.
 
