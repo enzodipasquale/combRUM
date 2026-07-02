@@ -2,116 +2,93 @@
 
 `combRUM` estimates random-utility models where each observed choice solves
 
-$$
+```math
 d_i^* \in \arg\max_{d \in \mathcal C_i \subset \{0,1\}^M}
 \phi_i(d)^\top \theta + \varepsilon_i(d).
-$$
+```
 
 The researcher supplies the model-specific parts: how to compute features
-$\phi_i(d)$ for a candidate choice $d$, and how to solve the combinatorial
-optimization at a candidate parameter vector. combRUM estimates $\theta$ by row
-generation, provides bootstrap inference, and can distribute large runs across
-multiple processes or compute nodes.
+$`\phi_i(d)`$ for a candidate choice $`d`$, and how to solve the
+combinatorial optimization at a candidate parameter vector. combRUM estimates
+$`\theta`$ by row generation, provides bootstrap inference, and can distribute
+large runs across multiple processes or compute nodes.
 
-combRUM is designed for models where $\mathcal C_i$ is too large to enumerate
-(already with $M=50$ items and $\mathcal C_i = \{0,1\}^M$, there are
-$2^{50} \approx 1.1 \times 10^{15}$ possible choices!). Estimation proceeds by
-row generation: combRUM iteratively queries the researcher's custom oracle and
-uses the returned choices to build the linear program.
-
-The distribution is named `combRUM`. The import root is lowercase:
-
-```python
-import combrum as cb
-```
+combRUM is designed for models where $`\mathcal C_i`$ is too large to enumerate
+(already with $`M=50`$ items and $`\mathcal C_i = \{0,1\}^M`$, there are
+$`2^{50} \approx 1.1 \times 10^{15}`$ possible choices!). Estimation proceeds
+by row generation: combRUM iteratively queries the researcher's custom oracle
+and uses the returned choices to build the linear program.
 
 ## Install
 
 ```bash
 git clone https://github.com/enzodipasquale/combRUM
 cd combRUM
-python -m pip install ".[examples]"
+python -m pip install ".[highs]"
 ```
 
-Useful extras:
+```python
+import combrum as cb
+```
+
+## First Run
 
 ```bash
-python -m pip install ".[highs]"      # HiGHS backend only
-python -m pip install ".[notebooks]"  # notebook runtime dependencies
-python -m pip install ".[mpi]"        # MPI transport for cluster runs
-python -m pip install ".[gurobi]"     # Gurobi backend, if licensed
+python examples/quickstart.py
 ```
 
-HiGHS is the license-free master-LP backend. With `master_backend="auto"`,
-combRUM uses Gurobi when it is installed and licensed, otherwise it falls
-back to HiGHS.
+This script builds a small bundle-choice model, estimates the coefficients, and
+runs a Bayesian bootstrap. The same example is explained step by step in
+`notebooks/01_quickstart.ipynb`.
 
-## Quickstart
+## Using combRUM
 
-Run the examples:
+To use combRUM, specify two model-specific pieces:
+
+- an `Oracle` that solves the combinatorial optimization for a given parameter
+  vector
+- a `FeatureMap` that computes the feature vector $`\phi_i(d)`$ for a choice
+  $`d \in \{0,1\}^M`$
+
+For serial estimation, observed choices and simulation draws are passed through
+a `Data` object. For distributed estimation, each rank owns part of the
+simulated agents and combRUM coordinates the row-generation loop across ranks.
+
+Call `cb.estimate(...)` or `cb.estimate_distributed(...)` for point estimates.
+Call `cb.bootstrap(...)` or `cb.bootstrap_distributed(...)` for bootstrap
+standard errors and confidence intervals.
+
+## Distributed Runs
+
+combRUM supports distributed execution with MPI (Message Passing Interface),
+through `mpi4py`. In distributed row generation, ranks work in parallel on the
+expensive part of the computation: solving simulated agents' choice problems.
+Each rank calls the oracle for its assigned simulated agents, and combRUM
+combines the returned choices to update the linear program.
 
 ```bash
-python examples/tiny_oracle.py
-python examples/unitdemand_blp_large.py
-python examples/blp_bundle_demand.py
-python examples/network_formation.py
-python examples/peer_effects_large_network.py
+python -m pip install ".[highs,mpi]"
+mpiexec -n 4 python examples/blp_bundle_demand.py --transport mpi
 ```
 
-The tiny example builds a small bundle-choice model, estimates it, and runs a
-small bootstrap. It can run either serially or under MPI.
+For large runs, `Transport` also provides data-movement helpers. Use
+`transport.node_shared(...)` for arrays shared by ranks on the same compute
+node, and `transport.scatter_by_agent(...)` for arrays indexed by simulated
+agent.
 
-The unit-demand example estimates a BLP-style model with many agents per market,
-an outside option, and market-item fixed effects. It reports parameter recovery
-and a simple IV price-sensitivity diagnostic.
+## Worked Examples
 
-The BLP bundle-demand example estimates price sensitivity in a market where
-agents choose bundles under a quadratic knapsack problem. It uses Gurobi when
-available and otherwise falls back to HiGHS. The script can also run under MPI.
+The notebooks are the best place to continue after the first run. Install the
+notebook dependencies with:
 
-For MPI runs, launch the standalone scripts with `mpiexec` and pass
-`--transport mpi`.
+```bash
+python -m pip install ".[notebooks]"
+```
 
-## Distributed Fits
-
-Use `cb.estimate(...)` and `cb.bootstrap(...)` when the observed bundles and
-simulation draws fit in one Python process. Pass a `Data` object with
-`observed_bundles` indexed by observation and shocks indexed by observation and
-simulation draw.
-
-Use `cb.estimate_distributed(...)` or `cb.bootstrap_distributed(...)` when the
-data is already split across MPI ranks. The distributed entry points do not take
-a `Data` object. Instead:
-
-- Pass `n_observations=N` and `n_simulations=S`.
-- Price global agent ids `0, ..., N*S-1`.
-- Use `agent_id % N` to recover the observation index.
-- Implement `Oracle.price_batch(theta, local_ids)` for the agent ids owned by
-  the rank.
-- Provide observed features with `setup_observed(transport, observation_ids)`
-  and `observed_features_batch(observation_ids)`.
-
-For high-performance computing runs, the `cb.Transport` object also provides
-helpers for moving data to the ranks. Use `transport.node_shared(...)` for large
-arrays that can be shared by ranks on the same compute node, such as covariates,
-shocks, graphs, or observed choices. Use `transport.scatter_by_agent(...)` when
-the root process has one row per simulated agent. Each rank passes its
-`local_ids` and receives the corresponding rows, in the same order.
-
-Distributed bootstrap weights are drawn for the `N` observed rows and reused
-across the `S` simulation draws for the same observation. The distributed entry
-points currently support `NSlack`. Use the serial path for other formulations.
-
-`bootstrap_distributed(max_live_reps=...)` controls how many bootstrap
-replications run in one wave. Higher values use more memory and fewer waves.
-Lower values use less memory and more wave setup.
-
-## Notebooks
-
-- `notebooks/01_quickstart.ipynb`: the smallest complete combRUM example, with
-  estimation, bootstrap, and a warm-started follow-up fit.
-- `notebooks/02_blp_bundle_demand.ipynb`: bundle demand with endogenous prices,
-  quadratic knapsack choice problems, and a BLP-style 2SLS second stage.
+- `notebooks/01_quickstart.ipynb`: a small combRUM example, with estimation,
+  bootstrap, and a warm-started follow-up fit.
+- `notebooks/02_blp_bundle_demand.ipynb`: bundle demand with endogenous prices
+  and quadratic knapsack choice problems.
 - `notebooks/03_network_formation.ipynb`: directed network formation with
   reciprocity and a min-cut demand oracle.
 - `notebooks/04_unitdemand_blp_large.ipynb`: BLP inversion with many agents per
@@ -120,6 +97,9 @@ Lower values use less memory and more wave setup.
   network, with estimation of a nonlinear shock-correlation parameter.
 - `notebooks/06_combinatorial_auction.ipynb`: a combinatorial auction example
   that uses combRUM to find equilibrium prices and an allocation.
+
+The `examples/` scripts provide command-line versions of the worked examples.
+See `examples/README.md`.
 
 ## License
 

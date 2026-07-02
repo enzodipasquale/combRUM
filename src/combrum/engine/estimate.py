@@ -278,10 +278,11 @@ def estimate_distributed(
 
     No ``Data`` object is accepted here. The model must use ``NSlack`` (other
     formulations raise :class:`NotImplementedError`) and must expose observed
-    features through ``setup_observed(transport, observation_ids)`` and
-    ``observed_features_batch(observation_ids)`` on ``model.observed_features``
-    or ``model.features``. Each rank stores only its observed shard and prices
-    only its local agent ids.
+    features through ``observed_features_batch(observation_ids)`` on
+    ``model.observed_features`` or ``model.features``. If observed rows need
+    setup before that call, the same surface may also define
+    ``setup_observed(transport, observation_ids)``. Each rank stores only its
+    observed shard and prices only its local agent ids.
 
     Args:
         model: NSlack model whose oracle prices by global id and whose feature

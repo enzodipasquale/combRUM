@@ -27,8 +27,9 @@ class Model:
             term. When omitted, the serial engine infers the observed rows from
             ``features`` on the observed bundles. Distributed fits require this
             surface, or ``features`` itself, to provide
-            ``setup_observed(transport, observation_ids)`` and
-            ``observed_features_batch(observation_ids)``.
+            ``observed_features_batch(observation_ids)``. If the observed rows
+            need setup before that call, the surface may also define
+            ``setup_observed(transport, observation_ids)``.
         formulation: Formulation class (not an instance), e.g. ``NSlack``.
     """
 

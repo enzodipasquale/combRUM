@@ -1,21 +1,7 @@
-"""Peer effects on a large network with MPI row generation.
-
-Launch with MPI to distribute pricing over the simulated profiles:
-
-    mpiexec -n 4 python examples/peer_effects_large_network.py --transport mpi
-
-Each node leader builds the graph, covariates, observed choices, and simulation
-draws once, then publishes them with ``Transport.node_shared``. combRUM shards
-the ``N*S`` simulated profiles across ranks. The sigma grid uses
-``cb.PersistentMasterFit``: the first point is cold, and later points rewrite
-cut RHS values and warm-solve the same NSlack master.
-"""
-
-from __future__ import annotations
+"""Peer effects with MPI row generation and a warm-solved sigma grid."""
 
 import argparse
 import os
-from typing import Any
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -23,6 +9,15 @@ from scipy.sparse.csgraph import breadth_first_order, maximum_flow
 
 import combrum as cb
 
+N_NODES = 500
+IID_SIMULATIONS = 50
+CORRELATED_N = 20
+CORRELATED_SIMULATIONS = 20
+SIGMA_GRID_SIZE = 50
+SIGMA_MIN = 0.2
+SIGMA_MAX = 0.8
+TOLERANCE = 1e-3
+MAX_ITERATIONS = 1000
 AVG_DEGREE = 10.0
 LINK_PROB = 0.75
 GRAPH_SEED = 20260423
@@ -35,22 +30,9 @@ ALPHA_TRUE = 0.50
 SIGMA_TRUE = 0.50
 
 
-def make_transport(kind: str) -> cb.Transport:
-    if kind == "serial":
-        return cb.SerialTransport()
-    if kind == "mpi":
+def make_transport(kind):
+    if kind == "mpi" or (kind == "auto" and "OMPI_COMM_WORLD_SIZE" in os.environ):
         return cb.MpiTransport()
-    mpi_env = (
-        "OMPI_COMM_WORLD_SIZE",
-        "PMI_SIZE",
-        "PMIX_RANK",
-        "MV2_COMM_WORLD_SIZE",
-    )
-    if any(name in os.environ for name in mpi_env):
-        try:
-            return cb.MpiTransport()
-        except Exception:
-            return cb.SerialTransport()
     return cb.SerialTransport()
 
 
@@ -200,26 +182,6 @@ def make_arrays(
     }
 
 
-def build_arrays(
-    *,
-    T: int,
-    iid_s: int,
-    correlated_n: int,
-    correlated_s: int,
-    transport: cb.Transport,
-) -> dict[str, np.ndarray]:
-    publish: dict[str, np.ndarray] = {}
-    with transport.collective():
-        if transport.node.node_rank == 0:
-            publish = make_arrays(
-                T=T,
-                iid_s=iid_s,
-                correlated_n=correlated_n,
-                correlated_s=correlated_s,
-            )
-    return dict(transport.node_shared(publish))
-
-
 class PeerGame(cb.Oracle, cb.FeatureMap):
     def __init__(
         self,
@@ -238,38 +200,17 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         self.edge_i = edge_i
         self.edge_j = edge_j
         self.z = z
-        self.eps = (
-            eta_est
-            if etaW_est is None
-            else eta_est + sigma * etaW_est
-        )
+        self.eps = eta_est if etaW_est is None else eta_est + sigma * etaW_est
         self.observed = observed
         self.N, self.S, self.T = self.eps.shape
         self.with_alpha = with_alpha
         self.K = BETA_TRUE.size + 1 + self.with_alpha
 
-    def setup_observed(
-        self, transport: cb.Transport, observation_ids: np.ndarray
-    ) -> None:
-        pass
-
-    def observed_features_batch(self, observation_ids: np.ndarray) -> np.ndarray:
-        if self.observed is None:
-            raise ValueError("observed choices are required for distributed fits")
-        Phi, _eps = self.features_batch(
-            observation_ids,
-            self.observed[observation_ids],
-        )
+    def observed_features_batch(self, observation_ids):
+        Phi, _eps = self.features_batch(observation_ids, self.observed[observation_ids])
         return np.ascontiguousarray(Phi, dtype=np.float64)
 
-    def features_batch(
-        self,
-        ids: np.ndarray,
-        bundles: np.ndarray,
-        *,
-        weights: np.ndarray | None = None,
-        aggregate: bool = False,
-    ) -> tuple[np.ndarray, np.ndarray | float]:
+    def features_batch(self, ids, bundles, *, weights=None, aggregate=False):
         obs = ids % self.N
         sim = ids // self.N
 
@@ -295,17 +236,10 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         )
 
         if aggregate:
-            return (
-                np.einsum("n,nk->k", weights, Phi, optimize=True),
-                np.einsum("n,n->", weights, eps, optimize=True),
-            )
+            return weights @ Phi, float(weights @ eps)
         return Phi, eps
 
-    def price_batch(
-        self,
-        theta: np.ndarray,
-        local_ids: np.ndarray,
-    ) -> cb.DemandBatch:
+    def price_batch(self, theta, local_ids):
         obs = local_ids % self.N
         sim = local_ids // self.N
 
@@ -334,14 +268,12 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
 
 
 def fit_iid(
-    arrays: dict[str, np.ndarray],
+    arrays,
     *,
     transport: cb.Transport,
     master_backend: str,
-    tolerance: float,
-    max_iterations: int,
     activity_level: str,
-) -> tuple[cb.FitResult, dict[str, Any] | None]:
+):
     game = PeerGame(
         X=arrays["X"],
         edge_i=arrays["edge_i"],
@@ -373,16 +305,14 @@ def fit_iid(
         n_simulations=game.S,
         transport=transport,
         master_backend=master_backend,
-        tolerance=float(tolerance),
-        max_iterations=int(max_iterations),
+        tolerance=TOLERANCE,
+        max_iterations=MAX_ITERATIONS,
         activity=activity,
     )
     if transport.rank != 0:
-        return fit, None
+        return None
     theta_true = np.r_[BETA_TRUE, [DELTA_TRUE]]
-    return fit, {
-        "theta_true": theta_true,
-        "theta_hat": fit.theta_hat,
+    return {
         "max_abs_error": float(np.max(np.abs(fit.theta_hat - theta_true))),
         "iterations": int(fit.metadata["iterations"]),
         "active_cuts": int(fit.n_active_cuts),
@@ -391,15 +321,13 @@ def fit_iid(
 
 
 def fit_sigma_grid(
-    arrays: dict[str, np.ndarray],
+    arrays,
     *,
     sigma_grid: np.ndarray,
     transport: cb.Transport,
     master_backend: str,
-    tolerance: float,
-    max_iterations: int,
     progress: bool,
-) -> dict[str, Any] | None:
+):
     X = arrays["X"]
     edge_i = arrays["edge_i"]
     edge_j = arrays["edge_j"]
@@ -407,7 +335,7 @@ def fit_sigma_grid(
     corr_y = arrays["corr_y"]
     corr_eta_est = arrays["corr_eta_est"]
     corr_etaW_est = arrays["corr_etaW_est"]
-    n_profiles, n_simulations, _ = corr_eta_est.shape
+    n_profiles = corr_eta_est.shape[0]
     observed_size2 = np.mean(corr_y.sum(axis=1) ** 2)
 
     def rhs_sigma(row, sigma):
@@ -423,19 +351,19 @@ def fit_sigma_grid(
             "delta": (0.0, 5.0, 1),
         }
     )
-    # Persistent by design: the distributed NSlack master is reused across sigma.
+    # Reuse the same NSlack master over the sigma grid.
     driver = cb.PersistentMasterFit(
         params,
         observables=np.arange(n_profiles, dtype=np.int64),
         observed_bundles=corr_y,
         transport=transport,
-        config=cb.LoopConfig(max_iterations=max_iterations),
+        config=cb.LoopConfig(max_iterations=MAX_ITERATIONS),
         rhs_transform=rhs_sigma,
         master_backend=master_backend,
-        tolerance=tolerance,
+        tolerance=TOLERANCE,
     )
 
-    rows: list[dict[str, Any]] = []
+    rows = []
     try:
         for k, sigma in enumerate(sigma_grid):
             game = PeerGame(
@@ -501,7 +429,6 @@ def fit_sigma_grid(
         "theta_hat": best["theta_hat"],
         "theta_error": theta_error,
         "max_abs_error": np.max(np.abs(theta_error)),
-        "sigma_true": SIGMA_TRUE,
         "sigma_best_id": best_id,
         "sigma_best": best,
         "sigma_rows": rows,
@@ -509,112 +436,49 @@ def fit_sigma_grid(
     }
 
 
-def run_example(
-    *,
-    T: int = 500,
-    iid_s: int = 50,
-    correlated_n: int = 20,
-    correlated_s: int = 20,
-    sigma_grid_size: int = 50,
-    sigma_min: float = 0.2,
-    sigma_max: float = 0.8,
-    master_backend: str = "auto",
-    tolerance: float = 1e-3,
-    max_iterations: int = 1000,
-    activity_level: str = "summary",
-    progress: bool = False,
-    transport: cb.Transport | None = None,
-) -> dict[str, Any]:
-    if T < 2:
-        raise ValueError("T must be at least 2")
-    if iid_s < 1:
-        raise ValueError("iid_s must be positive")
-    if correlated_n < 2:
-        raise ValueError("correlated_n must be at least 2")
-    if correlated_s < 1:
-        raise ValueError("correlated_s must be positive")
-    if sigma_grid_size < 2:
-        raise ValueError("sigma_grid_size must be at least 2")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--master-backend", default="auto")
+    parser.add_argument("--transport", default="auto")
+    parser.add_argument("--activity-level", default="summary")
+    parser.add_argument("--progress", action="store_true")
+    args = parser.parse_args()
 
-    transport = cb.SerialTransport() if transport is None else transport
-    arrays = build_arrays(
-        T=T,
-        iid_s=iid_s,
-        correlated_n=correlated_n,
-        correlated_s=correlated_s,
-        transport=transport,
-    )
-    _, iid = fit_iid(
+    transport = make_transport(args.transport)
+    publish = {}
+    with transport.collective():
+        if transport.node.node_rank == 0:
+            publish = make_arrays(
+                T=N_NODES,
+                iid_s=IID_SIMULATIONS,
+                correlated_n=CORRELATED_N,
+                correlated_s=CORRELATED_SIMULATIONS,
+            )
+    arrays = dict(transport.node_shared(publish))
+    iid = fit_iid(
         arrays,
         transport=transport,
-        master_backend=master_backend,
-        tolerance=tolerance,
-        max_iterations=max_iterations,
-        activity_level=activity_level,
+        master_backend=args.master_backend,
+        activity_level=args.activity_level,
     )
-    sigma_grid = np.linspace(
-        sigma_min,
-        sigma_max,
-        sigma_grid_size,
-    )
+    sigma_grid = np.linspace(SIGMA_MIN, SIGMA_MAX, SIGMA_GRID_SIZE)
     correlated = fit_sigma_grid(
         arrays,
         sigma_grid=sigma_grid,
         transport=transport,
-        master_backend=master_backend,
-        tolerance=tolerance,
-        max_iterations=max_iterations,
-        progress=progress,
+        master_backend=args.master_backend,
+        progress=bool(args.progress),
     )
-    return {
-        "arrays": arrays,
-        "iid": iid,
-        "correlated": correlated,
-        "ranks": int(transport.size),
-        "nodes": int(transport.node.n_nodes),
-    }
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--T", type=int, default=500)
-    parser.add_argument("--iid-S", type=int, default=50)
-    parser.add_argument("--N", type=int, default=20)
-    parser.add_argument("--S", type=int, default=20)
-    parser.add_argument("--sigma-grid-size", type=int, default=50)
-    parser.add_argument("--sigma-min", type=float, default=0.2)
-    parser.add_argument("--sigma-max", type=float, default=0.8)
-    parser.add_argument(
-        "--master-backend",
-        choices=("auto", "gurobi", "highs"),
-        default="auto",
-    )
-    parser.add_argument("--transport", choices=("auto", "serial", "mpi"), default="auto")
-    parser.add_argument("--tolerance", type=float, default=1e-3)
-    parser.add_argument("--max-iterations", type=int, default=1000)
-    parser.add_argument(
-        "--activity-level",
-        choices=("off", "summary", "iterations", "diagnostic"),
-        default="summary",
-    )
-    parser.add_argument("--progress", action="store_true")
-    return parser
-
-
-def _print_summary(result: dict[str, Any]) -> None:
-    arrays = result["arrays"]
-    iid = result["iid"]
-    correlated = result["correlated"]
-    assert iid is not None
-    assert correlated is not None
+    if transport.rank != 0:
+        return
 
     print(
         "peer effects:",
         f"T={arrays['X'].shape[0]}",
         f"edges={arrays['edge_i'].size}",
         f"mean_degree={float(np.mean(arrays['degree'])):.3f}",
-        f"ranks={result['ranks']}",
-        f"nodes={result['nodes']}",
+        f"ranks={int(transport.size)}",
+        f"nodes={int(transport.node.n_nodes)}",
     )
     print(
         "iid:",
@@ -623,11 +487,7 @@ def _print_summary(result: dict[str, Any]) -> None:
         f"cuts={iid['active_cuts']}",
         f"max_abs_error={iid['max_abs_error']:.4f}",
     )
-    print(
-        "selected sigma:",
-        f"{correlated['sigma_best']['sigma']:.3f}",
-        f"(true {correlated['sigma_true']:.3f})",
-    )
+    print("selected sigma:", f"{correlated['sigma_best']['sigma']:.3f}", f"(true {SIGMA_TRUE:.3f})")
     print(f"max parameter error: {correlated['max_abs_error']:.4f}")
     print()
     print("Sigma grid")
@@ -655,33 +515,6 @@ def _print_summary(result: dict[str, Any]) -> None:
         correlated["theta_error"],
     ):
         print(f"  {name:<9} {true:8.4f} {estimate:10.4f} {error:10.4f}")
-
-
-def main() -> None:
-    args = _parser().parse_args()
-    transport = make_transport(args.transport)
-    try:
-        result = run_example(
-            T=args.T,
-            iid_s=args.iid_S,
-            correlated_n=args.N,
-            correlated_s=args.S,
-            sigma_grid_size=args.sigma_grid_size,
-            sigma_min=args.sigma_min,
-            sigma_max=args.sigma_max,
-            master_backend=args.master_backend,
-            tolerance=args.tolerance,
-            max_iterations=args.max_iterations,
-            activity_level=args.activity_level,
-            progress=bool(args.progress),
-            transport=transport,
-        )
-        if transport.rank == 0:
-            _print_summary(result)
-    finally:
-        close = getattr(transport, "close", None)
-        if callable(close):
-            close()
 
 
 if __name__ == "__main__":

@@ -112,13 +112,12 @@ def _distributed_observed_surface(model: Model, transport: Transport) -> object:
             raise ValueError(
                 "distributed observed-feature surface must be identical on every rank"
             )
-    source, _module, _qualname, has_setup, has_batch, has_legacy = token
-    if source == "none" or not (has_setup and has_batch) or has_legacy:
+    source, _module, _qualname, _has_setup, has_batch, has_legacy = token
+    if source == "none" or not has_batch or has_legacy:
         raise ValueError(
             "distributed estimation requires an observed-feature surface with"
-            " setup_observed(transport, observation_ids) and"
             " observed_features_batch(observation_ids), and without the legacy"
-            " observed_objective hook"
+            " observed_objective hook; setup_observed is optional"
         )
     return model.observed_features if source == "observed_features" else model.features
 
@@ -159,8 +158,10 @@ def prepare_distributed_observed(
     owned_obs = owned_observation_ids(N, transport.rank, transport.size)
     local_ids = local_agent_ids_from_observations(owned_obs, N, S)
     surface = _distributed_observed_surface(model, transport)
-    with transport.collective():
-        surface.setup_observed(transport, owned_obs)
+    setup_observed = getattr(surface, "setup_observed", None)
+    if callable(setup_observed):
+        with transport.collective():
+            setup_observed(transport, owned_obs)
     with transport.collective():
         phi_obs_local = _checked_distributed_phi(
             surface.observed_features_batch(owned_obs),
