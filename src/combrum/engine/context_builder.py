@@ -22,7 +22,12 @@ from combrum.policies import CutPolicy
 from combrum.result import FitResult
 from combrum.transport.base import CutRow, Transport
 
-__all__ = ["BuiltContext", "build_fit_context", "resolve_master_backend"]
+__all__ = [
+    "BuiltContext",
+    "build_fit_context",
+    "prepare_warm_cuts",
+    "resolve_master_backend",
+]
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,16 @@ class BuiltContext:
     ctx: FitContext
     c_theta: np.ndarray
     empirical_moment: np.ndarray
+
+
+def prepare_warm_cuts(formulation: Any, rows: Sequence[CutRow]) -> tuple[CutRow, ...]:
+    """Let a formulation normalize persisted cut rows before reinstall."""
+
+    cut_rows = tuple(rows)
+    prepare = getattr(formulation, "prepare_warm_cuts", None)
+    if not callable(prepare):
+        return cut_rows
+    return tuple(prepare(cut_rows))
 
 
 def build_fit_context(
@@ -178,7 +193,7 @@ def build_fit_context(
         if warm_cuts is not None:
             # Reinstall the prior cut set BEFORE setup's solve so the
             # formulation rebuilds its bookkeeping from the warm relaxation.
-            master_obj.reinstall(tuple(warm_cuts))
+            master_obj.reinstall(prepare_warm_cuts(formulation, warm_cuts))
         return master_obj
 
     master_obj = None

@@ -1,7 +1,8 @@
 """Combinatorial random-utility estimation via row generation."""
 
+from combrum._version import __version__ as __version__
 from combrum.activity import ActivityConfig
-from combrum.bootstrap import NativeDraws, bootstrap
+from combrum.bootstrap import NativeDraws, WeightSource, bootstrap
 from combrum.bootstrap_distributed import bootstrap_distributed
 from combrum.callbacks import (
     Phase,
@@ -31,14 +32,13 @@ from combrum.result import BootstrapResult, FitResult
 from combrum.runinfo import RunInfoLevel
 from combrum.schedule import RepricingSchedule, ResolveAll, RoundRobin
 from combrum.solver_settings import SolverSettings
-from combrum.transport import MpiTransport, SerialTransport, Transport
-
-__version__ = "0.1.0"
+from combrum.transport import CutRow, LocalCluster, MpiTransport, SerialTransport, Transport
 
 __all__ = [
     "ActivityConfig",
     "AddAll",
     "BootstrapResult",
+    "CutRow",
     "Data",
     "Demand",
     "DemandBatch",
@@ -46,6 +46,7 @@ __all__ = [
     "FeatureMap",
     "FitResult",
     "LoopConfig",
+    "LocalCluster",
     "Model",
     "MpiTransport",
     "NSlack",
@@ -66,6 +67,7 @@ __all__ = [
     "SlackStrip",
     "SolverSettings",
     "Transport",
+    "WeightSource",
     "bootstrap",
     "bootstrap_distributed",
     "bootstrap_timeout_callback",

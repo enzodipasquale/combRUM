@@ -13,11 +13,12 @@ from combrum.context import (
     ResultPublication,
     _coerce_result_publication,
 )
-from combrum.engine.agreement import agree_public_int
-from combrum.engine.context_builder import BuiltContext
+from combrum.engine.agreement import agree_public_int, require_public_object_agreement
+from combrum.engine.context_builder import BuiltContext, prepare_warm_cuts
 from combrum.formulations import NSlack
 from combrum.masters import make_master
 from combrum.model import Model
+from combrum.transport._common import owned_agent_ids
 from combrum.transport.base import CutRow, Transport
 
 
@@ -59,32 +60,6 @@ def owned_observation_ids(n_observations: int, rank: int, size: int) -> np.ndarr
     return np.arange(start, stop, dtype=np.int64)
 
 
-def local_agent_ids_from_observations(
-    owned_obs: np.ndarray, n_observations: int, n_simulations: int
-) -> np.ndarray:
-    """Pricing-agent ids for one observation-owned shard."""
-    owned = np.asarray(owned_obs)
-    if owned.ndim != 1 or not np.issubdtype(owned.dtype, np.integer):
-        raise ValueError(
-            "owned_obs must be a 1-D integer array of observation ids;"
-            f" got shape {owned.shape}, dtype {owned.dtype}"
-        )
-    N = int(n_observations)
-    S = int(n_simulations)
-    if S < 1:
-        raise ValueError(f"n_simulations must be >= 1; got {n_simulations}")
-    if owned.size == 0:
-        return np.empty(0, dtype=np.int64)
-    if int(owned.min()) < 0 or int(owned.max()) >= N:
-        raise ValueError(
-            f"owned_obs must lie in [0, {N});"
-            f" got range [{int(owned.min())}, {int(owned.max())}]"
-        )
-    return np.concatenate([s * N + owned for s in range(S)]).astype(
-        np.int64, copy=False
-    )
-
-
 def _surface_token(model: Model) -> tuple[str, str, str, bool, bool, bool]:
     if model.observed_features is not None:
         source = "observed_features"
@@ -104,6 +79,17 @@ def _surface_token(model: Model) -> tuple[str, str, str, bool, bool, bool]:
     )
 
 
+def _pricing_surface_token(model: Model) -> tuple[str, str, bool]:
+    surface = model.features
+    if surface is None:
+        return ("none", "", False)
+    return (
+        type(surface).__module__,
+        type(surface).__qualname__,
+        callable(getattr(surface, "setup_pricing_agents", None)),
+    )
+
+
 def _distributed_observed_surface(model: Model, transport: Transport) -> object:
     token = _surface_token(model)
     with transport.collective():
@@ -112,14 +98,33 @@ def _distributed_observed_surface(model: Model, transport: Transport) -> object:
             raise ValueError(
                 "distributed observed-feature surface must be identical on every rank"
             )
-    source, _module, _qualname, _has_setup, has_batch, has_legacy = token
-    if source == "none" or not has_batch or has_legacy:
+    (
+        source,
+        _module,
+        _qualname,
+        _has_obs_setup,
+        has_batch,
+        has_objective,
+    ) = token
+    if source == "none" or not has_batch or has_objective:
         raise ValueError(
             "distributed estimation requires an observed-feature surface with"
-            " observed_features_batch(observation_ids), and without the legacy"
-            " observed_objective hook; setup_observed is optional"
+            " observed_features_batch(observation_ids). setup_observed is"
+            " optional; observed_objective belongs to the single-process data"
+            " path"
         )
     return model.observed_features if source == "observed_features" else model.features
+
+
+def _distributed_pricing_surface(model: Model, transport: Transport) -> object | None:
+    token = _pricing_surface_token(model)
+    with transport.collective():
+        root_token = transport.bcast(token if transport.rank == 0 else None)
+        if token != root_token:
+            raise ValueError(
+                "distributed pricing feature surface must be identical on every rank"
+            )
+    return model.features
 
 
 def _checked_distributed_phi(value: object, *, n_rows: int, K: int) -> np.ndarray:
@@ -154,14 +159,22 @@ def prepare_distributed_observed(
     """Prepare observation-owned feature rows and agent ids for distributed fits."""
     N = agree_public_int("n_observations", n_observations, transport, lower=1)
     S = agree_public_int("n_simulations", n_simulations, transport, lower=1)
-    K = agree_public_int("model.parameters.K", model.parameters.K, transport, lower=1)
+    parameters = require_public_object_agreement(
+        "model.parameters", model.parameters, transport
+    )
+    K = agree_public_int("model.parameters.K", parameters.K, transport, lower=1)
     owned_obs = owned_observation_ids(N, transport.rank, transport.size)
-    local_ids = local_agent_ids_from_observations(owned_obs, N, S)
+    local_ids = owned_agent_ids(N * S, transport.rank, transport.size)
     surface = _distributed_observed_surface(model, transport)
+    pricing_surface = _distributed_pricing_surface(model, transport)
     setup_observed = getattr(surface, "setup_observed", None)
-    if callable(setup_observed):
+    setup_pricing_agents = getattr(pricing_surface, "setup_pricing_agents", None)
+    if callable(setup_observed) or callable(setup_pricing_agents):
         with transport.collective():
-            setup_observed(transport, owned_obs)
+            if callable(setup_observed):
+                setup_observed(transport, owned_obs)
+            if callable(setup_pricing_agents):
+                setup_pricing_agents(transport, local_ids)
     with transport.collective():
         phi_obs_local = _checked_distributed_phi(
             surface.observed_features_batch(owned_obs),
@@ -234,13 +247,14 @@ def build_distributed_fit_context(
     warm_cuts: Sequence[CutRow] | None = None,
     cut_policy: Any | None = None,
     result_publication: ResultPublication | str | Iterable[str],
+    guard_master: bool = True,
 ) -> BuiltContext:
     """Build an NSlack distributed context without dense agent-weight arrays."""
     publication = _coerce_result_publication(result_publication)
-    if publication & ~ResultPublication.DUAL:
+    if publication & ResultPublication.BROADCAST:
         raise ValueError(
-            "distributed contexts currently support summary publication and"
-            " streamed dual payloads only"
+            "distributed contexts do not support broadcast result publication;"
+            " request root-gathered slack, active_set, or dual payloads instead"
         )
     formulation = (
         model.formulation(model.features) if formulation is None else formulation
@@ -273,16 +287,19 @@ def build_distributed_fit_context(
         )
         try:
             if warm_cuts is not None:
-                master_obj.reinstall(tuple(warm_cuts))
+                master_obj.reinstall(prepare_warm_cuts(formulation, warm_cuts))
             return master_obj
         except Exception:
             master_obj.close()
             raise
 
     master_obj = None
-    with transport.collective():
-        if transport.rank == owner:
-            master_obj = _owner_master()
+    if guard_master:
+        with transport.collective():
+            if transport.rank == owner:
+                master_obj = _owner_master()
+    elif transport.rank == owner:
+        master_obj = _owner_master()
     try:
         ctx = FitContext(
             K=prep.K,

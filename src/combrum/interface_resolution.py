@@ -285,11 +285,6 @@ def assert_conforms(
                 )
 
 
-# Type alias for FeatureMap.features_batch, the batched feature-row surface.
-# (Batch pricing is a separate surface, Oracle.price_batch.)
-FeatureMapBatch = Callable[[np.ndarray, np.ndarray], "tuple[np.ndarray, np.ndarray]"]
-
-
 class FeatureMap:
     """Base class for the features surface.
 

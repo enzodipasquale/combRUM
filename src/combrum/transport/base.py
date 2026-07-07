@@ -18,7 +18,10 @@ from typing import TypeVar
 
 import numpy as np
 
+from combrum._bundle_key import pack_bundle, unpack_bundle
+
 _T = TypeVar("_T")
+_CUT_ROW_WIRE_HEADER_BYTES = 5 * np.dtype(np.float64).itemsize
 
 
 @dataclass(frozen=True)
@@ -68,37 +71,11 @@ class TransportError(RuntimeError):
 
 
 def _pack_bundle(bundle: np.ndarray) -> bytes:
-    """Pack a bundle into a cut-identity key: dtype tag + raw bytes.
-
-    The dtype tag keeps the key invertible and stops a bool bundle from
-    colliding with an int bundle of equal bytes. This is the single encoding
-    shared by every component that keys cuts by their generating bundle.
-    """
-    arr = np.ascontiguousarray(bundle)
-    return arr.dtype.str.encode() + b":" + arr.tobytes()
+    return pack_bundle(bundle)
 
 
 def _unpack_bundle(key: bytes) -> np.ndarray:
-    """Recover the bundle packed by :func:`_pack_bundle` (read-only view).
-
-    Raises ``ValueError`` if ``key`` does not encode an explicit bundle, so a
-    caller never silently gets a misdecoded array from an aggregate key.
-    """
-    tag, sep, raw = key.partition(b":")
-    if sep:
-        try:
-            dtype = np.dtype(tag.decode("ascii"))
-        except (UnicodeDecodeError, TypeError):
-            dtype = None
-        if dtype is not None and (
-            dtype.itemsize == 0 or len(raw) % dtype.itemsize == 0
-        ):
-            return np.frombuffer(raw, dtype=dtype)
-    raise ValueError(
-        "bundle_key does not encode an explicit bundle; a generating bundle"
-        " is available only for bundle-carrying formulations (e.g. NSlack),"
-        " not for aggregate cuts (e.g. OneSlack)"
-    )
+    return unpack_bundle(key)
 
 
 @dataclass(frozen=True, eq=False)
@@ -130,10 +107,9 @@ class CutRow:
         if not isinstance(self.agent_id, (int, np.integer)) or self.agent_id < 0:
             raise ValueError(f"agent_id must be an integer >= 0; got {self.agent_id!r}")
         object.__setattr__(self, "agent_id", int(self.agent_id))
-        phi = np.asarray(self.phi, dtype=np.float64)
+        phi = np.array(self.phi, dtype=np.float64, copy=True, order="C")
         if phi.ndim != 1:
             raise ValueError(f"phi must be one-dimensional (K,); got shape {phi.shape}")
-        # A frozen dataclass with a mutable ndarray payload is not frozen.
         phi.setflags(write=False)
         object.__setattr__(self, "phi", phi)
         object.__setattr__(self, "epsilon", float(self.epsilon))
@@ -143,6 +119,60 @@ class CutRow:
             )
         if not self.bundle_key:
             raise ValueError("bundle_key must be nonempty")
+
+    @classmethod
+    def _from_parts(
+        cls,
+        *,
+        rep_id: int,
+        agent_id: int,
+        phi: np.ndarray,
+        epsilon: float,
+        bundle_key: bytes,
+    ) -> "CutRow":
+        if not isinstance(rep_id, (int, np.integer)) or rep_id < 0:
+            raise ValueError(f"rep_id must be an integer >= 0; got {rep_id!r}")
+        if not isinstance(agent_id, (int, np.integer)) or agent_id < 0:
+            raise ValueError(f"agent_id must be an integer >= 0; got {agent_id!r}")
+        phi = np.asarray(phi, dtype=np.float64, order="C")
+        if phi.ndim != 1:
+            raise ValueError(f"phi must be one-dimensional (K,); got shape {phi.shape}")
+        phi.setflags(write=False)
+        if not isinstance(bundle_key, bytes):
+            raise ValueError(
+                f"bundle_key must be bytes; got {type(bundle_key).__name__}"
+            )
+        if not bundle_key:
+            raise ValueError("bundle_key must be nonempty")
+        row = object.__new__(cls)
+        object.__setattr__(row, "rep_id", int(rep_id))
+        object.__setattr__(row, "agent_id", int(agent_id))
+        object.__setattr__(row, "phi", phi)
+        object.__setattr__(row, "epsilon", float(epsilon))
+        object.__setattr__(row, "bundle_key", bundle_key)
+        return row
+
+    def _replace(
+        self,
+        *,
+        rep_id: int | None = None,
+        bundle_key: bytes | None = None,
+    ) -> "CutRow":
+        new_rep_id = self.rep_id if rep_id is None else rep_id
+        if not isinstance(new_rep_id, (int, np.integer)) or new_rep_id < 0:
+            raise ValueError(f"rep_id must be an integer >= 0; got {new_rep_id!r}")
+        new_key = self.bundle_key if bundle_key is None else bundle_key
+        if not isinstance(new_key, bytes) or not new_key:
+            raise ValueError("bundle_key must be nonempty bytes")
+        if int(new_rep_id) == self.rep_id and new_key == self.bundle_key:
+            return self
+        return self._from_parts(
+            rep_id=int(new_rep_id),
+            agent_id=self.agent_id,
+            phi=self.phi,
+            epsilon=self.epsilon,
+            bundle_key=new_key,
+        )
 
     @property
     def canonical_key(self) -> tuple[int, int, bytes]:
@@ -160,6 +190,10 @@ class CutRow:
         single generating bundle.
         """
         return _unpack_bundle(self.bundle_key)
+
+
+def _cut_row_nbytes(row: CutRow) -> int:
+    return _CUT_ROW_WIRE_HEADER_BYTES + int(row.phi.nbytes) + len(row.bundle_key)
 
 
 def canonical_cut_order(rows: Iterable[CutRow]) -> tuple[CutRow, ...]:
@@ -328,22 +362,32 @@ class Transport(ABC):
         local_ids: np.ndarray,
         *,
         source: int,
-        n_observations: int,
-        n_simulations: int,
+        n_agents: int,
     ) -> dict[int, float]:
-        """Route sparse source-held agent values to observation owners.
+        """Route sparse source-held agent values to pricing-agent owners.
 
-        ``source`` passes a mapping keyed by global pricing-agent id; all other
-        ranks pass ``None``. Agent ``gid`` belongs to observation
-        ``gid % n_observations`` and is delivered to the rank that owns that
-        observation under the transport's contiguous observation sharding.
-
-        Each rank passes its ``local_ids`` to identify the caller's local
-        pricing axis; scalable implementations validate only its shape and
-        route by the geometry above. The source mapping may be sparse; missing
-        ids are simply absent from the returned dict. The primitive must not
-        materialize or scan a dense ``n_observations * n_simulations`` vector.
+        ``source`` passes a mapping keyed by global agent id; other ranks pass
+        ``None``. Returned values belong to this rank's contiguous agent shard.
+        Implementations must route sparse payloads without materializing the
+        full agent axis. Values are always keyed by global agent id.
         """
+
+    def route_agent_values_batched(
+        self,
+        values_by_rep: Mapping[int, Mapping[int, float]] | None,
+        local_ids: np.ndarray,
+        *,
+        owners: np.ndarray,
+        n_agents: int,
+    ) -> dict[int, dict[int, float]]:
+        """Route many sparse owner-held agent maps in one super-step.
+
+        For replication ``b``, only rank ``owners[b]`` may pass
+        ``values_by_rep[b]``. The return maps delivered replication ids to this
+        rank's sparse local values. Distributed bootstrap requires a transport
+        implementation that provides this batched primitive.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
@@ -370,25 +414,15 @@ class Transport(ABC):
         replications.
         """
 
-    @abstractmethod
-    def owner_sum(
-        self, values: np.ndarray, owners: np.ndarray
-    ) -> dict[int, np.ndarray]:
-        """Per-replication sums delivered only to each replication's owner.
+    def owner_broadcast(self, values: np.ndarray, owners: np.ndarray) -> np.ndarray:
+        """Broadcast owner-held rows to every rank in one batched round.
 
-        ``values`` is ``(B, M)``: row ``b`` is this rank's contribution to
-        replication ``b``. ``owners`` is ``(B,)`` integer ranks, identical
-        on every rank; ``owners[b]`` owns replication ``b``. Returns
-        ``{b: sum over ranks of values_r[b]}`` for exactly the ``b`` with
-        ``owners[b] == self.rank`` (an empty dict when this rank owns
-        none). One owner-routed delivery covers the whole batch; an
-        implementation may spend a constant validation round before delivery.
-
-        Bitwise contract: each delivered row equals
-        :func:`combrum.reductions.canonical_sum` of the per-rank
-        contributions keyed by the contributing rank index, invariant to
-        arrival order by construction.
+        Row ``b`` is meaningful only on rank ``owners[b]``; every rank receives
+        the complete ``(B, M)`` block. This primitive is for small per-master
+        state. Distributed bootstrap requires a transport implementation that
+        provides this batched primitive.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def exchange_cuts(

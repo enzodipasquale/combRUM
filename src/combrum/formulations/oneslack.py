@@ -72,7 +72,7 @@ def _aggregate_key(phi_agg: np.ndarray, eps_agg: float) -> bytes:
 
 @dataclass(frozen=True)
 class _MasterState:
-    """Root's view of the master after a solve, broadcast to every rank.
+    """Owner's view of the master after a solve, broadcast to every rank.
 
     Broadcasting the whole decision state once per update keeps every later
     accessor (``solve``, the violation, ``result``) rank-local and rank-invariant.
@@ -98,7 +98,7 @@ class OneSlack(Formulation):
 
     The master lives only on the owner rank (``ctx.owner_rank``, default 0;
     ``ctx.master_backend``; ``None`` elsewhere); every touch happens
-    root-guarded inside a transport collective, followed by one broadcast of
+    owner-guarded inside a transport collective, followed by one broadcast of
     the full decision state. Each iteration ships at most one row, so
     ``ctx.cut_policy`` is not consulted.
     """
@@ -131,17 +131,17 @@ class OneSlack(Formulation):
         # is the owner. Every master touch + bcast uses owner_rank, so a
         # non-root owner hosts its master without a forked path.
         self._owner_rank = ctx.owner_rank
-        self._is_root = ctx.transport.rank == self._owner_rank
+        self._is_owner = ctx.transport.rank == self._owner_rank
         self._master: MasterBackend | None = ctx.master_backend
         # Resolve the active features path once, identically on every rank;
         # the rank-agreement token rides the setup broadcast below.
         self._features_res: Resolution = resolve_features(self._features_arg)
         packet: _MasterState | None = None
-        # The root-only master check and the features rank-agreement sit
+        # The owner-only master check and the features rank-agreement sit
         # inside one guard so a missing master or divergent build fails as an
         # agreed verdict on every rank instead of stranding peers in the bcast.
         with self._transport.collective():
-            if self._is_root:
+            if self._is_owner:
                 if self._master is None:
                     raise ValueError(
                         "OneSlack is master-based by definition:"
@@ -159,14 +159,14 @@ class OneSlack(Formulation):
                 # anchor, which binds where a penalty is applied.
                 self._master.solve()
                 packet = self._state(progressed=0)
-            # One broadcast carries root's master state and its features
-            # token; every rank checks its own token against root's here.
-            root_packet, root_token = self._transport.bcast(
-                (packet, self._features_res.token) if self._is_root else None,
+            # One broadcast carries the owner's master state and features
+            # token; every rank checks its own token against the owner's here.
+            owner_packet, owner_token = self._transport.bcast(
+                (packet, self._features_res.token) if self._is_owner else None,
                 root=self._owner_rank,
             )
-            check_agreement(self._features_res.token, root_token)
-        self._adopt(root_packet)
+            check_agreement(self._features_res.token, owner_token)
+        self._adopt(owner_packet)
 
     def solve(self) -> np.ndarray:
         return self._theta.copy()
@@ -311,7 +311,7 @@ class OneSlack(Formulation):
         return float(theta_term) + eps_agg - self._u
 
     def apply_step(self, install_payload: object) -> int:
-        # Install half of update: at most one aggregate cut, root-only, then
+        # Install half of update: at most one aggregate cut, owner-only, then
         # one master-state bcast. The install gate is recomputed from the
         # payload exactly as finalise computed the violation, so a converged
         # step installs nothing.
@@ -321,7 +321,7 @@ class OneSlack(Formulation):
         install = violation > self._ctx.tolerance or self._needs_initial_free_u_cut()
         packet: _MasterState | None = None
         with self._transport.collective():
-            if self._is_root:
+            if self._is_owner:
                 progressed = 0
                 if install:
                     row = CutRow(

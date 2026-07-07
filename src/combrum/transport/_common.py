@@ -59,52 +59,58 @@ def ids_validated(local_ids: object, n_global: int | None, what: str) -> np.ndar
     return ids
 
 
-def observation_owner_rank(obs_id: int, n_observations: int, size: int) -> int:
-    """Rank owning an observation under contiguous observation sharding."""
-    if n_observations <= 0:
-        raise ValueError(f"n_observations must be > 0; got {n_observations}")
+def agent_owner_rank(agent_id: int, n_agents: int, size: int) -> int:
+    """Rank owning an agent under contiguous global-agent sharding."""
+    if n_agents <= 0:
+        raise ValueError(f"n_agents must be > 0; got {n_agents}")
     if size <= 0:
         raise ValueError(f"size must be > 0; got {size}")
-    obs = int(obs_id)
-    if obs < 0 or obs >= n_observations:
-        raise ValueError(f"obs_id must lie in [0, {n_observations}); got {obs_id}")
-    base, extra = divmod(int(n_observations), int(size))
+    agent = int(agent_id)
+    if agent < 0 or agent >= int(n_agents):
+        raise ValueError(f"agent_id must lie in [0, {n_agents}); got {agent_id}")
+    base, extra = divmod(int(n_agents), int(size))
     front = (base + 1) * extra
-    if obs < front:
-        return obs // (base + 1)
-    return extra + (obs - front) // base
+    if agent < front:
+        return agent // (base + 1)
+    return extra + (agent - front) // base
 
 
-def agent_owner_rank(agent_id: int, n_observations: int, size: int) -> int:
-    """Rank owning an agent id when ``agent_id % N`` is its observation."""
-    return observation_owner_rank(
-        int(agent_id) % int(n_observations), int(n_observations), int(size)
-    )
+def owned_agent_ids(n_agents: int, rank: int, size: int) -> np.ndarray:
+    """Contiguous global-agent ids owned by ``rank``."""
+
+    start, stop = owned_agent_bounds(n_agents, rank, size)
+    return np.arange(start, stop, dtype=np.int64)
 
 
-def route_geometry_validated(
-    n_observations: Any,
-    n_simulations: Any,
+def owned_agent_bounds(n_agents: int, rank: int, size: int) -> tuple[int, int]:
+    """Half-open global-agent shard bounds owned by ``rank``."""
+
+    if n_agents < 0:
+        raise ValueError(f"n_agents must be >= 0; got {n_agents}")
+    if size <= 0:
+        raise ValueError(f"size must be > 0; got {size}")
+    if rank < 0 or rank >= size:
+        raise ValueError(f"rank must lie in [0, {size}); got {rank}")
+    base, extra = divmod(int(n_agents), int(size))
+    start = rank * base + min(rank, extra)
+    stop = start + base + (1 if rank < extra else 0)
+    return int(start), int(stop)
+
+
+def route_agent_axis_validated(
+    n_agents: Any,
     *,
     size: int,
     source: Any,
     what: str,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int]:
     if (
-        isinstance(n_observations, (bool, np.bool_))
-        or not isinstance(n_observations, (int, np.integer))
-        or int(n_observations) <= 0
+        isinstance(n_agents, (bool, np.bool_))
+        or not isinstance(n_agents, (int, np.integer))
+        or int(n_agents) <= 0
     ):
         raise ValueError(
-            f"{what}: n_observations must be an integer > 0; got {n_observations!r}"
-        )
-    if (
-        isinstance(n_simulations, (bool, np.bool_))
-        or not isinstance(n_simulations, (int, np.integer))
-        or int(n_simulations) <= 0
-    ):
-        raise ValueError(
-            f"{what}: n_simulations must be an integer > 0; got {n_simulations!r}"
+            f"{what}: n_agents must be an integer > 0; got {n_agents!r}"
         )
     if (
         isinstance(source, (bool, np.bool_))
@@ -112,9 +118,7 @@ def route_geometry_validated(
         or not 0 <= int(source) < int(size)
     ):
         raise ValueError(f"{what}: source must lie in [0, {size}); got {source!r}")
-    n_obs = int(n_observations)
-    n_sims = int(n_simulations)
-    return n_obs, n_sims, n_obs * n_sims, int(source)
+    return int(n_agents), int(source)
 
 
 def route_local_ids_shape_validated(
@@ -131,6 +135,38 @@ def route_local_ids_shape_validated(
         raise ValueError(
             f"{what}: local_ids must be a 1-D integer array of global agent"
             f" ids; got shape {ids.shape}, dtype {ids.dtype}"
+        )
+    return ids
+
+
+def route_local_ids_owned_validated(
+    local_ids: object,
+    *,
+    n_agents: int,
+    rank: int,
+    size: int,
+    what: str,
+) -> np.ndarray:
+    """Validate that every supplied id belongs to ``rank``'s agent shard."""
+
+    ids = route_local_ids_shape_validated(local_ids, what=what)
+    if ids.size:
+        if int(ids.min()) < 0 or int(ids.max()) >= int(n_agents):
+            raise ValueError(
+                f"{what}: local_ids must lie in [0, {n_agents});"
+                f" got range [{int(ids.min())}, {int(ids.max())}]"
+            )
+        if ids.size > 1 and not bool(np.all(ids[1:] > ids[:-1])):
+            raise ValueError(f"{what}: local_ids must be sorted and unique")
+    start, stop = owned_agent_bounds(n_agents, rank, size)
+    if ids.size and (int(ids.min()) < start or int(ids.max()) >= stop):
+        if start < stop:
+            expected_desc = f"[{start}, {stop - 1}]"
+        else:
+            expected_desc = "empty"
+        raise ValueError(
+            f"{what}: local_ids must belong to rank {rank}'s contiguous"
+            f" global-agent shard ({expected_desc}); got out-of-shard ids"
         )
     return ids
 
@@ -192,12 +228,12 @@ def route_values_validated(
 def route_bucket_for_rank(
     values: Mapping[int, float],
     *,
-    n_observations: int,
+    n_agents: int,
     size: int,
     rank: int,
 ) -> dict[int, float]:
     return {
         int(gid): float(value)
         for gid, value in sorted(values.items())
-        if agent_owner_rank(int(gid), n_observations, size) == int(rank)
+        if agent_owner_rank(int(gid), n_agents, size) == int(rank)
     }

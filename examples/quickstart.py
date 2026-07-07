@@ -97,7 +97,7 @@ model = cb.Model(
     formulation=cb.NSlack,
 )
 
-# Estimate by row generation, then run the Bayesian bootstrap.
+# Estimate by row generation, then run a multiplier bootstrap.
 fit = cb.estimate_distributed(
     model,
     n_observations=N,

@@ -37,6 +37,13 @@ Repository = "https://github.com/enzodipasquale/combRUM"
 Issues = "https://github.com/enzodipasquale/combRUM/issues"
 
 [project.optional-dependencies]
+test = [
+  "psutil>=5.9",
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "scipy>=1.10",
+  "tomli>=2.0; python_version < '3.11'",
+]
 examples = [
   "highspy>=1.7",
   "linearmodels>=7.0",
@@ -54,7 +61,7 @@ mpi = ["mpi4py>=4.0"]
 
 # Version is single-sourced from the package so releases can't drift from code.
 [tool.hatch.version]
-path = "src/combrum/__init__.py"
+path = "src/combrum/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/combrum"]
@@ -69,4 +76,5 @@ only-include = [
   "notebooks",
   "pyproject.toml",
   "src",
+  "tests",
 ]

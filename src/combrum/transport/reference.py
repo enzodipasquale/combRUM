@@ -31,10 +31,10 @@ from combrum.transport._common import (
     route_bucket_for_rank as _route_bucket_for_rank,
 )
 from combrum.transport._common import (
-    route_geometry_validated as _route_geometry_validated,
+    route_agent_axis_validated as _route_agent_axis_validated,
 )
 from combrum.transport._common import (
-    route_local_ids_shape_validated as _route_local_ids_shape_validated,
+    route_local_ids_owned_validated as _route_local_ids_owned_validated,
 )
 from combrum.transport._common import (
     route_values_validated as _route_values_validated,
@@ -170,30 +170,97 @@ def _agreed_owners(
     return first
 
 
-def _combine_owner_sum(
-    values_by_rank: Sequence[np.ndarray], owners: np.ndarray, my_rank: int
-) -> dict[int, np.ndarray]:
+def _combine_owner_broadcast(
+    values_by_rank: Sequence[np.ndarray], owners: np.ndarray
+) -> np.ndarray:
     B = owners.shape[0]
     arrays: list[np.ndarray] = []
     for r, v in enumerate(values_by_rank):
         arr = np.asarray(v, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[0] != B:
             raise ValueError(
-                f"owner_sum: values must have shape (B, M) = ({B}, M);"
+                f"owner_broadcast: values must have shape (B, M) = ({B}, M);"
                 f" rank {r} passed shape {arr.shape}"
             )
         arrays.append(arr)
     if len({a.shape for a in arrays}) != 1:
         raise ValueError(
-            "owner_sum: every rank must pass the same (B, M) shape;"
+            "owner_broadcast: every rank must pass the same (B, M) shape;"
             f" got shapes {sorted(a.shape for a in arrays)}"
         )
-    stacked = np.stack(arrays, axis=0)  # (R, B, M), rank-major
-    rank_ids = np.arange(len(arrays))
-    out: dict[int, np.ndarray] = {}
-    for b in np.flatnonzero(owners == my_rank):
-        combined = canonical_sum(stacked[:, int(b), :], rank_ids)
-        out[int(b)] = np.asarray(combined)
+    out = np.zeros_like(arrays[0], dtype=np.float64)
+    for b, owner in enumerate(owners):
+        out[b, :] = arrays[int(owner)][b, :]
+    return out
+
+
+def _normalize_batched_agent_values(
+    payloads_by_rank: Sequence[object],
+    owners: np.ndarray,
+    *,
+    n_agents: int,
+) -> dict[int, dict[int, float]]:
+    by_rep: dict[int, dict[int, float]] = {}
+    B = int(owners.shape[0])
+    for rank, payload in enumerate(payloads_by_rank):
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, Mapping):
+            raise ValueError(
+                "route_agent_values_batched: values_by_rep must be a mapping"
+                f" or None; rank {rank} passed {type(payload).__name__}"
+            )
+        for rep_key, values in payload.items():
+            if (
+                isinstance(rep_key, (bool, np.bool_))
+                or not isinstance(rep_key, (int, np.integer))
+                or int(rep_key) < 0
+                or int(rep_key) >= B
+            ):
+                raise ValueError(
+                    "route_agent_values_batched: replication ids must lie in"
+                    f" [0, {B}); rank {rank} passed {rep_key!r}"
+                )
+            rep = int(rep_key)
+            if int(owners[rep]) != rank:
+                raise ValueError(
+                    "route_agent_values_batched: only the owner rank may pass"
+                    f" values for replication {rep}; owner is"
+                    f" {int(owners[rep])}, rank {rank} passed values"
+                )
+            by_rep[rep] = _route_values_validated(
+                values,
+                n_agents=n_agents,
+                rank=rank,
+                source=rank,
+                what="route_agent_values_batched",
+            )
+    return by_rep
+
+
+def _combine_batched_route_agent_values(
+    payloads_by_rank: Sequence[object],
+    owners: np.ndarray,
+    *,
+    n_agents: int,
+    size: int,
+    my_rank: int,
+) -> dict[int, dict[int, float]]:
+    by_rep = _normalize_batched_agent_values(
+        payloads_by_rank,
+        owners,
+        n_agents=n_agents,
+    )
+    out: dict[int, dict[int, float]] = {}
+    for rep, values in by_rep.items():
+        bucket = _route_bucket_for_rank(
+            values,
+            n_agents=n_agents,
+            size=size,
+            rank=my_rank,
+        )
+        if bucket:
+            out[int(rep)] = bucket
     return out
 
 
@@ -314,7 +381,7 @@ def _node_view(
     return MappingProxyType({key: value.view() for key, value in published.items()})
 
 
-# serial double
+# single-rank transport
 
 
 class SerialTransport(Transport):
@@ -403,28 +470,62 @@ class SerialTransport(Transport):
         local_ids: np.ndarray,
         *,
         source: int,
-        n_observations: int,
-        n_simulations: int,
+        n_agents: int,
     ) -> dict[int, float]:
-        n_obs, _n_sims, n_agents, src = _route_geometry_validated(
-            n_observations,
-            n_simulations,
+        n_agents_i, src = _route_agent_axis_validated(
+            n_agents,
             size=1,
             source=source,
             what="route_agent_values",
         )
-        _route_local_ids_shape_validated(local_ids, what="route_agent_values")
+        _route_local_ids_owned_validated(
+            local_ids,
+            n_agents=n_agents_i,
+            rank=0,
+            size=1,
+            what="route_agent_values",
+        )
         normalized = _route_values_validated(
             values,
-            n_agents=n_agents,
+            n_agents=n_agents_i,
             rank=0,
             source=src,
             what="route_agent_values",
         )
         bucket = _route_bucket_for_rank(
-            normalized, n_observations=n_obs, size=1, rank=0
+            normalized, n_agents=n_agents_i, size=1, rank=0
         )
         return bucket
+
+    def route_agent_values_batched(
+        self,
+        values_by_rep: Mapping[int, Mapping[int, float]] | None,
+        local_ids: np.ndarray,
+        *,
+        owners: np.ndarray,
+        n_agents: int,
+    ) -> dict[int, dict[int, float]]:
+        n_agents_i, _src = _route_agent_axis_validated(
+            n_agents,
+            size=1,
+            source=0,
+            what="route_agent_values_batched",
+        )
+        _route_local_ids_owned_validated(
+            local_ids,
+            n_agents=n_agents_i,
+            rank=0,
+            size=1,
+            what="route_agent_values_batched",
+        )
+        agreed = _agreed_owners([owners], size=1, what="route_agent_values_batched")
+        return _combine_batched_route_agent_values(
+            [values_by_rep],
+            agreed,
+            n_agents=n_agents_i,
+            size=1,
+            my_rank=0,
+        )
 
     def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         return _node_view(_publish_node_arrays(arrays))
@@ -432,11 +533,9 @@ class SerialTransport(Transport):
     def batched_max(self, values: np.ndarray) -> np.ndarray:
         return _combine_batched_max([values])
 
-    def owner_sum(
-        self, values: np.ndarray, owners: np.ndarray
-    ) -> dict[int, np.ndarray]:
-        agreed = _agreed_owners([owners], size=1, what="owner_sum")
-        return _combine_owner_sum([values], agreed, my_rank=0)
+    def owner_broadcast(self, values: np.ndarray, owners: np.ndarray) -> np.ndarray:
+        agreed = _agreed_owners([owners], size=1, what="owner_broadcast")
+        return _combine_owner_broadcast([values], agreed)
 
     def exchange_cuts(
         self, rows: Sequence[CutRow], owners: np.ndarray
@@ -445,7 +544,7 @@ class SerialTransport(Transport):
         return _combine_cuts([tuple(rows)], agreed, my_rank=0)
 
 
-# multirank double
+# in-process multirank transport
 
 
 class _Rendezvous:
@@ -624,7 +723,7 @@ class LocalMultirankTransport(Transport):
                 f"scatter_by_agent: rank {root} must pass the full arrays; got None"
             )
         normalized, n_global = _scatter_arrays_validated(root_arrays)
-        # Validate every rank's ids on every rank: a divergent caller bug
+        # Validate every rank's ids on every rank: divergent caller state
         # raises the same error everywhere instead of stranding peers.
         ids_by_rank = [
             _ids_validated(entry[1], n_global, "scatter_by_agent")  # type: ignore[index]
@@ -670,42 +769,43 @@ class LocalMultirankTransport(Transport):
         local_ids: np.ndarray,
         *,
         source: int,
-        n_observations: int,
-        n_simulations: int,
+        n_agents: int,
     ) -> dict[int, float]:
         payload = (
             values,
             local_ids,
-            n_observations,
-            n_simulations,
+            n_agents,
             source,
         )
         gathered = self._rendezvous.exchange(self._rank, "route_agent_values", payload)
         geometries = {
-            (entry[2], entry[3], entry[4]) for entry in gathered  # type: ignore[index]
+            (entry[2], entry[3])  # type: ignore[index]
+            for entry in gathered
         }
         if len(geometries) != 1:
             raise ValueError(
-                "route_agent_values: n_observations, n_simulations, and"
-                " source must be identical on every rank"
+                "route_agent_values: n_agents and source must be identical"
+                " on every rank"
             )
         first = gathered[0]  # type: ignore[index]
-        n_obs, _n_sims, n_agents, src = _route_geometry_validated(
+        n_agents_i, src = _route_agent_axis_validated(
             first[2],
-            first[3],
             size=self._size,
-            source=first[4],
+            source=first[3],
             what="route_agent_values",
         )
-        for entry in gathered:
-            _route_local_ids_shape_validated(
+        for r, entry in enumerate(gathered):
+            _route_local_ids_owned_validated(
                 entry[1],
+                n_agents=n_agents_i,
+                rank=r,
+                size=self._size,
                 what="route_agent_values",  # type: ignore[index]
             )
         normalized_by_rank = [
             _route_values_validated(
                 entry[0],  # type: ignore[index]
-                n_agents=n_agents,
+                n_agents=n_agents_i,
                 rank=r,
                 source=src,
                 what="route_agent_values",
@@ -715,11 +815,62 @@ class LocalMultirankTransport(Transport):
         source_values = normalized_by_rank[src]
         bucket = _route_bucket_for_rank(
             source_values,
-            n_observations=n_obs,
+            n_agents=n_agents_i,
             size=self._size,
             rank=self._rank,
         )
         return bucket
+
+    def route_agent_values_batched(
+        self,
+        values_by_rep: Mapping[int, Mapping[int, float]] | None,
+        local_ids: np.ndarray,
+        *,
+        owners: np.ndarray,
+        n_agents: int,
+    ) -> dict[int, dict[int, float]]:
+        payload = (
+            values_by_rep,
+            local_ids,
+            owners,
+            n_agents,
+        )
+        gathered = self._rendezvous.exchange(
+            self._rank, "route_agent_values_batched", payload
+        )
+        geometries = {entry[3] for entry in gathered}  # type: ignore[index]
+        if len(geometries) != 1:
+            raise ValueError(
+                "route_agent_values_batched: n_agents must be identical"
+                " on every rank"
+            )
+        first = gathered[0]  # type: ignore[index]
+        n_agents_i, _src = _route_agent_axis_validated(
+            first[3],
+            size=self._size,
+            source=0,
+            what="route_agent_values_batched",
+        )
+        for r, entry in enumerate(gathered):
+            _route_local_ids_owned_validated(
+                entry[1],
+                n_agents=n_agents_i,
+                rank=r,
+                size=self._size,
+                what="route_agent_values_batched",  # type: ignore[index]
+            )
+        agreed = _agreed_owners(
+            [entry[2] for entry in gathered],  # type: ignore[index]
+            self._size,
+            "route_agent_values_batched",
+        )
+        return _combine_batched_route_agent_values(
+            [entry[0] for entry in gathered],  # type: ignore[index]
+            agreed,
+            n_agents=n_agents_i,
+            size=self._size,
+            my_rank=self._rank,
+        )
 
     def node_shared(self, arrays: dict[str, np.ndarray]) -> Mapping[str, np.ndarray]:
         if self._node.node_rank == 0:
@@ -755,23 +906,20 @@ class LocalMultirankTransport(Transport):
         )
         return _combine_batched_max(gathered)  # type: ignore[arg-type]
 
-    def owner_sum(
-        self, values: np.ndarray, owners: np.ndarray
-    ) -> dict[int, np.ndarray]:
+    def owner_broadcast(self, values: np.ndarray, owners: np.ndarray) -> np.ndarray:
         payload = (
             np.asarray(values, dtype=np.float64),
             np.asarray(owners),
         )
-        gathered = self._rendezvous.exchange(self._rank, "owner_sum", payload)
+        gathered = self._rendezvous.exchange(self._rank, "owner_broadcast", payload)
         agreed = _agreed_owners(
             [entry[1] for entry in gathered],  # type: ignore[index]
             self._size,
-            "owner_sum",
+            "owner_broadcast",
         )
-        return _combine_owner_sum(
+        return _combine_owner_broadcast(
             [entry[0] for entry in gathered],  # type: ignore[index]
             agreed,
-            self._rank,
         )
 
     def exchange_cuts(

@@ -1,0 +1,150 @@
+{
+  "bootstrap": [
+    {
+      "MIPFocus": 1,
+      "TimeLimit": 1.0,
+      "min_iterations": 2
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 1.0,
+      "min_iterations": 2
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    }
+  ],
+  "case_id": "adaptive_timeout_replay",
+  "n_iters": 12,
+  "point": [
+    {
+      "MIPFocus": 1,
+      "TimeLimit": 1.0,
+      "min_iterations": 2
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 1.0,
+      "min_iterations": 2
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 5.0,
+      "min_iterations": 5
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 30.0,
+      "min_iterations": 0
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    },
+    {
+      "MIPFocus": 0,
+      "TimeLimit": 600.0,
+      "min_iterations": 1000000000
+    }
+  ],
+  "ref_id": "fixture",
+  "schedule": [
+    {
+      "iters": 2,
+      "retire": false,
+      "timeout": 1.0
+    },
+    {
+      "iters": 3,
+      "retire": false,
+      "timeout": 5.0
+    },
+    {
+      "iters": 4,
+      "retire": true,
+      "timeout": 30.0
+    },
+    {
+      "retire": false,
+      "timeout": 600.0
+    }
+  ]
+}

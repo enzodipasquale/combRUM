@@ -1,0 +1,536 @@
+from __future__ import annotations
+
+import importlib
+from types import SimpleNamespace
+
+import numpy as np
+
+from combrum.engine.estimate import estimate_distributed
+from combrum.engine.driver import LoopDiagnostics, LoopOutcome
+from combrum.formulation import FormulationResult
+import pytest
+
+from combrum.cut_policies import AddAll, PurgeInactive
+from combrum.formulations import NSlack, OneSlack
+from combrum.model import Model
+from combrum.oracle import Oracle
+from combrum.parameters import Parameters
+from combrum.transport import LocalCluster, SerialTransport, TransportError
+from combrum.transport.base import CutRow
+
+
+class _Oracle(Oracle):
+    pass
+
+
+class _ObservedSurface:
+    def setup_observed(self, transport, observation_ids: np.ndarray) -> None:
+        self.setup_ids = tuple(map(int, observation_ids))
+
+    def observed_features_batch(self, observation_ids: np.ndarray) -> np.ndarray:
+        ids = np.asarray(observation_ids, dtype=np.float64)
+        return np.ascontiguousarray(
+            np.column_stack([ids + 1.0, 2.0 * ids + 1.0]),
+            dtype=np.float64,
+        )
+
+    def __call__(self, agent_id: int, bundle: np.ndarray):
+        b = np.asarray(bundle, dtype=np.float64)
+        return np.array([b[0], b[0]], dtype=np.float64), 0.0
+
+
+def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+    surface = _ObservedSurface()
+    seen = {}
+
+    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("estimate_distributed must not call build_fit_context")
+
+    def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
+        seen["ctx"] = ctx
+        seen["config"] = config
+        return LoopOutcome(
+            result=FormulationResult(
+                theta_hat=np.zeros(ctx.K, dtype=np.float64),
+                objective=0.0,
+                n_active_cuts=0,
+            ),
+            diagnostics=LoopDiagnostics(
+                converged=True,
+                iterations=0,
+                cuts_admitted=0,
+            ),
+        )
+
+    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
+    # qp_weight>0 makes require_quadratic true, which HiGHS refuses in
+    # resolve_master_backend; pin the resolved backend so the loop-control
+    # propagation is what's under test, not backend selection.
+    monkeypatch.setattr(
+        estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"
+    )
+    warm_start = SimpleNamespace(
+        theta_hat=np.array([0.25, -0.25], dtype=np.float64)
+    )
+
+    def sentinel_callback(iteration, oracle):  # type: ignore[no-untyped-def]
+        return None
+
+    result = estimate_distributed(
+        Model(
+            _Oracle(),
+            Parameters({"theta": (-2.0, 2.0, 2)}),
+            features=surface,
+            observed_features=surface,
+            formulation=NSlack,
+        ),
+        n_observations=5,
+        n_simulations=4,
+        transport=SerialTransport(),
+        master_backend="highs",
+        min_iterations=3,
+        max_iterations=7,
+        tolerance=7e-3,
+        qp_weight=0.5,
+        decay=3,
+        penalty_ref="dynamic",
+        iteration_callback=sentinel_callback,
+        warm_start=warm_start,
+    )
+
+    ctx = seen["ctx"]
+    assert ctx.N == 5
+    assert ctx.S == 4
+    assert ctx.n_agents == 20
+    assert ctx.weight_mode == "distributed"
+    assert ctx.theta_coef is None
+    assert ctx.agent_weights is None
+    # Serial owns the full [0,5) shard, so local_ids is arange(20) under any
+    # blocking order; the per-simulation vs per-observation layout is pinned by
+    # test_estimate_distributed_local_ids_use_per_simulation_blocking below,
+    # which shards the observations so the two orders diverge.
+    np.testing.assert_array_equal(ctx.local_ids, np.arange(20, dtype=np.int64))
+    np.testing.assert_array_equal(ctx.theta_init, warm_start.theta_hat)
+    assert ctx.theta_init.flags.writeable is False
+    # tolerance must propagate from the caller into the built context, not be
+    # hardcoded to the 1e-6 default.
+    assert ctx.tolerance == 7e-3
+    # Pin the whole LoopConfig: every loop control must propagate from the
+    # caller into the config the driver receives. Each field here is a
+    # non-default value that a hardcoded constant would not reproduce.
+    config = seen["config"]
+    assert config.max_iterations == 7
+    assert config.min_iterations == 3
+    assert config.qp_weight == 0.5
+    assert config.decay == 3
+    assert config.penalty_ref == "dynamic"
+    assert config.iteration_callback is sentinel_callback
+    np.testing.assert_allclose(
+        result.empirical_moment,
+        np.array([3.0, 5.0], dtype=np.float64),
+    )
+    # setup_observed must receive the owned observation shard (serial owns all
+    # five); a wrong-id or skipped call would preload the wrong observed rows.
+    assert surface.setup_ids == tuple(range(5))
+
+
+def test_estimate_distributed_empirical_moment_divides_by_global_n(
+    monkeypatch,
+) -> None:
+    # N=5 over two ranks: shards are [0,1,2] and [3,4], so no single rank owns
+    # all N rows. The moment normalizer must divide the global feature sum by
+    # N, not by a rank's shard size, so the denominator is exercised through
+    # the public entry point (serial can't: there owned_obs.size == N).
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+
+    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("estimate_distributed must not call build_fit_context")
+
+    def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
+        return LoopOutcome(
+            result=FormulationResult(
+                theta_hat=np.zeros(ctx.K, dtype=np.float64),
+                objective=0.0,
+                n_active_cuts=0,
+            ),
+            diagnostics=LoopDiagnostics(
+                converged=True,
+                iterations=0,
+                cuts_admitted=0,
+            ),
+        )
+
+    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
+
+    def run(transport):
+        surface = _ObservedSurface()
+        result = estimate_distributed(
+            Model(
+                _Oracle(),
+                Parameters({"theta": (-2.0, 2.0, 2)}),
+                features=surface,
+                observed_features=surface,
+                formulation=NSlack,
+            ),
+            n_observations=5,
+            n_simulations=4,
+            transport=transport,
+            master_backend="highs",
+            max_iterations=1,
+        )
+        return np.asarray(result.empirical_moment, dtype=np.float64).copy()
+
+    # Hand-computed: rows i -> [i+1, 2i+1] for i in 0..4, so sum(phi) = [15, 25]
+    # and sum(phi)/N = [3.0, 5.0]. A /shard-size faulty implementation would give rank 0
+    # [5, 8.33...] and rank 1 [7.5, 12.5] instead.
+    for moment in LocalCluster(2).run(run):
+        np.testing.assert_allclose(
+            moment, np.array([3.0, 5.0], dtype=np.float64)
+        )
+
+
+def test_estimate_distributed_local_ids_use_agent_axis_shards(
+    monkeypatch,
+) -> None:
+    # Observed moments shard over N, but pricing must shard over N*S so every
+    # simulated agent is assigned once even when ranks exceed N.
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+
+    captured: dict[int, np.ndarray] = {}
+
+    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("estimate_distributed must not call build_fit_context")
+
+    def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
+        captured[ctx.transport.rank] = np.asarray(ctx.local_ids).copy()
+        return LoopOutcome(
+            result=FormulationResult(
+                theta_hat=np.zeros(ctx.K, dtype=np.float64),
+                objective=0.0,
+                n_active_cuts=0,
+            ),
+            diagnostics=LoopDiagnostics(
+                converged=True,
+                iterations=0,
+                cuts_admitted=0,
+            ),
+        )
+
+    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
+
+    def run(transport):
+        surface = _ObservedSurface()
+        estimate_distributed(
+            Model(
+                _Oracle(),
+                Parameters({"theta": (-2.0, 2.0, 2)}),
+                features=surface,
+                observed_features=surface,
+                formulation=NSlack,
+            ),
+            n_observations=5,
+            n_simulations=4,
+            transport=transport,
+            master_backend="highs",
+            max_iterations=1,
+        )
+        return transport.rank
+
+    LocalCluster(2).run(run)
+
+    np.testing.assert_array_equal(
+        captured[0],
+        np.arange(0, 10, dtype=np.int64),
+    )
+    np.testing.assert_array_equal(
+        captured[1],
+        np.arange(10, 20, dtype=np.int64),
+    )
+    # Together the shards tile [0, N*S) exactly once (a partition invariant a
+    # duplicating/dropping layout would break).
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate([captured[0], captured[1]])),
+        np.arange(20, dtype=np.int64),
+    )
+
+
+def test_estimate_distributed_requires_rank_uniform_loop_controls() -> None:
+    def run(transport):
+        surface = _ObservedSurface()
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=NSlack,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                max_iterations=1 if transport.rank == 0 else 2,
+                master_backend="highs",
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(
+        "max_iterations must match" in message
+        for message in LocalCluster(2).run(run)
+    )
+
+
+def test_estimate_distributed_requires_rank_uniform_formulation_support() -> None:
+    def run(transport):
+        surface = _ObservedSurface()
+        formulation = NSlack if transport.rank == 0 else OneSlack
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=formulation,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                master_backend="highs",
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(
+        "model.formulation is NSlack must match" in message
+        for message in LocalCluster(2).run(run)
+    )
+
+
+def test_estimate_distributed_requires_rank_uniform_master_backend() -> None:
+    def run(transport):
+        surface = _ObservedSurface()
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=NSlack,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                # Both are valid backend choices, so the error can only come from
+                # cross-rank value disagreement, not from choice validation.
+                master_backend="highs" if transport.rank == 0 else "gurobi",
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(
+        "master_backend must match" in message
+        for message in LocalCluster(2).run(run)
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("presence", "warm_start must match"),
+        ("shape", "warm_start must match"),
+        ("value", "warm_start must match"),
+        ("access", "warm_start must match"),
+        # Both ranks pass an unreadable warm start: the cross-rank disagreement
+        # axis cannot fire (tokens are identical failures), so the message can
+        # only come from the access guard rejecting the warm start on its own
+        # merits. Pins the guard against silent coercion of a broken warm start.
+        ("access_both", "warm_start.theta_hat could not be read"),
+        ("nonfinite_head", "warm_start.theta_hat must be finite"),
+        ("nonfinite_tail", "warm_start.theta_hat must be finite"),
+        ("inf_tail", "warm_start.theta_hat must be finite"),
+    ],
+)
+def test_estimate_distributed_requires_rank_uniform_warm_start(
+    monkeypatch, case: str, match: str
+) -> None:
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+    monkeypatch.setattr(
+        estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"
+    )
+
+    def warm(theta):
+        return SimpleNamespace(theta_hat=np.asarray(theta, dtype=np.float64))
+
+    class _BrokenWarmStart:
+        @property
+        def theta_hat(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("theta boom")
+
+    def run(transport):
+        if case == "presence":
+            warm_start = warm([0.0, 0.0]) if transport.rank == 0 else None
+        elif case == "shape":
+            warm_start = warm([0.0, 0.0] if transport.rank == 0 else [0.0, 0.0, 0.0])
+        elif case == "value":
+            warm_start = warm([0.0, 0.0] if transport.rank == 0 else [0.0, 0.25])
+        elif case == "access":
+            warm_start = warm([0.0, 0.0]) if transport.rank == 0 else _BrokenWarmStart()
+        elif case == "access_both":
+            warm_start = _BrokenWarmStart()
+        elif case == "nonfinite_head":
+            warm_start = warm([np.nan, 0.0])
+        elif case == "nonfinite_tail":
+            # non-finite value away from index 0: a finiteness guard that only
+            # inspects the first entry must still reject this.
+            warm_start = warm([0.0, np.nan])
+        else:
+            warm_start = warm([0.0, np.inf])
+        surface = _ObservedSurface()
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=NSlack,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                master_backend="highs",
+                warm_start=warm_start,
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(match in message for message in LocalCluster(2).run(run))
+
+
+def test_estimate_distributed_serial_rejects_unreadable_warm_start(monkeypatch) -> None:
+    # On the serial (size==1) path there is no cross-rank axis at all, so a
+    # warm start whose theta_hat cannot be read must be rejected directly by
+    # the access guard. Silent coercion (or None-substitution) of the broken
+    # warm start would let the run proceed, so pin the guard's own ValueError.
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+    monkeypatch.setattr(
+        estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"
+    )
+
+    class _BrokenWarmStart:
+        @property
+        def theta_hat(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("theta boom")
+
+    surface = _ObservedSurface()
+    with pytest.raises(ValueError, match="warm_start.theta_hat could not be read"):
+        estimate_distributed(
+            Model(
+                _Oracle(),
+                Parameters({"theta": (-2.0, 2.0, 2)}),
+                features=surface,
+                observed_features=surface,
+                formulation=NSlack,
+            ),
+            n_observations=5,
+            n_simulations=4,
+            transport=SerialTransport(),
+            master_backend="highs",
+            warm_start=_BrokenWarmStart(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("master_params", "master_params must match"),
+        ("cut_policy", "cut_policy must match"),
+        ("warm_cuts", "warm_cuts must match"),
+    ],
+)
+def test_estimate_distributed_requires_rank_uniform_object_templates(
+    case: str, match: str
+) -> None:
+    def run(transport):
+        kwargs = {
+            "master_params": None,
+            "cut_policy": None,
+            "warm_cuts": None,
+        }
+        if case == "master_params":
+            kwargs["master_params"] = (
+                {"presolve": "on"} if transport.rank == 0 else {"presolve": "off"}
+            )
+        elif case == "cut_policy":
+            kwargs["cut_policy"] = (
+                AddAll() if transport.rank == 0 else PurgeInactive(max_age=1)
+            )
+        else:
+            kwargs["warm_cuts"] = (
+                ()
+                if transport.rank == 0
+                else (
+                    CutRow(
+                        rep_id=0,
+                        agent_id=0,
+                        phi=np.array([1.0, 0.0], dtype=np.float64),
+                        epsilon=0.0,
+                        bundle_key=b"b",
+                    ),
+                )
+            )
+        surface = _ObservedSurface()
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=NSlack,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                master_backend="highs",
+                max_iterations=1,
+                **kwargs,
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(match in message for message in LocalCluster(2).run(run))
+
+
+def test_estimate_distributed_rejects_unsupported_formulation_before_observed_setup() -> None:
+    class _ExplodingObserved(_ObservedSurface):
+        def setup_observed(self, transport, observation_ids: np.ndarray) -> None:
+            raise AssertionError("observed setup should not run")
+
+    surface = _ExplodingObserved()
+    with pytest.raises(NotImplementedError, match="NSlack"):
+        estimate_distributed(
+            Model(
+                _Oracle(),
+                Parameters({"theta": (-2.0, 2.0, 2)}),
+                features=surface,
+                observed_features=surface,
+                formulation=OneSlack,
+            ),
+            n_observations=5,
+            n_simulations=4,
+            transport=SerialTransport(),
+            master_backend="highs",
+        )

@@ -22,12 +22,13 @@ construction so model-specific code stays on the caller's side.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from combrum._bundle_key import canonical_bundle_key as _canonical_bundle_key
 from combrum.context import FitContext, ResultPublication
 from combrum.demand import Demand, DemandBatch
 from combrum.dual import DualSolution
@@ -45,6 +46,7 @@ from combrum.rowgen import MaxContribution, MaxReduced, StepOutcome
 from combrum.steprecord import (
     AdmitViolation,
     InstallSnapshot,
+    PricedFeature,
     PricedReducedCost,
     PurgeInput,
     TraceSink,
@@ -59,18 +61,18 @@ from combrum.transport.base import CutRow, _pack_bundle, _unpack_bundle
 __all__ = ["FeatureMap", "NSlack"]
 
 _RECEIVED_VIOLATION_BLOCK_ELEMENTS = 1_000_000
+_CONTRIBUTE_FEATURE_BLOCK_ELEMENTS = 1_000_000
 
 
-# The cut-identity codec is owned by transport.base (single source of truth).
-# These module-level names stay for in-module call sites that pack and decode
-# generating bundles.
+# Bundle keys share the package-level codec; these aliases keep local call sites
+# compact.
 bundle_key = _pack_bundle
 _bundle_from_key = _unpack_bundle
 
 
 @dataclass(frozen=True)
 class _MasterState:
-    """Root's post-solve master view, mirrored to every rank.
+    """Owner's post-solve master view, mirrored to every rank.
 
     Broadcasts only scalar/global state; the owner scatters shard-local ``u``
     separately so workers never receive every agent's epigraph value.
@@ -130,6 +132,37 @@ def _dual_solution(
     )
 
 
+def _deduplicate_cut_rows(rows: tuple[CutRow, ...]) -> tuple[CutRow, ...]:
+    if len(rows) < 2:
+        return _canonicalize_cut_rows(rows)
+    seen: set[tuple[int, bytes]] = set()
+    unique: list[CutRow] = []
+    for row in _canonicalize_cut_rows(rows):
+        key = (row.agent_id, row.bundle_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return tuple(unique)
+
+
+def _canonicalize_cut_row(row: CutRow) -> CutRow:
+    key = _canonical_bundle_key(row.bundle_key)
+    if key == row.bundle_key:
+        return row
+    return row._replace(bundle_key=key)
+
+
+def _canonicalize_cut_rows(rows: tuple[CutRow, ...]) -> tuple[CutRow, ...]:
+    if not rows:
+        return rows
+    return tuple(_canonicalize_cut_row(row) for row in rows)
+
+
+def _feature_block_size(K: int) -> int:
+    return max(1, _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS // max(1, int(K)))
+
+
 def _dual_packet(dual: DualSolution) -> _DualPacket:
     return _DualPacket(
         agent_ids=np.asarray(dual.agent_ids, dtype=np.int64),
@@ -165,8 +198,8 @@ class NSlack(Formulation):
     distributed entry points.
 
     The master lives only on the owner rank (``ctx.owner_rank``, default 0;
-    ``None`` elsewhere); every touch is root-guarded inside a transport
-    collective, followed by one broadcast of the full decision state.
+    ``None`` elsewhere); every touch is owner-guarded inside a transport
+    collective, followed by one broadcast of the decision state.
     Admission and retirement ride ``ctx.cut_policy`` when present; an unset
     policy admits everything and retires nothing.
     """
@@ -189,7 +222,7 @@ class NSlack(Formulation):
         """
         self._trace_sink = sink
 
-    def setup(self, ctx: FitContext) -> None:
+    def _prepare_setup(self, ctx: FitContext) -> None:
         self._ctx = ctx
         self._transport = ctx.transport
         if ctx.cut_policy is not None and ctx.weight_mode == "dense":
@@ -201,45 +234,82 @@ class NSlack(Formulation):
         self._owner_rank = ctx.owner_rank
         self._owners = np.array([self._owner_rank], dtype=np.int64)
         self._owners.setflags(write=False)
-        self._is_root = ctx.transport.rank == self._owner_rank
+        self._is_owner = ctx.transport.rank == self._owner_rank
         self._master: MasterBackend | None = ctx.master_backend
         self._iteration = 0
         # Resolve the features path once, identically on every rank, before
         # any data-dependent branch; agreement token rides the setup bcast.
         self._features_res: Resolution = resolve_features(self._features_arg)
+
+    def _feature_token(self) -> object:
+        return self._features_res.token
+
+    def prepare_warm_cuts(self, rows: Sequence[CutRow]) -> tuple[CutRow, ...]:
+        return _canonicalize_cut_rows(tuple(rows))
+
+    def _distributed_feature_token(self) -> object:
+        return self._feature_token()
+
+    def _distributed_route_spec(self) -> tuple[np.ndarray, int]:
+        return self._ctx.local_ids, self._ctx.n_agents
+
+    def _distributed_owner_u(self) -> Mapping[int, float] | None:
+        return self._u if self._is_owner else None
+
+    def _distributed_set_owner_u(self, values: Mapping[int, float] | None) -> None:
+        if self._is_owner and values is not None:
+            self._u = dict(values)
+
+    def _owner_initial_state(self) -> tuple[_MasterState | None, dict[int, float] | None]:
+        packet: _MasterState | None = None
+        full_u: dict[int, float] | None = None
+        if self._is_owner:
+            if self._master is None:
+                raise ValueError(
+                    "NSlack is master-based by definition:"
+                    " ctx.master_backend must be set on the owner rank"
+                )
+            if not isinstance(self._master, MasterBackend):
+                raise ValueError(
+                    "ctx.master_backend must implement MasterBackend;"
+                    f" got {type(self._master).__name__}"
+                )
+            self._master.solve()
+            packet, full_u = self._state(progressed=0)
+        return packet, full_u
+
+    def _setup_owner_local(
+        self, ctx: FitContext
+    ) -> tuple[_MasterState | None, dict[int, float] | None]:
+        """Initialise this rank; only the owner touches the master."""
+
+        self._prepare_setup(ctx)
+        return self._owner_initial_state()
+
+    def _distributed_setup_owner_local(
+        self, ctx: FitContext
+    ) -> tuple[_MasterState | None, dict[int, float] | None]:
+        return self._setup_owner_local(ctx)
+
+    def setup(self, ctx: FitContext) -> None:
+        self._prepare_setup(ctx)
         packet: _MasterState | None = None
         full_u: dict[int, float] | None = None
         # Master check and features rank-agreement share one guard so a
         # missing master or divergent build fails as an agreed verdict on
         # every rank rather than stranding peers in the broadcast.
         with self._transport.collective():
-            if self._is_root:
-                if self._master is None:
-                    raise ValueError(
-                        "NSlack is master-based by definition:"
-                        " ctx.master_backend must be set on the owner rank"
-                    )
-                if not isinstance(self._master, MasterBackend):
-                    raise ValueError(
-                        "ctx.master_backend must implement MasterBackend;"
-                        f" got {type(self._master).__name__}"
-                    )
-                # theta_init is the proximal/warm-start anchor, not a first
-                # query point: querying a non-master-solution would report a
-                # violation belonging to no iterate. The empty relaxation
-                # determines its own optimum.
-                self._master.solve()
-                packet, full_u = self._state(progressed=0)
-            # One broadcast carries root's master state AND its features
-            # token; each rank checks its token against root's so a per-rank
+            packet, full_u = self._owner_initial_state()
+            # One broadcast carries the owner's master state and features
+            # token; each rank checks its token against the owner's so a per-rank
             # build divergence becomes the agreed transport verdict.
-            root_packet, root_token = self._transport.bcast(
-                (packet, self._features_res.token) if self._is_root else None,
+            owner_packet, owner_token = self._transport.bcast(
+                (packet, self._features_res.token) if self._is_owner else None,
                 root=self._owner_rank,
             )
             local_u = self._local_u(full_u)
-            check_agreement(self._features_res.token, root_token)
-        self._adopt(root_packet, local_u=local_u, full_u=full_u)
+            check_agreement(self._features_res.token, owner_token)
+        self._adopt(owner_packet, local_u=local_u, full_u=full_u)
 
     def solve(self) -> np.ndarray:
         return self._theta.copy()
@@ -266,9 +336,8 @@ class NSlack(Formulation):
                 count=ids.size,
             )
             rc = payoffs - u
-            positive = rc[rc > 0.0]
-            if positive.size:
-                worst = float(positive.max())
+            if rc.size:
+                worst = max(0.0, float(rc.max()))
             if pending is not None:
                 for agent_id, bundle, value in zip(ids, bundles, rc):
                     pending.priced_reduced_costs.append(
@@ -278,29 +347,54 @@ class NSlack(Formulation):
                             rc=float(value),
                         )
                     )
-            keep = rc > self._ctx.tolerance
-            violated_ids_arr = ids[keep]
-            violated_bundles_arr = bundles[keep]
-            featured = feature_rows(
-                self._features_res, violated_ids_arr, violated_bundles_arr
-            )
+            keep_idx = np.flatnonzero(rc > self._ctx.tolerance)
+            rows: list[CutRow] = []
+            block_size = _feature_block_size(self._ctx.K)
+            for start in range(0, keep_idx.size, block_size):
+                block_idx = keep_idx[start : start + block_size]
+                block_ids = ids[block_idx]
+                block_bundles = bundles[block_idx]
+                featured = feature_rows(
+                    self._features_res,
+                    block_ids,
+                    block_bundles,
+                )
+                if pending is not None:
+                    block_payoffs = payoffs[block_idx]
+                    block_gaps = demands.gaps[block_idx]
+                    for agent, bundle, payoff, gap, (phi, eps) in zip(
+                        block_ids,
+                        block_bundles,
+                        block_payoffs,
+                        block_gaps,
+                        featured,
+                    ):
+                        phi_arr = np.array(phi, dtype=np.float64)
+                        phi_arr.setflags(write=False)
+                        pending.priced_features.append(
+                            PricedFeature(
+                                agent_id=int(agent),
+                                bundle_key=bundle_key(bundle),
+                                payoff=float(payoff),
+                                gap=float(gap),
+                                phi=phi_arr,
+                                eps=float(eps),
+                            )
+                        )
+                rows.extend(
+                    CutRow(
+                        rep_id=0,
+                        agent_id=int(agent),
+                        phi=phi,
+                        epsilon=eps,
+                        bundle_key=bundle_key(bundle),
+                    )
+                    for agent, bundle, (phi, eps) in zip(
+                        block_ids, block_bundles, featured
+                    )
+                )
             if pending is not None:
-                pending.priced_features = list(
-                    priced_features_from(demands, violated_ids_arr, featured)
-                )
                 self._pending = pending
-            rows = [
-                CutRow(
-                    rep_id=0,
-                    agent_id=int(agent),
-                    phi=phi,
-                    epsilon=eps,
-                    bundle_key=bundle_key(bundle),
-                )
-                for agent, bundle, (phi, eps) in zip(
-                    violated_ids_arr, violated_bundles_arr, featured
-                )
-            ]
             return MaxContribution(worst=worst, local_rows=tuple(rows))
 
         for agent_id, demand in demands.items():
@@ -355,78 +449,99 @@ class NSlack(Formulation):
             install_payload=reduced.received_rows,
         )
 
-    def apply_step(self, install_payload: object) -> int:
-        # Install half of update on the already-exchanged rows: root-guarded
-        # admit/add/purge/solve, one master-state bcast, iteration bump.
-        received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
+    def _owner_install_step(
+        self, received: tuple[CutRow, ...]
+    ) -> tuple[_MasterState | None, dict[int, float] | None]:
         # Pending record opened in contribute (None with no sink or no prior
         # contribute). Root fills admit/purge/install fields below.
         pending = self._pending
         packet: _MasterState | None = None
         full_u: dict[int, float] | None = None
-        with self._transport.collective():
-            if self._is_root:
-                policy = self._ctx.cut_policy
-                profile = policy_profile(policy) if policy is not None else None
-                if policy is not None:
-                    if profile.needs_admit_violations or pending is not None:
-                        # Violation of each received row at the current
-                        # (pre-resolve) master solution: phi @ theta + eps - u_a.
-                        # Recomputed here so it stays parallel to `received`
-                        # after the exchange's reorder/dedup.
-                        violations = self._received_violations(received)
-                    else:
-                        violations = np.empty(0, dtype=np.float64)
-                    admitted = policy.admit(received, violations, self._iteration)
-                elif pending is not None:
-                    # No policy, so the live path needs no violations; the
-                    # capture still wants the pre-admit signal over every
-                    # received candidate, computed sink-gated only.
-                    violations = self._received_violations(received)
-                    admitted = received
+        if self._is_owner:
+            candidates = _deduplicate_cut_rows(received)
+            policy = self._ctx.cut_policy
+            profile = policy_profile(policy) if policy is not None else None
+            if policy is not None:
+                if profile.needs_admit_violations or pending is not None:
+                    violations = self._received_violations(candidates)
                 else:
-                    admitted = received
-                installed_rows: tuple[CutRow, ...] = ()
-                if pending is not None or (policy is not None and profile.retires_cuts):
-                    installed_rows = self._master.extract_cuts()
-                if pending is not None:
-                    # installed_before: the last-solved installed snapshot,
-                    # before any retire/add edit in this step.
-                    installed_before = frozenset(
-                        (row.agent_id, row.bundle_key) for row in installed_rows
+                    violations = np.empty(0, dtype=np.float64)
+                admitted = policy.admit(candidates, violations, self._iteration)
+            elif pending is not None:
+                violations = self._received_violations(candidates)
+                admitted = candidates
+            else:
+                admitted = candidates
+            installed_rows: tuple[CutRow, ...] = ()
+            if pending is not None or (policy is not None and profile.retires_cuts):
+                installed_rows = self._master.extract_cuts()
+            if pending is not None:
+                installed_before = frozenset(
+                    (row.agent_id, row.bundle_key) for row in installed_rows
+                )
+                pending.admit_violations = [
+                    AdmitViolation(
+                        agent_id=row.agent_id,
+                        bundle_key=row.bundle_key,
+                        violation=float(v),
                     )
-                    pending.admit_violations = [
-                        AdmitViolation(
-                            agent_id=row.agent_id,
-                            bundle_key=row.bundle_key,
-                            violation=float(v),
-                        )
-                        for row, v in zip(received, violations)
-                    ]
-                retired_keys: set[tuple[int, bytes]] = set()
-                if policy is not None and profile.retires_cuts:
-                    retired_keys = self._purge(policy, profile, installed_rows, pending)
-                n_new = self._master.add_cuts(admitted)
-                if pending is not None:
-                    pending.install = InstallSnapshot(
-                        installed_before=installed_before,
-                        admitted=frozenset(
-                            (row.agent_id, row.bundle_key) for row in admitted
-                        ),
-                    )
-                if n_new or retired_keys:
-                    self._master.solve()
-                packet, full_u = self._state(progressed=n_new)
+                    for row, v in zip(candidates, violations)
+                ]
+            retired_keys: set[tuple[int, bytes]] = set()
+            if policy is not None and profile.retires_cuts:
+                retired_keys = self._purge(policy, profile, installed_rows, pending)
+            n_new = self._master.add_cuts(admitted)
+            if pending is not None:
+                pending.install = InstallSnapshot(
+                    installed_before=installed_before,
+                    admitted=frozenset(
+                        (row.agent_id, row.bundle_key) for row in admitted
+                    ),
+                )
+            if n_new or retired_keys:
+                self._master.solve()
+            packet, full_u = self._state(progressed=n_new)
+        return packet, full_u
+
+    def _apply_owner_step(
+        self, install_payload: object
+    ) -> tuple[_MasterState | None, dict[int, float] | None]:
+        """Apply routed rows on the owner without transport calls."""
+
+        received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
+        return self._owner_install_step(received)
+
+    def _distributed_apply_owner_step(
+        self, install_payload: object
+    ) -> tuple[_MasterState | None, dict[int, float] | None]:
+        return self._apply_owner_step(install_payload)
+
+    def _adopt_owner_state(
+        self,
+        state: _MasterState,
+        *,
+        local_u: Mapping[int, float] | None = None,
+        full_u: Mapping[int, float] | None = None,
+        bump_iteration: bool = True,
+    ) -> int:
+        self._adopt(state, local_u=local_u, full_u=full_u)
+        if bump_iteration:
+            self._iteration += 1
+            pending = self._pending
+            if pending is not None:
+                self._emit(pending)
+                self._pending = None
+        return int(state.progressed)
+
+    def apply_step(self, install_payload: object) -> int:
+        received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
+        packet: _MasterState | None = None
+        full_u: dict[int, float] | None = None
+        with self._transport.collective():
+            packet, full_u = self._owner_install_step(received)
         state = self._transport.bcast(packet, root=self._owner_rank)
         local_u = self._local_u(full_u)
-        self._adopt(state, local_u=local_u, full_u=full_u)
-        self._iteration += 1
-        if pending is not None:
-            # Emit one sealed record per iteration at the last phase; clear so
-            # the next contribute opens a fresh one.
-            self._emit(pending)
-            self._pending = None
-        return state.progressed
+        return self._adopt_owner_state(state, local_u=local_u, full_u=full_u)
 
     def _received_violations(self, rows: tuple[CutRow, ...]) -> np.ndarray:
         if not rows:
@@ -555,15 +670,14 @@ class NSlack(Formulation):
     def _local_u(self, full_u: Mapping[int, float] | None) -> dict[int, float] | None:
         if self._ctx.weight_mode == "distributed":
             return self._transport.route_agent_values(
-                full_u if self._is_root else None,
+                full_u if self._is_owner else None,
                 self._ctx.local_ids,
                 source=self._owner_rank,
-                n_observations=self._ctx.N,
-                n_simulations=self._ctx.S,
+                n_agents=self._ctx.n_agents,
             )
         if self._owner_rank != 0:
             return None
-        payload = {"u": self._dense_u(full_u or {})} if self._is_root else None
+        payload = {"u": self._dense_u(full_u or {})} if self._is_owner else None
         rows = self._transport.scatter_by_agent(payload, self._ctx.local_ids)["u"]
         return {
             int(agent_id): float(value)
@@ -585,7 +699,7 @@ class NSlack(Formulation):
         full_u: Mapping[int, float] | None = None,
     ) -> None:
         self._theta = np.asarray(state.theta, dtype=np.float64)
-        if full_u is not None and self._is_root:
+        if full_u is not None and self._is_owner:
             self._u = dict(full_u)
         elif local_u is not None:
             self._u = dict(local_u)
@@ -601,7 +715,7 @@ class NSlack(Formulation):
         if publication & ResultPublication.BROADCAST:
             packet = None
             with self._transport.collective():
-                if self._is_root:
+                if self._is_owner:
                     rows = self._master.extract_cuts()
                     dual_packet = _dual_packet(
                         _dual_solution(
@@ -647,7 +761,7 @@ class NSlack(Formulation):
         if publication & (ResultPublication.ACTIVE_SET | ResultPublication.DUAL):
             packet = None
             with self._transport.collective():
-                if self._is_root:
+                if self._is_owner:
                     rows = self._master.extract_cuts()
                     active = (
                         rows if publication & ResultPublication.ACTIVE_SET else None

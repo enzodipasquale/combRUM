@@ -33,10 +33,11 @@ from combrum.transport.base import Transport
 
 
 class WeightSource(Protocol):
-    """Per-replication ``(N,)`` weight row source for the bootstrap."""
+    """Bootstrap weight source indexed by replication id."""
 
     def weights_for(self, rep_id: int) -> np.ndarray:
-        """The ``(N,)`` per-observation weight row of replication ``rep_id``."""
+        """Return the length-``N`` multiplier row for one replication."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ def _restamp(dual: DualSolution, rep_id: int) -> DualSolution:
     return dual.with_rep_id(rep_id)
 
 
-def _weight_source_seed(weights: WeightSource) -> int | None:
+def _weight_source_seed(weights: object) -> int | None:
     seed = getattr(weights, "base_seed", None)
     return None if seed is None else int(seed)
 
@@ -111,10 +112,11 @@ def bootstrap(
 ) -> BootstrapResult:
     """Run the serial multiplier bootstrap over a ``Model``/``Data`` pair.
 
-    ``weights`` is the per-replication source (:class:`NativeDraws` for fresh
-    multiplier weights, or :class:`~combrum.randomness.ReplayedWeights` to
-    replay a stored matrix); ``transport`` defaults to the serial reference.
-    Each replication reweights the criterion and runs one cold fit.
+    ``weights`` is any object with ``weights_for(rep_id) -> (N,)``:
+    :class:`NativeDraws` for fresh multiplier weights, or
+    :class:`~combrum.randomness.ReplayedWeights` to replay a stored matrix.
+    ``transport`` defaults to the serial reference. Each replication reweights
+    the criterion and runs one cold fit.
 
     :class:`NativeDraws` and the distributed
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed` use different
@@ -158,7 +160,19 @@ def bootstrap(
     store_per_rep = dual_store_dir is not None
     K = parameters.K
     n_obs = len(observables)
-    n_simulations = int(np.asarray(shocks).shape[1])
+    observed_bundles = np.asarray(observed_bundles)
+    shocks = np.asarray(shocks)
+    if observed_bundles.ndim != 2 or observed_bundles.shape[0] != n_obs:
+        raise ValueError(
+            "observed_bundles must be 2-D (N, M) with N = len(observables) ="
+            f" {n_obs}; got shape {observed_bundles.shape}"
+        )
+    if shocks.ndim < 2 or shocks.shape[0] != n_obs:
+        raise ValueError(
+            "shocks must have shape (N, S, ...) with N ="
+            f" {n_obs}; got shape {shocks.shape}"
+        )
+    n_simulations = int(shocks.shape[1])
     n_agents = n_obs * n_simulations
     result_publication = "dual" if store_per_rep else "summary"
     config = LoopConfig(max_iterations=max_iterations, min_iterations=min_iterations)

@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 import numpy as np
 
 from combrum.transport.base import Transport
+from combrum._version import __version__
 
 _T = TypeVar("_T")
 
@@ -311,7 +312,7 @@ def reject_multirank_dense_transport(name: str, transport: Transport) -> None:
 
     if transport.size != 1:
         raise ValueError(
-            f"{name} does not support non-serial transport in combRUM 0.1.0;"
+            f"{name} does not support non-serial transport in combRUM {__version__};"
             f" use {name}_distributed for distributed runs"
         )
 

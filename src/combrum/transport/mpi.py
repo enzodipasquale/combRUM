@@ -10,16 +10,15 @@ layout; they are not a row-distribution-invariant replacement for
 mpi4py is an optional dependency (the ``mpi`` extra); it is imported at
 instantiation, not module load, so the package imports without it.
 
-Cross-rank validation (owners identity) is agreed via a constant-size
-digest round so every rank raises together; purely local caller errors
-raise locally and rely on the :meth:`MpiTransport.collective` guard.
+Cross-rank validation is agreed before data movement where possible, so ranks
+raise together instead of leaving peers in later collectives.
 """
 
 from __future__ import annotations
 
 import math
 import struct
-import zlib
+import hashlib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from types import MappingProxyType
@@ -35,10 +34,10 @@ from combrum.transport._common import (
     ids_validated as _ids_validated,
 )
 from combrum.transport._common import (
-    route_geometry_validated as _route_geometry_validated,
+    route_agent_axis_validated as _route_agent_axis_validated,
 )
 from combrum.transport._common import (
-    route_local_ids_shape_validated as _route_local_ids_shape_validated,
+    route_local_ids_owned_validated as _route_local_ids_owned_validated,
 )
 from combrum.transport._common import (
     route_values_validated as _route_values_validated,
@@ -52,6 +51,8 @@ from combrum.transport.base import (
     Transport,
     TransportError,
     canonical_cut_order,
+    _CUT_ROW_WIRE_HEADER_BYTES,
+    _cut_row_nbytes,
 )
 
 if TYPE_CHECKING:
@@ -93,6 +94,9 @@ _OBJECT_TO_ROOT_TAG: int = 93
 _WINDOW_ALIGN: int = 64
 
 _ROUTE_VALUE_DTYPE = np.dtype([("gid", np.int64), ("value", np.float64)])
+_ROUTE_BATCH_VALUE_DTYPE = np.dtype(
+    [("rep", np.int64), ("gid", np.int64), ("value", np.float64)]
+)
 
 
 def _chunk_spans(
@@ -118,20 +122,26 @@ def _chunk_spans(
 # float64 bytes then the bundle key. Native order is unambiguous within one MPI
 # job; raw bytes preserve exact bit patterns.
 _CUT_HEADER = struct.Struct("=qqdqq")
+assert _CUT_HEADER.size == _CUT_ROW_WIRE_HEADER_BYTES
 
 
-def _pack_cut(row: CutRow) -> bytes:
-    return (
-        _CUT_HEADER.pack(
-            row.rep_id,
-            row.agent_id,
-            row.epsilon,
-            row.phi.shape[0],
-            len(row.bundle_key),
-        )
-        + row.phi.tobytes()
-        + row.bundle_key
+def _write_cut(buf: np.ndarray, offset: int, row: CutRow) -> int:
+    header = _CUT_HEADER.pack(
+        row.rep_id,
+        row.agent_id,
+        row.epsilon,
+        row.phi.shape[0],
+        len(row.bundle_key),
     )
+    pos = int(offset)
+    buf[pos : pos + _CUT_HEADER.size] = np.frombuffer(header, dtype=np.uint8)
+    pos += _CUT_HEADER.size
+    phi_bytes = row.phi.view(np.uint8)
+    buf[pos : pos + phi_bytes.size] = phi_bytes
+    pos += int(phi_bytes.size)
+    key_bytes = np.frombuffer(row.bundle_key, dtype=np.uint8)
+    buf[pos : pos + key_bytes.size] = key_bytes
+    return pos + int(key_bytes.size)
 
 
 def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
@@ -143,11 +153,12 @@ def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
         offset += _CUT_HEADER.size
         # Copy detaches phi so a row does not pin the whole receive buffer.
         phi = np.frombuffer(view, dtype=np.float64, count=k, offset=offset).copy()
+        phi.setflags(write=False)
         offset += 8 * k
         key = bytes(view[offset : offset + key_len])
         offset += key_len
         rows.append(
-            CutRow(
+            CutRow._from_parts(
                 rep_id=rep_id,
                 agent_id=agent_id,
                 phi=phi,
@@ -411,11 +422,23 @@ class MpiTransport(Transport):
         # canonical_sum_window_rows(width), and the window order matches
         # canonical_sum's deterministic grouping.
         comm, mpi, root = self._comm, self._mpi, 0
-        vals = np.ascontiguousarray(values, dtype=np.float64)
-        ids = np.ascontiguousarray(global_ids, dtype=np.int64)
+        vals = np.asarray(values, dtype=np.float64)
+        if vals.ndim not in (1, 2):
+            raise ValueError(
+                "sum_reproducible: values must have shape (n,) or (n, M);"
+                f" rank {self._rank} passed shape {vals.shape}"
+            )
+        vals = np.ascontiguousarray(vals)
+        ids0 = np.asarray(global_ids)
+        if ids0.ndim != 1 or not np.issubdtype(ids0.dtype, np.integer):
+            raise ValueError(
+                "sum_reproducible: global_ids must be a 1-D integer array;"
+                f" rank {self._rank} passed shape {ids0.shape}, dtype {ids0.dtype}"
+            )
+        ids = np.ascontiguousarray(ids0, dtype=np.int64)
         is2d = vals.ndim == 2
         width = int(vals.shape[1]) if is2d else 1
-        n_local = int(vals.shape[0]) if vals.ndim >= 1 else 0
+        n_local = int(vals.shape[0])
         if ids.shape != (n_local,):
             raise ValueError(
                 f"sum_reproducible: one global id per contribution row required;"
@@ -425,9 +448,13 @@ class MpiTransport(Transport):
         if n_local:
             local_min = int(ids.min())
             local_max = int(ids.max())
-            order = np.argsort(ids, kind="stable")
-            sorted_ids = ids[order]
-            sorted_vals = vals[order]
+            if n_local == 1 or bool(np.all(ids[1:] >= ids[:-1])):
+                sorted_ids = ids
+                sorted_vals = vals
+            else:
+                order = np.argsort(ids, kind="stable")
+                sorted_ids = ids[order]
+                sorted_vals = vals[order]
         else:
             local_min = 0
             local_max = -1
@@ -502,15 +529,25 @@ class MpiTransport(Transport):
                 comm.Gatherv([flat_chunk, mpi.DOUBLE], recv_val_spec, root=root)
                 self._tick("gather")
                 comm.Gatherv([chunk_ids, mpi.INT64_T], recv_id_spec, root=root)
+                error: str | None = None
                 if self._rank == root and win_total:
                     pooled = (
                         recv_vals.reshape(win_total, agreed_width)
                         if any2d
                         else recv_vals
                     )
-                    out += np.atleast_1d(
-                        np.asarray(canonical_sum(pooled, recv_ids), dtype=np.float64)
-                    )
+                    try:
+                        out += np.atleast_1d(
+                            np.asarray(
+                                canonical_sum(pooled, recv_ids), dtype=np.float64
+                            )
+                        )
+                    except ValueError as exc:
+                        error = f"sum_reproducible: {exc}"
+                self._tick("bcast")
+                error = comm.bcast(error if self._rank == root else None, root=root)
+                if error is not None:
+                    raise ValueError(error)
                 lo = hi
 
         self._tick("bcast")
@@ -682,7 +719,13 @@ class MpiTransport(Transport):
         if n_global < 0:
             raise ValueError(f"n_global must be >= 0; got {n_global}")
         vals = np.ascontiguousarray(values, dtype=np.float64)
-        ids = np.ascontiguousarray(global_ids, dtype=np.int64)
+        ids0 = np.asarray(global_ids)
+        if ids0.ndim != 1 or not np.issubdtype(ids0.dtype, np.integer):
+            raise ValueError(
+                "gather_agent_values: global_ids must be a 1-D integer array;"
+                f" rank {self._rank} passed shape {ids0.shape}, dtype {ids0.dtype}"
+            )
+        ids = np.ascontiguousarray(ids0, dtype=np.int64)
         if vals.ndim != 1:
             raise ValueError(
                 "gather_agent_values: values must be one-dimensional;"
@@ -724,15 +767,20 @@ class MpiTransport(Transport):
         self._comm.Gatherv([vals, self._mpi.DOUBLE], recv_val_spec, root=root)
         self._tick("gather")
         self._comm.Gatherv([ids, self._mpi.INT64_T], recv_id_spec, root=root)
-        if self._rank != root:
-            return None
-        if recv_ids.size:
+        error: str | None = None
+        if self._rank == root and recv_ids.size:
             unique, dup_counts = np.unique(recv_ids, return_counts=True)
             if unique.size != recv_ids.size:
-                raise ValueError(
+                error = (
                     "gather_agent_values: duplicate global_ids:"
                     f" {unique[dup_counts > 1].tolist()}"
                 )
+        self._tick("bcast")
+        error = self._comm.bcast(error if self._rank == root else None, root=root)
+        if error is not None:
+            raise ValueError(error)
+        if self._rank != root:
+            return None
         out = np.zeros(int(n_global), dtype=np.float64)
         out[recv_ids] = recv_vals
         out.setflags(write=False)
@@ -741,43 +789,35 @@ class MpiTransport(Transport):
     def _agree_route_preflight(
         self,
         *,
-        n_observations: object,
-        n_simulations: object,
+        n_agents: object,
         source: object,
         local_error: str | None,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int]:
         try:
-            n_obs, n_sims, _n_agents, src = _route_geometry_validated(
-                n_observations,
-                n_simulations,
+            n_agents_i, src = _route_agent_axis_validated(
+                n_agents,
                 size=self._size,
                 source=source,
                 what="route_agent_values",
             )
         except ValueError as exc:
-            n_obs, n_sims, src = 1, 1, 0
+            n_agents_i, src = 1, 0
             local_error = str(exc) if local_error is None else local_error
         reporter = self._rank if local_error is not None else self._size
         lanes = np.array(
-            [n_obs, -n_obs, n_sims, -n_sims, src, -src, reporter],
+            [n_agents_i, -n_agents_i, src, -src, reporter],
             dtype=np.int64,
         )
         out = np.empty_like(lanes)
         self._tick("allreduce")
         self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
         if int(out[0]) != -int(out[1]):
-            raise ValueError(
-                "route_agent_values: n_observations must be identical on every rank"
-            )
+            raise ValueError("route_agent_values: n_agents must be identical on every rank")
         if int(out[2]) != -int(out[3]):
-            raise ValueError(
-                "route_agent_values: n_simulations must be identical on every rank"
-            )
-        if int(out[4]) != -int(out[5]):
             raise ValueError(
                 "route_agent_values: source must be identical on every rank"
             )
-        agreed_reporter = int(out[6])
+        agreed_reporter = int(out[4])
         if agreed_reporter != self._size:
             self._tick("bcast")
             message = self._comm.bcast(
@@ -785,7 +825,7 @@ class MpiTransport(Transport):
                 root=agreed_reporter,
             )
             raise ValueError(message)
-        return int(out[0]), int(out[2]), int(out[4])
+        return int(out[0]), int(out[2])
 
     def _agree_route_error(self, local_error: str | None) -> None:
         reporter = self._rank if local_error is not None else self._size
@@ -803,25 +843,48 @@ class MpiTransport(Transport):
         )
         raise ValueError(message)
 
+    def _agree_owner_vector(self, owners: np.ndarray, *, what: str) -> None:
+        """Verify rank-identical owner vectors with fixed-size wire payload."""
+        if owners.size == 0:
+            return
+        canon = np.ascontiguousarray(owners, dtype="<i8")
+        h = hashlib.blake2b(digest_size=16, person=b"combrum-owners")
+        h.update(struct.pack("<Q", int(canon.size)))
+        h.update(canon.tobytes())
+        digest = h.digest()
+        sig0 = int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
+        sig1 = int.from_bytes(digest[8:], "little") & ((1 << 63) - 1)
+        lanes = np.array([sig0, -sig0, sig1, -sig1], dtype=np.int64)
+        out = np.empty_like(lanes)
+        self._tick("allreduce")
+        self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
+        if int(out[0]) != -int(out[1]) or int(out[2]) != -int(out[3]):
+            raise ValueError(f"{what}: owners must be identical on every rank")
+
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
         local_ids: np.ndarray,
         *,
         source: int,
-        n_observations: int,
-        n_simulations: int,
+        n_agents: int,
     ) -> dict[int, float]:
         what = "route_agent_values"
+        local_error: str | None = None
         try:
-            n_obs0, _n_sims0, n_agents0, src0 = _route_geometry_validated(
-                n_observations,
-                n_simulations,
+            n_agents0, src0 = _route_agent_axis_validated(
+                n_agents,
                 size=self._size,
                 source=source,
                 what=what,
             )
-            _route_local_ids_shape_validated(local_ids, what=what)
+            _route_local_ids_owned_validated(
+                local_ids,
+                n_agents=n_agents0,
+                rank=self._rank,
+                size=self._size,
+                what=what,
+            )
             normalized = _route_values_validated(
                 values,
                 n_agents=n_agents0,
@@ -829,22 +892,20 @@ class MpiTransport(Transport):
                 source=src0,
                 what=what,
             )
-            local_error: str | None = None
         except Exception as exc:
             normalized = {}
-            local_error = f"{type(exc).__name__}: {exc}"
-        n_obs, n_sims, src = self._agree_route_preflight(
-            n_observations=n_observations,
-            n_simulations=n_simulations,
+            if local_error is None:
+                local_error = f"{type(exc).__name__}: {exc}"
+        n_agents_i, src = self._agree_route_preflight(
+            n_agents=n_agents,
             source=source,
             local_error=local_error,
         )
-        n_agents = n_obs * n_sims
 
         if self._rank == src:
             buckets: list[list[tuple[int, float]]] = [[] for _ in range(self._size)]
             for gid, value in sorted(normalized.items()):
-                owner = _agent_owner_rank(gid, n_obs, self._size)
+                owner = _agent_owner_rank(gid, n_agents_i, self._size)
                 buckets[owner].append((gid, value))
             send_counts = np.array([len(bucket) for bucket in buckets], dtype=np.int64)
             send = np.empty(int(send_counts.sum()), dtype=_ROUTE_VALUE_DTYPE)
@@ -878,15 +939,199 @@ class MpiTransport(Transport):
         for row in recv:
             gid = int(row["gid"])
             value = float(row["value"])
-            if gid < 0 or gid >= n_agents:
+            if gid < 0 or gid >= n_agents_i:
                 local_error = f"{what}: received out-of-range agent id {gid}"
                 break
-            if _agent_owner_rank(gid, n_obs, self._size) != self._rank:
+            if _agent_owner_rank(gid, n_agents_i, self._size) != self._rank:
                 local_error = (
                     f"{what}: received agent {gid} on non-owner rank {self._rank}"
                 )
                 break
             out[gid] = value
+        self._agree_route_error(local_error)
+        return out
+
+    def _checked_route_batch_inputs(
+        self,
+        values_by_rep: Mapping[int, Mapping[int, float]] | None,
+        local_ids: np.ndarray,
+        *,
+        owners: np.ndarray,
+        n_agents: int,
+    ) -> tuple[int, np.ndarray, dict[int, dict[int, float]]]:
+        what = "route_agent_values_batched"
+        n_agents_lane = -1
+        try:
+            n_agents0, _src0 = _route_agent_axis_validated(
+                n_agents,
+                size=self._size,
+                source=0,
+                what=what,
+            )
+            _route_local_ids_owned_validated(
+                local_ids,
+                n_agents=n_agents0,
+                rank=self._rank,
+                size=self._size,
+                what=what,
+            )
+            owner_arr = np.asarray(owners)
+            if owner_arr.ndim != 1 or not np.issubdtype(owner_arr.dtype, np.integer):
+                raise ValueError(
+                    f"{what}: owners must be a 1-D integer array of ranks;"
+                    f" got shape {owner_arr.shape}, dtype {owner_arr.dtype}"
+                )
+            canon = np.ascontiguousarray(owner_arr, dtype=np.int64)
+            if canon.size and (
+                int(canon.min()) < 0 or int(canon.max()) >= self._size
+            ):
+                raise ValueError(
+                    f"{what}: owners must lie in [0, size) = [0, {self._size});"
+                    f" got range [{int(canon.min())}, {int(canon.max())}]"
+                )
+            payload: object = {} if values_by_rep is None else values_by_rep
+            if not isinstance(payload, Mapping):
+                raise ValueError(
+                    f"{what}: values_by_rep must be a mapping or None;"
+                    f" got {type(payload).__name__}"
+                )
+            normalized: dict[int, dict[int, float]] = {}
+            B = int(canon.size)
+            for rep_key, values in payload.items():
+                if (
+                    isinstance(rep_key, (bool, np.bool_))
+                    or not isinstance(rep_key, (int, np.integer))
+                    or int(rep_key) < 0
+                    or int(rep_key) >= B
+                ):
+                    raise ValueError(
+                        f"{what}: replication ids must lie in [0, {B});"
+                        f" got {rep_key!r}"
+                    )
+                rep = int(rep_key)
+                if int(canon[rep]) != self._rank:
+                    raise ValueError(
+                        f"{what}: only owner rank {int(canon[rep])} may pass"
+                        f" values for replication {rep}; rank {self._rank}"
+                        " passed values"
+                    )
+                normalized[rep] = _route_values_validated(
+                    values,
+                    n_agents=n_agents0,
+                    rank=self._rank,
+                    source=self._rank,
+                    what=what,
+                )
+            n_agents_lane = n_agents0
+            local_error: str | None = None
+        except Exception as exc:
+            canon = np.empty(0, dtype=np.int64)
+            normalized = {}
+            local_error = f"{type(exc).__name__}: {exc}"
+            try:
+                n_agents_lane = int(n_agents)
+            except (TypeError, ValueError):
+                n_agents_lane = -1
+        B = int(canon.size)
+        reporter = self._rank if local_error is not None else self._size
+        lanes = np.array(
+            [
+                n_agents_lane,
+                -n_agents_lane,
+                B,
+                -B,
+                reporter,
+            ],
+            dtype=np.int64,
+        )
+        out = np.empty_like(lanes)
+        self._tick("allreduce")
+        self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
+        agreed_reporter = int(out[4])
+        if agreed_reporter != self._size:
+            self._tick("bcast")
+            message = self._comm.bcast(
+                local_error if self._rank == agreed_reporter else None,
+                root=agreed_reporter,
+            )
+            raise ValueError(message)
+        if int(out[0]) != -int(out[1]):
+            raise ValueError(f"{what}: n_agents must be identical on every rank")
+        if int(out[2]) != -int(out[3]):
+            raise ValueError(f"{what}: owners must have the same length on every rank")
+        self._agree_owner_vector(canon, what=what)
+        return int(out[0]), canon, normalized
+
+    def route_agent_values_batched(
+        self,
+        values_by_rep: Mapping[int, Mapping[int, float]] | None,
+        local_ids: np.ndarray,
+        *,
+        owners: np.ndarray,
+        n_agents: int,
+    ) -> dict[int, dict[int, float]]:
+        (
+            n_agents_i,
+            agreed,
+            normalized,
+        ) = self._checked_route_batch_inputs(
+            values_by_rep,
+            local_ids,
+            owners=owners,
+            n_agents=n_agents,
+        )
+        send_counts = np.zeros(self._size, dtype=np.int64)
+        for values in normalized.values():
+            for gid in values:
+                send_counts[_agent_owner_rank(int(gid), n_agents_i, self._size)] += 1
+        send = np.empty(int(send_counts.sum()), dtype=_ROUTE_BATCH_VALUE_DTYPE)
+        cursors = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
+        for rep, values in sorted(normalized.items()):
+            for gid, value in sorted(values.items()):
+                owner = _agent_owner_rank(int(gid), n_agents_i, self._size)
+                offset = int(cursors[owner])
+                send[offset] = (int(rep), int(gid), float(value))
+                cursors[owner] += 1
+
+        recv_counts = np.empty(self._size, dtype=np.int64)
+        self._tick("alltoall")
+        self._comm.Alltoall(send_counts, recv_counts)
+        itemsize = int(_ROUTE_BATCH_VALUE_DTYPE.itemsize)
+        send_byte_counts = send_counts * itemsize
+        recv_byte_counts = recv_counts * itemsize
+        send_byte_displs = np.concatenate(([0], np.cumsum(send_byte_counts)[:-1]))
+        recv_byte_displs = np.concatenate(([0], np.cumsum(recv_byte_counts)[:-1]))
+        recv = np.empty(int(recv_counts.sum()), dtype=_ROUTE_BATCH_VALUE_DTYPE)
+        byte = self._mpi.BYTE
+        self._tick("alltoallv")
+        self._comm.Alltoallv(
+            [send.view(np.uint8), send_byte_counts, send_byte_displs, byte],
+            [recv.view(np.uint8), recv_byte_counts, recv_byte_displs, byte],
+        )
+
+        out: dict[int, dict[int, float]] = {}
+        local_error = None
+        B = int(agreed.size)
+        for row in recv:
+            rep = int(row["rep"])
+            gid = int(row["gid"])
+            value = float(row["value"])
+            if rep < 0 or rep >= B:
+                local_error = f"route_agent_values_batched: received rep {rep}"
+                break
+            if gid < 0 or gid >= n_agents_i:
+                local_error = (
+                    "route_agent_values_batched: received out-of-range"
+                    f" agent id {gid}"
+                )
+                break
+            if _agent_owner_rank(gid, n_agents_i, self._size) != self._rank:
+                local_error = (
+                    "route_agent_values_batched: received agent"
+                    f" {gid} on non-owner rank {self._rank}"
+                )
+                break
+            out.setdefault(rep, {})[gid] = value
         self._agree_route_error(local_error)
         return out
 
@@ -1014,14 +1259,14 @@ class MpiTransport(Transport):
         result[out[: batch.size] > 0.0] = math.nan
         return result
 
-    def _checked_owner_sum_inputs(
-        self, values: np.ndarray, owners: np.ndarray
+    def _checked_owner_matrix_inputs(
+        self, values: np.ndarray, owners: np.ndarray, *, what: str
     ) -> tuple[np.ndarray, np.ndarray]:
         arr = np.asarray(owners)
         error: str | None = None
         if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
             error = (
-                "owner_sum: owners must be a 1-D integer array of ranks;"
+                f"{what}: owners must be a 1-D integer array of ranks;"
                 f" got shape {arr.shape}, dtype {arr.dtype}"
             )
             canon = np.empty(0, dtype=np.int64)
@@ -1029,7 +1274,7 @@ class MpiTransport(Transport):
             canon = np.ascontiguousarray(arr, dtype=np.int64)
             if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= self._size):
                 error = (
-                    "owner_sum: owners must lie in [0, size) ="
+                    f"{what}: owners must lie in [0, size) ="
                     f" [0, {self._size}); got range"
                     f" [{int(canon.min())}, {int(canon.max())}]"
                 )
@@ -1038,24 +1283,16 @@ class MpiTransport(Transport):
         except (TypeError, ValueError) as exc:
             vals = np.empty((0, 0), dtype=np.float64)
             if error is None:
-                error = f"owner_sum: values must be numeric; {exc}"
+                error = f"{what}: values must be numeric; {exc}"
         B = int(canon.shape[0])
         if error is None and (vals.ndim != 2 or vals.shape[0] != B):
             error = (
-                f"owner_sum: values must have shape (B, M) = ({B}, M);"
+                f"{what}: values must have shape (B, M) = ({B}, M);"
                 f" rank {self._rank} passed shape {vals.shape}"
             )
         M = int(vals.shape[1]) if error is None else -1
-        # Cross-rank identity via a constant-size digest, avoiding an O(B)-per-
-        # rank gather. Digest equality is necessary, not sufficient: a CRC
-        # collision (~2**-32, reachable only once the caller has already broken
-        # the rank-identical contract) could mis-route. Validation-only: no
-        # result depends on the digest.
-        crc = zlib.crc32(canon.tobytes()) if error is None else 0
-        # MIN over x and -x carries both extremes in one round, detecting
-        # rank disagreement without moving the O(B) owner vector.
         reporter = self._rank if error is not None else self._size
-        lanes = np.array([reporter, crc, -crc, B, -B, M, -M], dtype=np.int64)
+        lanes = np.array([reporter, B, -B, M, -M], dtype=np.int64)
         out = np.empty_like(lanes)
         self._tick("allreduce")
         self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
@@ -1067,22 +1304,18 @@ class MpiTransport(Transport):
                 root=agreed_reporter,
             )
             raise TransportError(agreed_reporter, message)
-        if int(out[1]) != -int(out[2]):
+        if int(out[1]) != -int(out[2]) or int(out[3]) != -int(out[4]):
             raise ValueError(
-                "owner_sum: owners must be identical on every rank;"
-                " contributions disagree (owner digests differ)"
+                f"{what}: values must have the same (B, M) shape on every rank"
             )
-        if int(out[3]) != -int(out[4]) or int(out[5]) != -int(out[6]):
-            raise ValueError(
-                "owner_sum: values must have the same (B, M) shape on every rank"
-            )
+        self._agree_owner_vector(canon, what=what)
         return np.ascontiguousarray(vals, dtype=np.float64), canon
 
-    def _exchange_cut_buckets(
+    def _checked_exchange_cut_inputs(
         self, rows: Sequence[CutRow], owners: np.ndarray
-    ) -> list[list[bytes]]:
+    ) -> tuple[tuple[CutRow, ...], np.ndarray]:
         error: str | None = None
-        buckets: list[list[bytes]] = [[] for _ in range(self._size)]
+        row_tuple: tuple[CutRow, ...] = ()
         arr = np.asarray(owners)
         if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
             error = (
@@ -1099,8 +1332,16 @@ class MpiTransport(Transport):
                     f" [{int(canon.min())}, {int(canon.max())}]"
                 )
         if error is None:
+            try:
+                row_tuple = tuple(rows)
+            except TypeError as exc:
+                error = (
+                    "exchange_cuts: rows must be an iterable of CutRow instances;"
+                    f" {type(exc).__name__}: {exc}"
+                )
+        if error is None:
             B = int(canon.shape[0])
-            for row in rows:
+            for row in row_tuple:
                 if not isinstance(row, CutRow):
                     error = (
                         "exchange_cuts: rows must be CutRow instances;"
@@ -1114,14 +1355,10 @@ class MpiTransport(Transport):
                         f" {self._rank})"
                     )
                     break
-                # Contribution order is preserved within each destination; with
-                # the rank-major receive blocks below, duplicate keys keep a
-                # deterministic delivery order through the stable canonical sort.
-                buckets[int(canon[row.rep_id])].append(_pack_cut(row))
 
-        crc = zlib.crc32(canon.tobytes()) if error is None else 0
+        B = int(canon.shape[0])
         reporter = self._rank if error is not None else self._size
-        lanes = np.array([reporter, crc, -crc], dtype=np.int64)
+        lanes = np.array([reporter, B, -B], dtype=np.int64)
         out = np.empty_like(lanes)
         self._tick("allreduce")
         self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
@@ -1135,60 +1372,60 @@ class MpiTransport(Transport):
             raise TransportError(agreed_reporter, message)
         if int(out[1]) != -int(out[2]):
             raise ValueError(
-                "exchange_cuts: owners must be identical on every rank;"
-                " contributions disagree (owner digests differ)"
+                "exchange_cuts: owners must have the same length on every rank"
             )
-        return buckets
+        self._agree_owner_vector(canon, what="exchange_cuts")
+        return row_tuple, canon
 
-    def owner_sum(
-        self, values: np.ndarray, owners: np.ndarray
-    ) -> dict[int, np.ndarray]:
-        vals, agreed = self._checked_owner_sum_inputs(values, owners)
-        M = int(vals.shape[1])
-        # Every count is rank-locally computable (fixed width M, owners
-        # identical everywhere), so there is no counts round: the whole
-        # delivery is one Alltoallv.
-        send_rows = np.bincount(agreed, minlength=self._size)
-        # Stable sort by owner = destination-major packing, reps ascending
-        # within each destination, the order owners reconstruct below.
-        send = vals[np.argsort(agreed, kind="stable")]
-        mine = np.flatnonzero(agreed == self._rank)
-        n_mine = int(mine.size)
-        recv = np.empty((self._size, n_mine, M), dtype=np.float64)
-        send_counts = send_rows * M
-        send_displs = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
-        recv_counts = np.full(self._size, n_mine * M, dtype=np.int64)
-        recv_displs = np.arange(self._size, dtype=np.int64) * (n_mine * M)
-        double = self._mpi.DOUBLE
-        self._tick("alltoallv")
-        self._comm.Alltoallv(
-            [send, send_counts, send_displs, double],
-            [recv, recv_counts, recv_displs, double],
+    def owner_broadcast(self, values: np.ndarray, owners: np.ndarray) -> np.ndarray:
+        vals, agreed = self._checked_owner_matrix_inputs(
+            values, owners, what="owner_broadcast"
         )
-        # recv[r, j] is rank r's contribution to my j-th owned rep, so
-        # combining over axis 0 keyed by rank index is the canonical
-        # combination, bitwise identical to the pooled reduction.
-        rank_ids = np.arange(self._size)
-        out: dict[int, np.ndarray] = {}
-        for j, b in enumerate(mine):
-            out[int(b)] = np.asarray(canonical_sum(recv[:, j, :], rank_ids))
+        B = int(vals.shape[0])
+        M = int(vals.shape[1])
+        if B == 0 or M == 0:
+            return np.empty_like(vals)
+        mine = np.flatnonzero(agreed == self._rank)
+        send = np.ascontiguousarray(vals[mine, :], dtype=np.float64).ravel()
+        rows_by_rank = np.bincount(agreed, minlength=self._size).astype(np.int64)
+        recv_counts = rows_by_rank * M
+        recv_displs = np.concatenate(([0], np.cumsum(recv_counts)[:-1]))
+        packed = np.empty(int(recv_counts.sum()), dtype=np.float64)
+        self._tick("allgather")
+        self._comm.Allgatherv(
+            [send, self._mpi.DOUBLE],
+            [packed, recv_counts, recv_displs, self._mpi.DOUBLE],
+        )
+        out = np.empty_like(vals)
+        for rank, n_rows in enumerate(rows_by_rank):
+            if int(n_rows) == 0:
+                continue
+            start = int(recv_displs[rank])
+            stop = start + int(n_rows) * M
+            slots = np.flatnonzero(agreed == rank)
+            out[slots, :] = packed[start:stop].reshape(int(n_rows), M)
         return out
 
     def exchange_cuts(
         self, rows: Sequence[CutRow], owners: np.ndarray
     ) -> tuple[CutRow, ...]:
-        buckets = self._exchange_cut_buckets(rows, owners)
-        packed = [b"".join(bucket) for bucket in buckets]
-        send_counts = np.array([len(p) for p in packed], dtype=np.int64)
+        rows, canon = self._checked_exchange_cut_inputs(rows, owners)
+        send_counts = np.zeros(self._size, dtype=np.int64)
+        for row in rows:
+            send_counts[int(canon[row.rep_id])] += _cut_row_nbytes(row)
         recv_counts = np.empty_like(send_counts)
         # Per-destination byte counts depend on what every peer generated, so
         # exchange is one counts Alltoall then one packed-payload Alltoallv:
         # a constant round count regardless of how many rows are live.
         self._tick("alltoall")
         self._comm.Alltoall(send_counts, recv_counts)
-        send_buf = np.frombuffer(b"".join(packed), dtype=np.uint8)
-        recv_buf = np.empty(int(recv_counts.sum()), dtype=np.uint8)
         send_displs = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
+        cursors = send_displs.copy()
+        send_buf = np.empty(int(send_counts.sum()), dtype=np.uint8)
+        for row in rows:
+            dest = int(canon[row.rep_id])
+            cursors[dest] = _write_cut(send_buf, int(cursors[dest]), row)
+        recv_buf = np.empty(int(recv_counts.sum()), dtype=np.uint8)
         recv_displs = np.concatenate(([0], np.cumsum(recv_counts)[:-1]))
         byte = self._mpi.BYTE
         self._tick("alltoallv")

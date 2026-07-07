@@ -281,8 +281,12 @@ def estimate_distributed(
     features through ``observed_features_batch(observation_ids)`` on
     ``model.observed_features`` or ``model.features``. If observed rows need
     setup before that call, the same surface may also define
-    ``setup_observed(transport, observation_ids)``. Each rank stores only its
-    observed shard and prices only its local agent ids.
+    ``setup_observed(transport, observation_ids)``. If priced feature rows need
+    setup, ``model.features`` may define
+    ``setup_pricing_agents(transport, agent_ids)``. Observed moments are
+    reduced over observation-owned shards. Pricing work is sharded over the
+    global agent axis, so a rank prices its contiguous global-agent ids; for
+    ``S > 1``, their design rows are selected by ``gid % N``.
 
     Args:
         model: NSlack model whose oracle prices by global id and whose feature

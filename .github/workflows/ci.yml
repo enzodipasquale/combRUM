@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,highs]"
+      - name: Run tests
+        # HiGHS is installed; Gurobi-dependent tests skip when no license is available.
+        run: pytest tests -m "not slow and not requires_mpi" --cov=combrum -q
+
+  mpi-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openmpi-bin libopenmpi-dev
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,mpi,highs]"
+      - name: Run MPI smoke tests
+        run: |
+          pytest \
+            tests/test_mpi_transport.py::test_internal_counters_pin_the_round_shape \
+            tests/test_mpi_transport.py::test_every_rank_matches_the_reference_battery \
+            tests/test_mpi_transport.py::test_nslack_bootstrap_distributed_matches_serial_bitwise \
+            -q
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build artifacts
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Import built wheel
+        run: |
+          python -m venv /tmp/combrum-wheel
+          /tmp/combrum-wheel/bin/python -m pip install --upgrade pip
+          /tmp/combrum-wheel/bin/python -m pip install pytest psutil scipy highspy tomli
+          /tmp/combrum-wheel/bin/python -m pip install dist/*.whl
+          /tmp/combrum-wheel/bin/python - <<'PY'
+          import pathlib
+          import combrum as cb
+
+          print(cb.__version__)
+          print(pathlib.Path(cb.__file__).resolve())
+          assert hasattr(cb, "CutRow")
+          assert hasattr(cb, "LocalCluster")
+          assert not hasattr(cb.Transport, "owner_sum")
+          PY
+          /tmp/combrum-wheel/bin/python -m pytest \
+            tests/test_public_package.py \
+            tests/test_skeleton_end_to_end.py \
+            -q
+      - name: Inspect artifacts
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+
+          with tarfile.open(sdist) as tf:
+              sdist_names = tf.getnames()
+          with zipfile.ZipFile(wheel) as zf:
+              wheel_names = zf.namelist()
+
+          forbidden_paths = (
+              "__pycache__",
+              ".pytest_cache",
+              ".ruff_cache",
+              ".DS_Store",
+              ".ipynb_checkpoints",
+          )
+          for label, names in (("sdist", sdist_names), ("wheel", wheel_names)):
+              hits = [name for name in names if any(bad in name for bad in forbidden_paths)]
+              assert not hits, f"{label} contains forbidden paths: {hits[:20]}"
+
+          forbidden_text = ("/Users/", "\\Users\\")
+          def byte_payloads():
+              with tarfile.open(sdist) as tf:
+                  for member in tf.getmembers():
+                      if member.isfile():
+                          fh = tf.extractfile(member)
+                          if fh is not None:
+                              yield "sdist", member.name, fh.read()
+              with zipfile.ZipFile(wheel) as zf:
+                  for name in zf.namelist():
+                      yield "wheel", name, zf.read(name)
+
+          forbidden_bytes = tuple(item.encode("utf-8") for item in forbidden_text)
+          for label, name, payload in byte_payloads():
+              hits = [
+                  forbidden_text[i]
+                  for i, bad in enumerate(forbidden_bytes)
+                  if bad in payload
+              ]
+              assert not hits, f"{label}:{name} contains forbidden text: {hits}"
+
+          assert any(name.endswith("tests/test_public_package.py") for name in sdist_names)
+          assert any(
+              name.endswith("tests/fixtures/callbacks/adaptive_timeout_replay.json")
+              for name in sdist_names
+          )
+          assert any(name.endswith("tests/fixtures/families/toy.npz") for name in sdist_names)
+          assert any(name.endswith("tests/fixtures/families/qkp.npz") for name in sdist_names)
+          assert any(name.endswith("tests/fixtures/dualstore/rep-00000000.npz") for name in sdist_names)
+          assert any(name.endswith("tests/fixtures/dualstore/rep-00000001.npz") for name in sdist_names)
+          assert any(name.endswith("src/combrum/_bundle_key.py") for name in sdist_names)
+          assert "combrum/_bundle_key.py" in wheel_names
+          assert not any(name.startswith("tests/") for name in wheel_names)
+          PY

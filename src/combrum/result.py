@@ -21,6 +21,14 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _restore_readonly(obj: object, names: tuple[str, ...]) -> None:
+    # Pickle/deepcopy drops numpy's WRITEABLE=False flag.
+    for name in names:
+        value = obj.__dict__.get(name)
+        if isinstance(value, np.ndarray):
+            value.setflags(write=False)
+
+
 def _certification_from_metadata(value: object) -> Certification:
     if not isinstance(value, dict):
         raise ValueError(
@@ -128,6 +136,10 @@ class FitResult:
                 self, "slack", _readonly(np.asarray(self.slack, dtype=np.float64))
             )
 
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        _restore_readonly(self, ("theta_hat", "empirical_moment", "slack"))
+
     def theta_named(self) -> dict[str, np.ndarray]:
         """``theta_hat`` split into ``{block name: values}`` by the layout."""
         return self.parameters.unpack(self.theta_hat)
@@ -137,8 +149,7 @@ class FitResult:
         return self.parameters.unpack(self.empirical_moment)
 
     def to_dict(self) -> dict[str, object]:
-        """JSON-ready fields (theta_hat, objective, moment, runtime, cuts,
-        slack, metadata) as lists/scalars; excludes run_info/cuts/cut_duals."""
+        """JSON-ready estimate fields; excludes run_info, cuts, and cut_duals."""
         return {
             "theta_hat": self.theta_hat.tolist(),
             "objective": float(self.objective),
@@ -243,6 +254,10 @@ class BootstrapResult:
                 )
             object.__setattr__(self, "duals", duals)
 
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        _restore_readonly(self, ("thetas", "converged", "u_samples"))
+
     @property
     def n_converged(self) -> int:
         """Number of replications flagged converged."""
@@ -278,15 +293,31 @@ class BootstrapResult:
         """
         return self._selected(only_converged).mean(axis=0)
 
+    def _selected_for_ddof1(self, only_converged: bool, summary: str) -> np.ndarray:
+        selected = self._selected(only_converged)
+        if selected.shape[0] < 2:
+            raise ValueError(
+                f"{summary} requires at least two"
+                f" {'converged ' if only_converged else ''}bootstrap replications;"
+                f" got {selected.shape[0]}"
+            )
+        return selected
+
     def se(self, only_converged: bool = True) -> np.ndarray:
-        """Length-``K`` bootstrap standard error (``ddof=1``); see :meth:`mean`
-        for the ``only_converged`` selection."""
-        return self._selected(only_converged).std(axis=0, ddof=1)
+        """Length-``K`` bootstrap standard error (``ddof=1``).
+
+        Requires at least two selected replications; see :meth:`mean` for the
+        ``only_converged`` selection.
+        """
+        return self._selected_for_ddof1(only_converged, "se").std(axis=0, ddof=1)
 
     def cov(self, only_converged: bool = True) -> np.ndarray:
-        """``(K, K)`` bootstrap covariance (``ddof=1``); see :meth:`mean` for
-        the ``only_converged`` selection."""
-        selected = self._selected(only_converged)
+        """``(K, K)`` bootstrap covariance (``ddof=1``).
+
+        Requires at least two selected replications; see :meth:`mean` for the
+        ``only_converged`` selection.
+        """
+        selected = self._selected_for_ddof1(only_converged, "cov")
         # atleast_2d: numpy collapses the K = 1 covariance to a scalar.
         return np.atleast_2d(np.cov(selected, rowvar=False, ddof=1))
 
@@ -326,10 +357,11 @@ class BootstrapResult:
         """Merge bootstrap shards along the replication axis.
 
         All shards must use the same parameter layout and the same optional
-        payload shape. If shards carry a point estimate, it must be identical
-        on every shard. Metadata merges in sequence order, with later values
-        winning on duplicate keys, except ``"certification"`` which aggregates
-        pricing counts and worst gaps.
+        payload shape. If shards carry a point estimate, every shard's
+        ``theta_hat`` must match and the first shard's point estimate is kept.
+        Metadata merges in sequence order, with later values winning on
+        duplicate keys, except ``"certification"`` which aggregates pricing
+        counts and worst gaps.
         """
         results = tuple(results)
         if not results:

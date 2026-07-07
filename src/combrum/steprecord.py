@@ -15,6 +15,7 @@ from typing import Protocol
 
 import numpy as np
 
+from combrum._bundle_key import pack_bundle as _bundle_identity
 from combrum.demand import Demand
 
 
@@ -185,11 +186,3 @@ def priced_features_from(
             )
         )
     return tuple(out)
-
-
-def _bundle_identity(bundle: np.ndarray) -> bytes:
-    # Must stay byte-for-byte equal to the transport.base cut-identity codec
-    # (dtype tag + raw bytes) so record keys compare to installed-row keys.
-    # steprecord is deliberately kept free of a transport import.
-    arr = np.ascontiguousarray(bundle)
-    return arr.dtype.str.encode() + b":" + arr.tobytes()

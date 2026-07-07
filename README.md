@@ -38,7 +38,7 @@ python examples/quickstart.py
 ```
 
 This script builds a small bundle-choice model, estimates the coefficients, and
-runs a Bayesian bootstrap. The same example is explained step by step in
+runs a multiplier bootstrap. The same example is explained step by step in
 `notebooks/01_quickstart.ipynb`.
 
 ## Using combRUM
@@ -47,16 +47,21 @@ To use combRUM, specify two model-specific pieces:
 
 - an `Oracle` that solves the combinatorial optimization for a given parameter
   vector
-- a `FeatureMap` that computes the feature vector $`\phi_i(d)`$ for a choice
-  $`d \in \{0,1\}^M`$
+- a `FeatureMap` that computes the priced-row pair
+  $`(\phi_i(d), \varepsilon_i(d))`$ for a choice $`d \in \{0,1\}^M`$
 
 For serial estimation, observed choices and simulation draws are passed through
 a `Data` object. For distributed estimation, each rank owns part of the
 simulated agents and combRUM coordinates the row-generation loop across ranks.
 
 Call `cb.estimate(...)` or `cb.estimate_distributed(...)` for point estimates.
-Call `cb.bootstrap(...)` or `cb.bootstrap_distributed(...)` for bootstrap
-standard errors and confidence intervals.
+Call `cb.bootstrap(..., weights=cb.NativeDraws(n_obs=N, base_seed=seed))` for
+serial multiplier bootstrap inference. Use `cb.bootstrap_distributed(...)` for
+distributed multiplier bootstrap with `NSlack` models that provide
+`observed_features_batch(observation_ids)`; distributed bootstrap uses split
+observation/simulation axes rather than a dense `Data` object.
+Use `cb.LocalCluster(...)` to exercise distributed code paths locally before
+moving the same code to an MPI transport.
 
 ## Distributed Runs
 
@@ -67,7 +72,7 @@ Each rank calls the oracle for its assigned simulated agents, and combRUM
 combines the returned choices to update the linear program.
 
 ```bash
-python -m pip install ".[highs,mpi]"
+python -m pip install ".[examples,mpi]"
 mpiexec -n 4 python examples/blp_bundle_demand.py --transport mpi
 ```
 
