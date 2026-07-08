@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from combrum.master import CutReadings, MasterBackend
-from combrum.masters._common import validated_construction
+from combrum.masters._common import validated_construction, validated_u_coefs
 from combrum.transport.base import CutRow
 
 
@@ -55,7 +55,7 @@ class HighsMaster(MasterBackend):
         K: int,
         theta_bounds: tuple[np.ndarray, np.ndarray],
         c_theta: np.ndarray,
-        u_coef: Callable[[int], float],
+        u_coef: Callable[[int], float] | np.ndarray,
         params: Mapping[str, object] | None = None,
         n_agents: int | None = None,
     ) -> None:
@@ -65,9 +65,13 @@ class HighsMaster(MasterBackend):
         self._K, self._lower, self._upper, self._c = validated_construction(
             K, theta_bounds, c_theta
         )
-        if not callable(u_coef):
-            raise ValueError(f"u_coef must be callable; got {type(u_coef).__name__}")
-        self._u_coef = u_coef
+        self._u_coef, self._u_coefs = validated_u_coefs(u_coef)
+        if self._u_coefs is not None and self._n_agents is not None:
+            if self._u_coefs.size < self._n_agents:
+                raise ValueError(
+                    f"u_coef array must cover all {self._n_agents} agents;"
+                    f" got {self._u_coefs.size} coefficients"
+                )
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
@@ -124,17 +128,11 @@ class HighsMaster(MasterBackend):
             # optimum. With the default lower bound, a cutless agent's u sits at
             # lb=0 -> 0, leaving the estimate unchanged.
             n = self._n_agents
-            u_obj = np.empty(n, dtype=np.float64)
-            for agent_id in range(n):
-                coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
-                if not np.isfinite(coef):
-                    raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
-                u_obj[agent_id] = coef
             inf = float(self._highspy.kHighsInf)
             self._check_status(
                 solver.addCols(
                     n,
-                    u_obj,
+                    self._slack_coef_vector(n),
                     np.full(n, self._u_lb(), dtype=np.float64),
                     np.full(n, inf, dtype=np.float64),
                     0,
@@ -231,6 +229,22 @@ class HighsMaster(MasterBackend):
             for row, candidate in zip(rows, candidates.tolist()):
                 self._update_u_upper(row, candidate)
 
+    def _slack_coef(self, agent_id: int) -> float:
+        if self._u_coefs is not None:
+            return float(self._u_coefs[agent_id])
+        coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
+        if not np.isfinite(coef):
+            raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+        return coef
+
+    def _slack_coef_vector(self, n: int) -> np.ndarray:
+        if self._u_coefs is not None:
+            return self._u_coefs[:n]
+        out = np.empty(n, dtype=np.float64)
+        for agent_id in range(n):
+            out[agent_id] = self._slack_coef(agent_id)
+        return out
+
     def _add_u_columns(
         self, agent_ids: Sequence[int], first_rows: Mapping[int, CutRow]
     ) -> None:
@@ -238,9 +252,7 @@ class HighsMaster(MasterBackend):
         coefs = np.empty(n, dtype=np.float64)
         uppers = np.empty(n, dtype=np.float64)
         for i, agent_id in enumerate(agent_ids):
-            coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
-            if not np.isfinite(coef):
-                raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+            coef = self._slack_coef(agent_id)
             coefs[i] = coef
             uppers[i] = self._initial_u_upper(first_rows[agent_id], coef)
         self._check_status(
@@ -355,7 +367,7 @@ class HighsMaster(MasterBackend):
     def _update_u_upper(self, row: CutRow, candidate: float | None = None) -> None:
         if self._u_lower_bound is None:
             return
-        coef = self._u_obj[row.agent_id]
+        coef = self._slack_coef(row.agent_id)
         if coef < 0.0:
             return
         current = self._u_upper.get(row.agent_id, float(self._highspy.kHighsInf))

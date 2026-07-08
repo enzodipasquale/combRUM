@@ -886,6 +886,39 @@ def test_master_environment_yields_none_for_highs() -> None:
         assert env is None
 
 
+@pytest.mark.skipif(
+    not (GUROBI_AVAILABLE or HIGHS_AVAILABLE),
+    reason="no real backend available",
+)
+def test_u_coef_array_matches_callable() -> None:
+    # Index 0 is a cutless agent whose coefficient is never read.
+    coefs = np.array([0.0, LP_U_COEF[1], LP_U_COEF[2]], dtype=np.float64)
+    with lp_master("auto") as by_callable:
+        by_callable.add_cuts(LP_ROWS)
+        by_callable.solve()
+        with make_master(
+            K,
+            LP_BOUNDS,
+            LP_C_THETA,
+            coefs,
+            backend="auto",
+        ) as by_array:
+            by_array.add_cuts(LP_ROWS)
+            by_array.solve()
+            assert by_array.theta().tobytes() == by_callable.theta().tobytes()
+            assert by_array.objective() == by_callable.objective()
+
+    with pytest.raises(ValueError, match="must cover all"):
+        make_master(
+            K,
+            LP_BOUNDS,
+            LP_C_THETA,
+            coefs[:1],
+            backend="auto",
+            n_agents=coefs.size,
+        )
+
+
 @needs_highs
 def test_make_master_rejects_env_for_highs() -> None:
     with pytest.raises(ValueError, match="only meaningful for the gurobi backend"):

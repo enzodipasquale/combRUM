@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 
 import numpy as np
@@ -23,11 +24,38 @@ def pack_bundle(bundle: np.ndarray) -> bytes:
     return _HEADER.pack(_MAGIC, len(dtype), arr.ndim) + dtype + shape.tobytes() + arr.tobytes()
 
 
+def pack_bundles(bundles: np.ndarray) -> list[bytes]:
+    """Row-wise :func:`pack_bundle` over a 2-D block, one header build.
+
+    Every row shares the header, so a block of n bundles costs one
+    ``tobytes`` and n slices instead of n full packs.
+    """
+    arr = np.ascontiguousarray(bundles)
+    if arr.ndim != 2:
+        return [pack_bundle(bundle) for bundle in arr]
+    dtype = arr.dtype.str.encode("ascii")
+    if len(dtype) > np.iinfo(np.uint16).max:
+        raise ValueError(f"bundle dtype tag is too long: {arr.dtype.str!r}")
+    prefix = (
+        _HEADER.pack(_MAGIC, len(dtype), 1)
+        + dtype
+        + np.asarray((arr.shape[1],), dtype="<i8").tobytes()
+    )
+    row_nbytes = int(arr.shape[1]) * int(arr.dtype.itemsize)
+    if row_nbytes == 0:
+        return [prefix] * int(arr.shape[0])
+    raw = arr.tobytes()
+    return [
+        prefix + raw[start : start + row_nbytes]
+        for start in range(0, len(raw), row_nbytes)
+    ]
+
+
 def canonical_bundle_key(key: bytes) -> bytes:
     """Canonical bytes for explicit bundle keys; opaque keys pass through."""
 
     if key.startswith(_MAGIC):
-        unpack_bundle(key)
+        _parse_packed(key)
         return key
     try:
         bundle = unpack_bundle(key)
@@ -36,34 +64,61 @@ def canonical_bundle_key(key: bytes) -> bytes:
     return pack_bundle(bundle)
 
 
+_DTYPES_BY_TAG: dict[bytes, np.dtype] = {}
+_SHAPE_STRUCTS: dict[int, struct.Struct] = {}
+
+
+def _dtype_from_tag(tag: bytes) -> np.dtype:
+    dtype = _DTYPES_BY_TAG.get(tag)
+    if dtype is None:
+        try:
+            dtype = np.dtype(tag.decode("ascii"))
+        except (UnicodeDecodeError, TypeError) as exc:
+            raise ValueError("bundle_key dtype tag is invalid") from exc
+        _DTYPES_BY_TAG[tag] = dtype
+    return dtype
+
+
+def _shape_struct(ndim: int) -> struct.Struct:
+    fmt = _SHAPE_STRUCTS.get(ndim)
+    if fmt is None:
+        fmt = struct.Struct(f"<{ndim}q")
+        _SHAPE_STRUCTS[ndim] = fmt
+    return fmt
+
+
+def _parse_packed(key: bytes) -> tuple[np.dtype, tuple[int, ...], int]:
+    """Validated header of a packed key: (dtype, shape, payload offset).
+
+    The length arithmetic pins the payload exactly, so validation never
+    materializes the array.
+    """
+    if len(key) < _HEADER.size:
+        raise ValueError("bundle_key header is truncated")
+    _magic, dtype_len, ndim = _HEADER.unpack_from(key)
+    dtype_end = _HEADER.size + int(dtype_len)
+    shape_end = dtype_end + int(ndim) * 8
+    if shape_end > len(key):
+        raise ValueError("bundle_key shape metadata is truncated")
+    dtype = _dtype_from_tag(key[_HEADER.size : dtype_end])
+    shape = _shape_struct(int(ndim)).unpack_from(key, dtype_end)
+    if any(dim < 0 for dim in shape):
+        raise ValueError(f"bundle_key shape must be nonnegative; got {shape}")
+    expected = math.prod(shape) * int(dtype.itemsize)
+    if len(key) - shape_end != expected:
+        raise ValueError(
+            "bundle_key payload has wrong byte length;"
+            f" got {len(key) - shape_end}, expected {expected}"
+        )
+    return dtype, shape, shape_end
+
+
 def unpack_bundle(key: bytes) -> np.ndarray:
     """Recover a read-only bundle packed by :func:`pack_bundle`."""
 
     if key.startswith(_MAGIC):
-        if len(key) < _HEADER.size:
-            raise ValueError("bundle_key header is truncated")
-        _magic, dtype_len, ndim = _HEADER.unpack_from(key)
-        pos = _HEADER.size
-        dtype_end = pos + int(dtype_len)
-        shape_end = dtype_end + int(ndim) * 8
-        if shape_end > len(key):
-            raise ValueError("bundle_key shape metadata is truncated")
-        try:
-            dtype = np.dtype(key[pos:dtype_end].decode("ascii"))
-        except (UnicodeDecodeError, TypeError) as exc:
-            raise ValueError("bundle_key dtype tag is invalid") from exc
-        shape_arr = np.frombuffer(key, dtype="<i8", count=int(ndim), offset=dtype_end)
-        shape = tuple(int(v) for v in shape_arr)
-        if any(dim < 0 for dim in shape):
-            raise ValueError(f"bundle_key shape must be nonnegative; got {shape}")
-        raw = key[shape_end:]
-        expected = int(np.prod(shape, dtype=np.int64)) * int(dtype.itemsize)
-        if len(raw) != expected:
-            raise ValueError(
-                "bundle_key payload has wrong byte length;"
-                f" got {len(raw)}, expected {expected}"
-            )
-        return np.frombuffer(raw, dtype=dtype).reshape(shape)
+        dtype, shape, payload_start = _parse_packed(key)
+        return np.frombuffer(key, dtype=dtype, offset=payload_start).reshape(shape)
 
     tag, sep, raw = key.partition(b":")
     if sep:

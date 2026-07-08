@@ -13,7 +13,7 @@ from combrum.interface_resolution import FeatureMap
 from combrum.model import Data, Model
 from combrum.oracle import Oracle
 from combrum.parameters import Parameters
-from combrum.transport import LocalCluster, SerialTransport
+from combrum.transport import CutRow, LocalCluster, SerialTransport
 
 
 class _Oracle(Oracle):
@@ -99,6 +99,51 @@ def _zeros_data(n_obs=2):
         shocks=np.zeros((n_obs, 1, 1)),
         observables=np.arange(n_obs),
     )
+
+
+def test_serial_bootstrap_passes_warm_start_to_every_replication(
+    monkeypatch,
+) -> None:
+    bootstrap_mod = importlib.import_module("combrum.bootstrap")
+    captured: list[tuple[object, object]] = []
+
+    def fake_build_fit_context(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append((kwargs["warm_start"], kwargs["warm_cuts"]))
+        return SimpleNamespace(ctx=SimpleNamespace())
+
+    def fake_run_fit(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            result=FormulationResult(
+                theta_hat=np.zeros(1), objective=0.0, n_active_cuts=0
+            ),
+            diagnostics=SimpleNamespace(converged=True, iterations=1),
+        )
+
+    monkeypatch.setattr(
+        bootstrap_mod, "resolve_master_backend", lambda requested, **kw: "highs"
+    )
+    monkeypatch.setattr(bootstrap_mod, "build_fit_context", fake_build_fit_context)
+    monkeypatch.setattr(bootstrap_mod, "run_fit", fake_run_fit)
+
+    point = SimpleNamespace(theta_hat=np.zeros(1))
+    rows = (
+        CutRow(
+            rep_id=0,
+            agent_id=0,
+            phi=np.zeros(1),
+            epsilon=0.0,
+            bundle_key=b"k",
+        ),
+    )
+    bootstrap_mod.bootstrap(
+        _theta_model(),
+        _zeros_data(),
+        n_bootstrap=3,
+        weights=NativeDraws(n_obs=2, base_seed=7),
+        warm_start=point,
+        warm_cuts=rows,
+    )
+    assert captured == [(point, rows)] * 3
 
 
 def test_serial_bootstrap_resolves_backend_once(monkeypatch) -> None:

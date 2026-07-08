@@ -184,10 +184,12 @@ def build_fit_context(
             # c_theta / empirical_moment are still recomputed above, never baked
             # into the reused master. Rank-0 only.
             return master
+        # NSlack masters take the weight vector directly; OneSlack holds one
+        # aggregate slack, so a unit callable serves its single lazy column.
         u_coef = (
             (lambda agent_id: 1.0)
             if isinstance(formulation, OneSlack)
-            else (lambda agent_id: float(agent_weights[agent_id]))
+            else agent_weights
         )
         # On a degenerate optimal face the published vertex depends on the
         # simplex config, so Gurobi defaults to warm-started primal simplex.

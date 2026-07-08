@@ -277,6 +277,8 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "tolerance": 1e-06,
         "max_iterations": 1000,
         "min_iterations": 0,
+        "warm_start": None,
+        "warm_cuts": None,
         "dual_store_dir": None,
         "activity": None,
     }
@@ -621,6 +623,8 @@ def test_public_type_hints_resolve() -> None:
             "tolerance": float,
             "max_iterations": int,
             "min_iterations": int,
+            "warm_start": (object | None),
+            "warm_cuts": (Sequence[CutRow] | None),
             "dual_store_dir": (Path | str | None),
             "activity": (combrum.ActivityConfig | None),
             "return": combrum.BootstrapResult,

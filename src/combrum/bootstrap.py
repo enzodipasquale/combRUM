@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -34,7 +35,7 @@ from combrum.model import Data, Model
 from combrum.randomness import multiplier_weights
 from combrum.result import BootstrapResult
 from combrum.transport import SerialTransport
-from combrum.transport.base import Transport
+from combrum.transport.base import CutRow, Transport
 
 
 class WeightSource(Protocol):
@@ -112,6 +113,8 @@ def bootstrap(
     tolerance: float = 1e-6,
     max_iterations: int = 1000,
     min_iterations: int = 0,
+    warm_start: object | None = None,
+    warm_cuts: Sequence[CutRow] | None = None,
     dual_store_dir: Path | str | None = None,
     activity: ActivityConfig | None = None,
 ) -> BootstrapResult:
@@ -121,7 +124,15 @@ def bootstrap(
     :class:`NativeDraws` for fresh multiplier weights, or
     :class:`~combrum.randomness.ReplayedWeights` to replay a stored matrix.
     ``transport`` defaults to the serial reference. Each replication reweights
-    the criterion and runs one cold fit.
+    the criterion and runs one fit; by default that fit is cold.
+
+    ``warm_start`` and ``warm_cuts`` mirror
+    :func:`~combrum.bootstrap_distributed.bootstrap_distributed`: an object
+    whose ``theta_hat`` seeds each replication's proximal anchor, and cut rows
+    reinstalled onto each replication's fresh master before its first solve
+    (typically the point estimate and its active set). Warm replications
+    usually converge in far fewer iterations but walk a different cut path
+    than cold ones; the defaults keep every replication cold.
 
     :class:`NativeDraws` and the distributed
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed` use different
@@ -256,6 +267,8 @@ def bootstrap(
                     master_params=master_params,
                     tolerance=tolerance,
                     weights=weights_b,
+                    warm_start=warm_start,
+                    warm_cuts=warm_cuts,
                     result_publication=result_publication,
                     observed_cache=observed_cache,
                     master_env=master_env,

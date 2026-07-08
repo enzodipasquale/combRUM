@@ -2,7 +2,34 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
+
+
+def validated_u_coefs(
+    u_coef: object,
+) -> tuple[Callable[[int], float] | None, np.ndarray | None]:
+    """Split ``u_coef`` into its callable or validated-array form.
+
+    Returns ``(callable, None)`` or ``(None, array)``; the array form is a
+    read-only finite float64 vector indexed by agent id, so backends read
+    slack coefficients without one Python call per agent.
+    """
+    if callable(u_coef):
+        return u_coef, None
+    coefs = np.asarray(u_coef)
+    if coefs.ndim != 1 or not np.issubdtype(coefs.dtype, np.number):
+        raise ValueError(
+            "u_coef must be a callable or a 1-D numeric array of per-agent"
+            f" coefficients; got {type(u_coef).__name__}"
+        )
+    coefs = np.ascontiguousarray(coefs, dtype=np.float64)
+    if coefs.size and not np.isfinite(coefs).all():
+        bad = int(np.flatnonzero(~np.isfinite(coefs))[0])
+        raise ValueError(f"u_coef[{bad}] must be finite; got {coefs[bad]!r}")
+    coefs.setflags(write=False)
+    return None, coefs
 
 
 def validated_construction(

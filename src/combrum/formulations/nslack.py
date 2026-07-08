@@ -29,6 +29,7 @@ from typing import Any
 import numpy as np
 
 from combrum._bundle_key import canonical_bundle_key as _canonical_bundle_key
+from combrum._bundle_key import pack_bundles as _pack_bundles
 from combrum.context import FitContext, ResultPublication
 from combrum.demand import Demand, DemandBatch
 from combrum.dual import DualSolution
@@ -417,12 +418,13 @@ class NSlack(Formulation):
                     block_ids,
                     block_bundles,
                 )
+                block_keys = _pack_bundles(block_bundles)
                 if pending is not None:
                     block_payoffs = payoffs[block_idx]
                     block_gaps = demands.gaps[block_idx]
-                    for agent, bundle, payoff, gap, (phi, eps) in zip(
+                    for agent, key, payoff, gap, (phi, eps) in zip(
                         block_ids,
-                        block_bundles,
+                        block_keys,
                         block_payoffs,
                         block_gaps,
                         featured,
@@ -432,7 +434,7 @@ class NSlack(Formulation):
                         pending.priced_features.append(
                             PricedFeature(
                                 agent_id=int(agent),
-                                bundle_key=bundle_key(bundle),
+                                bundle_key=key,
                                 payoff=float(payoff),
                                 gap=float(gap),
                                 phi=phi_arr,
@@ -445,10 +447,10 @@ class NSlack(Formulation):
                         agent_id=int(agent),
                         phi=phi,
                         epsilon=eps,
-                        bundle_key=bundle_key(bundle),
+                        bundle_key=key,
                     )
-                    for agent, bundle, (phi, eps) in zip(
-                        block_ids, block_bundles, featured
+                    for agent, key, (phi, eps) in zip(
+                        block_ids, block_keys, featured
                     )
                 )
             if pending is not None:

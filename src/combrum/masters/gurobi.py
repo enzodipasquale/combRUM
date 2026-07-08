@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from combrum.master import CutReadings, MasterBackend
-from combrum.masters._common import validated_construction
+from combrum.masters._common import validated_construction, validated_u_coefs
 from combrum.transport.base import CutRow
 
 _CUT_BATCH_SIZE = 4096
@@ -85,7 +85,7 @@ class GurobiMaster(MasterBackend):
         K: int,
         theta_bounds: tuple[np.ndarray, np.ndarray],
         c_theta: np.ndarray,
-        u_coef: Callable[[int], float],
+        u_coef: Callable[[int], float] | np.ndarray,
         params: Mapping[str, object] | None = None,
         n_agents: int | None = None,
         *,
@@ -100,9 +100,13 @@ class GurobiMaster(MasterBackend):
         self._K, self._lower, self._upper, self._c = validated_construction(
             K, theta_bounds, c_theta
         )
-        if not callable(u_coef):
-            raise ValueError(f"u_coef must be callable; got {type(u_coef).__name__}")
-        self._u_coef = u_coef
+        self._u_coef, self._u_coefs = validated_u_coefs(u_coef)
+        if self._u_coefs is not None and self._n_agents is not None:
+            if self._u_coefs.size < self._n_agents:
+                raise ValueError(
+                    f"u_coef array must cover all {self._n_agents} agents;"
+                    f" got {self._u_coefs.size} coefficients"
+                )
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
@@ -160,18 +164,28 @@ class GurobiMaster(MasterBackend):
             # structure keeps the warm re-solve vertex deterministic even at a
             # degenerate optimum. With the default lower bound, a cutless
             # agent's u sits at lb=0 -> 0, so the estimate is unchanged.
-            u_obj = np.empty(self._n_agents, dtype=np.float64)
-            for agent_id in range(self._n_agents):
-                coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
-                if not np.isfinite(coef):
-                    raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
-                u_obj[agent_id] = coef
             self._u_mvar = model.addMVar(
                 self._n_agents,
                 lb=self._u_lb(),
-                obj=u_obj,
+                obj=self._slack_coef_vector(self._n_agents),
             )
             self._u_vars.update(enumerate(self._u_mvar.tolist()))
+
+    def _slack_coef(self, agent_id: int) -> float:
+        if self._u_coefs is not None:
+            return float(self._u_coefs[agent_id])
+        coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
+        if not np.isfinite(coef):
+            raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+        return coef
+
+    def _slack_coef_vector(self, n: int) -> np.ndarray:
+        if self._u_coefs is not None:
+            return self._u_coefs[:n]
+        out = np.empty(n, dtype=np.float64)
+        for agent_id in range(n):
+            out[agent_id] = self._slack_coef(agent_id)
+        return out
 
     # -- cut management ----------------------------------------------------
 
@@ -202,16 +216,11 @@ class GurobiMaster(MasterBackend):
                 if agent_id not in self._u_vars
             ]
             if missing:
-                u_obj = np.empty(len(missing), dtype=np.float64)
-                for i, agent_id in enumerate(missing):
-                    coef = self._u_obj.setdefault(
-                        agent_id, float(self._u_coef(agent_id))
-                    )
-                    if not np.isfinite(coef):
-                        raise ValueError(
-                            f"u_coef({agent_id}) must be finite; got {coef!r}"
-                        )
-                    u_obj[i] = coef
+                u_obj = np.fromiter(
+                    (self._slack_coef(agent_id) for agent_id in missing),
+                    dtype=np.float64,
+                    count=len(missing),
+                )
                 new_vars = self._model.addMVar(
                     len(missing), lb=self._u_lb(), obj=u_obj
                 ).tolist()
@@ -447,18 +456,14 @@ class GurobiMaster(MasterBackend):
             variables = self._gp.concatenate([self._theta_mvar, self._u_mvar])
             coeffs = np.empty(self._K + self._n_agents, dtype=np.float64)
             coeffs[: self._K] = self._c
-            coeffs[self._K :] = np.fromiter(
-                (self._u_obj[agent_id] for agent_id in range(self._n_agents)),
-                dtype=np.float64,
-                count=self._n_agents,
-            )
+            coeffs[self._K :] = self._slack_coef_vector(self._n_agents)
         elif self._u_vars:
             u_mvar = self._gp.MVar.fromlist(list(self._u_vars.values()))
             variables = self._gp.concatenate([self._theta_mvar, u_mvar])
             coeffs = np.empty(self._K + len(self._u_vars), dtype=np.float64)
             coeffs[: self._K] = self._c
             for offset, agent_id in enumerate(self._u_vars, start=self._K):
-                coeffs[offset] = self._u_obj[agent_id]
+                coeffs[offset] = self._slack_coef(agent_id)
         else:
             variables = self._theta_mvar
             coeffs = np.array(self._c, dtype=np.float64, copy=True)

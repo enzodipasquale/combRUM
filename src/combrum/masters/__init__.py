@@ -233,7 +233,7 @@ def make_master(
     K: int,
     theta_bounds: tuple[np.ndarray, np.ndarray],
     c_theta: np.ndarray,
-    u_coef: Callable[[int], float],
+    u_coef: Callable[[int], float] | np.ndarray,
     *,
     backend: str = "auto",
     params: Mapping[str, object] | None = None,
@@ -244,9 +244,11 @@ def make_master(
 
     ``K`` is the theta dimension; ``theta_bounds`` is the ``(lower,
     upper)`` box pair, each shaped ``(K,)``; ``c_theta`` is the ``(K,)``
-    linear theta objective. ``u_coef`` maps an agent id to that agent's
-    slack objective coefficient and is applied verbatim; the caller
-    owns the weighting. ``params`` are backend-owned solver knobs,
+    linear theta objective. ``u_coef`` gives each agent's slack objective
+    coefficient — a callable from agent id, or a 1-D array indexed by
+    agent id, which the backends read without one Python call per agent.
+    Either form is applied verbatim; the caller owns the weighting.
+    ``params`` are backend-owned solver knobs,
     passed through opaquely to whichever solver hosts the master. The
     optional ``params["u_lower_bound"]`` defaults to ``0.0``; set it to
     ``None`` for a solver-native free epigraph variable.

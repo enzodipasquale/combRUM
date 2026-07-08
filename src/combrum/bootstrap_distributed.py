@@ -57,7 +57,7 @@ from combrum.model import Model
 from combrum.oracle import Oracle
 from combrum.parameters import Parameters
 from combrum.policies import CutPolicy
-from combrum.randomness import bootstrap_multiplier, bootstrap_multipliers
+from combrum.randomness import bootstrap_multipliers
 from combrum.result import BootstrapResult
 from combrum.rowgen import (
     Contribution,
@@ -1006,11 +1006,16 @@ def _bootstrap_wave_c_theta_and_normalizers(
 def _bootstrap_slack_coef(
     *, n_observations: int, base_seed: int, rep_id: int, normalizer: float
 ) -> Callable[[int], float]:
+    # One vectorized draw over the observation axis; the closure keeps O(N)
+    # memory where a dense (N*S,) coefficient array would not, and the lazy
+    # distributed masters read only the agents that actually cut.
     scale = float(n_observations) / float(normalizer)
+    raw = bootstrap_multipliers(
+        base_seed, rep_id, np.arange(int(n_observations), dtype=np.int64)
+    )
 
     def _coef(agent_id: int) -> float:
-        obs_id = int(agent_id) % int(n_observations)
-        return bootstrap_multiplier(base_seed, rep_id, obs_id) * scale
+        return float(raw[int(agent_id) % raw.size]) * scale
 
     return _coef
 
