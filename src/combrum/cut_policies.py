@@ -28,6 +28,10 @@ def _key(row: CutRow) -> tuple[int, bytes]:
     return (row.agent_id, row.bundle_key)
 
 
+# Sentinel distinguishing "no reading for this cut" from any float value.
+_NO_READING = object()
+
+
 def _parallel_violations(
     candidates: Sequence[CutRow], violations: np.ndarray
 ) -> tuple[tuple[CutRow, ...], np.ndarray]:
@@ -132,21 +136,39 @@ class Compose(CutPolicy):
         violations: np.ndarray,
         iteration: int,
     ) -> tuple[CutRow, ...]:
-        rows = tuple(candidates)
-        # Map violation by object identity so a thinning stage leaves the next
-        # stage a violations array still parallel to its rows.
-        if self._profile.needs_admit_violations:
-            viol_by_id = {id(row): float(v) for row, v in zip(rows, violations)}
-        else:
-            viol_by_id = {}
+        original = tuple(candidates)
+        rows = original
+        viol = (
+            np.array(violations, dtype=np.float64)
+            if self._profile.needs_admit_violations
+            else None
+        )
+        # Violations are re-mapped by object identity, but only after a stage
+        # has actually thinned the rows; until then ``viol`` stays parallel.
+        viol_by_id: dict[int, float] | None = None
+        aligned = True
+        empty = np.empty(0, dtype=np.float64)
         for stage, profile in zip(self._admit_chain, self._admit_profiles):
             if profile.needs_admit_violations:
-                stage_viol = np.array(
-                    [viol_by_id[id(row)] for row in rows], dtype=np.float64
-                )
+                if not aligned:
+                    if viol_by_id is None:
+                        viol_by_id = {
+                            id(row): float(v) for row, v in zip(original, violations)
+                        }
+                    viol = np.array(
+                        [viol_by_id[id(row)] for row in rows], dtype=np.float64
+                    )
+                    aligned = True
+                stage_viol = viol
             else:
-                stage_viol = np.empty(0, dtype=np.float64)
-            rows = tuple(stage.admit(rows, stage_viol, iteration))
+                stage_viol = empty
+            out = tuple(stage.admit(rows, stage_viol, iteration))
+            aligned = (
+                aligned
+                and len(out) == len(rows)
+                and all(a is b for a, b in zip(out, rows))
+            )
+            rows = out
         return rows
 
     def purge(
@@ -161,6 +183,8 @@ class Compose(CutPolicy):
             retired_keys.update(
                 _key(row) for row in stage.purge(installed, dual, slack, iteration)
             )
+        if not retired_keys:
+            return ()
         return tuple(row for row in installed if _key(row) in retired_keys)
 
     def validate_master_size(self, *, n_parameters: int, n_agents: int) -> None:
@@ -227,14 +251,14 @@ class PurgeInactive(CutPolicy):
         slack: Mapping[tuple[int, bytes], float] | None,
         iteration: int,
     ) -> tuple[CutRow, ...]:
-        live = {_key(row) for row in installed}
-        for key in set(self._zero_streak) - live:
+        keys = [_key(row) for row in installed]
+        live = set(keys)
+        for key in [k for k in self._zero_streak if k not in live]:
             del self._zero_streak[key]
         if dual is None:
             return ()
         retired: list[CutRow] = []
-        for row in installed:
-            key = _key(row)
+        for row, key in zip(installed, keys):
             pi = dual.get(key)
             if pi is None:
                 continue
@@ -320,7 +344,11 @@ class SlackStrip(CutPolicy):
     ) -> tuple[CutRow, ...]:
         if slack is None:
             return ()
-        signalled = [(row, slack[_key(row)]) for row in installed if _key(row) in slack]
+        signalled = []
+        for row in installed:
+            value = slack.get(_key(row), _NO_READING)
+            if value is not _NO_READING:
+                signalled.append((row, value))
         if not signalled:
             return ()
         slacks = np.asarray([value for _, value in signalled])
@@ -420,6 +448,9 @@ class MostViolated(CutPolicy):
             if self._k is not None
             else max(1, int(self._fraction * int(positive.size)))
         )
+        if n >= positive.size:
+            # Nothing to thin; positive is already in input order.
+            return tuple(rows[i] for i in positive)
         ranked = positive[np.argsort(-viol[positive], kind="stable")]
         keep = np.zeros(len(rows), dtype=bool)
         keep[ranked[:n]] = True

@@ -57,7 +57,7 @@ from combrum.model import Model
 from combrum.oracle import Oracle
 from combrum.parameters import Parameters
 from combrum.policies import CutPolicy
-from combrum.randomness import bootstrap_multiplier
+from combrum.randomness import bootstrap_multiplier, bootstrap_multipliers
 from combrum.result import BootstrapResult
 from combrum.rowgen import (
     Contribution,
@@ -265,7 +265,8 @@ def batched_reduce(
             _require_kind(contribution, MaxContribution, slot)
             worsts[pos] = contribution.worst
             all_rows.extend(_restamp(contribution.local_rows, pos))
-        return _reduce_live_max(transport, live_slots, owners, worsts, all_rows)
+        reduced, _ = _reduce_live_max(transport, live_slots, owners, worsts, all_rows)
+        return reduced
 
     raise AssertionError(
         f"unhandled contribution type: {type(sample).__name__};"
@@ -279,13 +280,26 @@ def _reduce_live_max(
     owners: np.ndarray,
     worsts: np.ndarray,
     all_rows: Sequence[CutRow],
-) -> list[Reduced | None]:
+    *,
+    local_row_nbytes: int | None = None,
+) -> tuple[list[Reduced | None], int | None]:
     live_slots = tuple(int(slot) for slot in live_slots)
     if not live_slots:
         raise AssertionError("cannot reduce an empty live-replication set")
     B = int(owners.shape[0])
     live_owners = np.asarray([owners[slot] for slot in live_slots], dtype=np.int64)
-    global_worsts = np.asarray(transport.batched_max(worsts), dtype=np.float64)
+    # The row-width bookkeeping rides the batched max as one extra lane, so
+    # agreeing it costs no additional round.
+    lanes = (
+        worsts
+        if local_row_nbytes is None
+        else np.append(worsts, float(local_row_nbytes))
+    )
+    global_lanes = np.asarray(transport.batched_max(lanes), dtype=np.float64)
+    global_worsts = global_lanes[: len(live_slots)]
+    observed_nbytes = (
+        None if local_row_nbytes is None else int(global_lanes[len(live_slots)])
+    )
     received = transport.exchange_cuts(all_rows, live_owners)
     rows_by_pos: dict[int, list[CutRow]] = {}
     for row in received:
@@ -296,7 +310,7 @@ def _reduce_live_max(
             global_worst=float(global_worsts[pos]),
             received_rows=tuple(_restamp(rows_by_pos.get(pos, ()), slot)),
         )
-    return reduced
+    return reduced, observed_nbytes
 
 
 def _store_dual(writer: DualStoreWriter, rep_id: int, dual: DualSolution | None) -> int:
@@ -338,29 +352,18 @@ def _observe_demands(tally: GapTally, demands: Mapping[int, Demand]) -> None:
 
 
 def _cut_exchange_block_size(
-    replicas: Sequence["_Replica"],
-    live_slots: Sequence[int],
-    *,
-    row_nbytes: int,
-    transport: Transport,
+    n_live: int, *, row_nbytes: int, max_scheduled_ids: int
 ) -> int:
-    if not live_slots:
+    # Pure sizing: the agreed shard-size bound is wave-constant, so the wave
+    # loop agrees it once instead of re-reducing it per block.
+    if not n_live:
         return 0
-    local_max = max(
-        int(np.asarray(replicas[int(slot)].scheduled_local_ids).size)
-        for slot in live_slots
-    )
-    max_local = (
-        local_max
-        if transport.size == 1
-        else int(transport.allreduce_max(float(local_max)))
-    )
     budget_bytes = max(1, _CUT_EXCHANGE_BLOCK_ELEMENTS * np.dtype(np.float64).itemsize)
-    bytes_per_rep = max(1, max_local * max(1, int(row_nbytes)))
+    bytes_per_rep = max(1, int(max_scheduled_ids) * max(1, int(row_nbytes)))
     return max(
         1,
         min(
-            len(live_slots),
+            int(n_live),
             max(1, budget_bytes // bytes_per_rep),
         ),
     )
@@ -627,6 +630,20 @@ def _run_replica_wave(
             )
             for replica in replicas
         )
+        # Shard sizes never change within a wave: agree the block-sizing
+        # bound once here rather than once per block.
+        local_max_scheduled = max(
+            (
+                int(np.asarray(replica.scheduled_local_ids).size)
+                for replica in replicas
+            ),
+            default=0,
+        )
+        max_scheduled = (
+            local_max_scheduled
+            if transport.size == 1
+            else int(transport.allreduce_max(float(local_max_scheduled)))
+        )
         for it in range(max_iterations):
             live_slots = np.flatnonzero(live)
             if live_slots.size == 0:
@@ -709,31 +726,31 @@ def _run_replica_wave(
                     worsts = np.concatenate(worst_parts)
                 else:
                     cut_block = _cut_exchange_block_size(
-                        replicas,
-                        live_slot_ids[block_start:],
+                        len(live_slot_ids) - block_start,
                         row_nbytes=cut_row_nbytes_hint,
-                        transport=transport,
+                        max_scheduled_ids=max_scheduled,
                     )
                     block_slot_ids = live_slot_ids[block_start : block_start + cut_block]
                     worsts, rows = _guarded_price(block_slot_ids)
                 if price_seconds is not None and price_t0 is not None:
                     price_seconds += perf_counter() - price_t0
 
-                observed_row_nbytes = _observed_cut_row_nbytes(
-                    rows, transport=transport
-                )
-                if observed_row_nbytes is not None:
-                    cut_row_nbytes_hint = max(cut_row_nbytes_hint, observed_row_nbytes)
-
                 comm_t0 = perf_counter() if log_details else None
-                reduced = _reduce_live_max(
+                reduced, observed_row_nbytes = _reduce_live_max(
                     transport,
                     block_slot_ids,
                     owners,
                     worsts,
                     rows,
+                    local_row_nbytes=max(
+                        (_cut_row_nbytes(row) for row in rows), default=0
+                    ),
                 )
                 del rows
+                if observed_row_nbytes:
+                    cut_row_nbytes_hint = max(
+                        cut_row_nbytes_hint or 0, observed_row_nbytes
+                    )
                 if comm_seconds is not None and comm_t0 is not None:
                     comm_seconds += perf_counter() - comm_t0
 
@@ -895,14 +912,7 @@ def _bootstrap_local_rows(
     width = len(rep_ids) * (prep.K + 1)
     local = np.empty((owned_obs.size, width), dtype=np.float64)
     for slot, rep_id in enumerate(rep_ids):
-        raw = np.fromiter(
-            (
-                bootstrap_multiplier(base_seed, rep_id, int(obs_id))
-                for obs_id in owned_obs
-            ),
-            dtype=np.float64,
-            count=int(owned_obs.size),
-        )
+        raw = bootstrap_multipliers(base_seed, rep_id, owned_obs)
         offset = slot * (prep.K + 1)
         local[:, offset] = raw
         np.multiply(

@@ -53,7 +53,7 @@ from combrum.steprecord import (
     _Pending,
     priced_features_from,
 )
-from combrum.transport.base import CutRow, _pack_bundle, _unpack_bundle
+from combrum.transport.base import CutRow, _pack_bundle
 
 # Feature-map injection accepts a bare ``(agent_id, bundle) -> (phi (K,), eps)``
 # callable OR a FeatureMap subclass adding a batched ``features_batch``; both
@@ -64,10 +64,9 @@ _RECEIVED_VIOLATION_BLOCK_ELEMENTS = 1_000_000
 _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS = 1_000_000
 
 
-# Bundle keys share the package-level codec; these aliases keep local call sites
+# Bundle keys share the package-level codec; the alias keeps local call sites
 # compact.
 bundle_key = _pack_bundle
-_bundle_from_key = _unpack_bundle
 
 
 @dataclass(frozen=True)
@@ -112,7 +111,9 @@ def _dual_solution(
         if slot is None:
             slot = len(bundles)
             table_slots[row.bundle_key] = slot
-            bundles.append(_bundle_from_key(row.bundle_key))
+            # row.bundle memoizes the decode, so repeated dual publications
+            # over a persistent master pay it once per row, not per sweep.
+            bundles.append(row.bundle)
         agent_ids.append(row.agent_id)
         bundle_row_ids.append(slot)
         pis.append(duals[(row.agent_id, row.bundle_key)])
@@ -184,6 +185,47 @@ def _dual_from_packet(packet: _DualPacket | None) -> DualSolution | None:
         bundle_table=packet.bundle_table,
         bound_duals=packet.bound_duals,
     )
+
+
+class _DenseU(Mapping):
+    """Per-agent epigraph values, dense-indexed with mapping parity.
+
+    ``dense`` is the read-only ``(n_agents,)`` value vector (zero where
+    absent); ``ids`` the sorted agent ids actually present. The mapping
+    views match the dict this stands in for — ascending-id iteration,
+    membership only at ``ids`` — so capture hooks and tests that treat
+    ``_u`` as a mapping keep working, while the hot paths index ``dense``
+    directly. Dense-weight-mode fits hold their u this way; distributed
+    bootstrap keeps plain dicts, whose sparsity bounds per-replication
+    memory.
+    """
+
+    __slots__ = ("dense", "ids")
+
+    def __init__(self, dense: np.ndarray, ids: np.ndarray) -> None:
+        dense.setflags(write=False)
+        self.dense = dense
+        self.ids = ids
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[int, float], n_agents: int) -> "_DenseU":
+        dense = np.zeros(n_agents, dtype=np.float64)
+        ids = np.fromiter(values.keys(), dtype=np.int64, count=len(values))
+        dense[ids] = np.fromiter(values.values(), dtype=np.float64, count=len(values))
+        ids.sort()
+        return cls(dense, ids)
+
+    def __getitem__(self, agent_id: int) -> float:
+        pos = int(np.searchsorted(self.ids, agent_id))
+        if pos == self.ids.size or int(self.ids[pos]) != int(agent_id):
+            raise KeyError(agent_id)
+        return float(self.dense[int(agent_id)])
+
+    def __iter__(self):
+        return iter(self.ids.tolist())
+
+    def __len__(self) -> int:
+        return int(self.ids.size)
 
 
 class NSlack(Formulation):
@@ -351,12 +393,7 @@ class NSlack(Formulation):
             ids = demands.ids
             bundles = demands.bundles
             payoffs = demands.payoffs
-            u = np.fromiter(
-                (self._u.get(int(agent_id), 0.0) for agent_id in ids),
-                dtype=np.float64,
-                count=ids.size,
-            )
-            rc = payoffs - u
+            rc = payoffs - self._u_gather(ids)
             if rc.size:
                 worst = max(0.0, float(rc.max()))
             if pending is not None:
@@ -418,12 +455,14 @@ class NSlack(Formulation):
                 self._pending = pending
             return MaxContribution(worst=worst, local_rows=tuple(rows))
 
+        u_dense = self._u.dense if isinstance(self._u, _DenseU) else None
         for agent_id, demand in demands.items():
             agent = int(agent_id)
             payoff = float(demand.payoff)
             if not math.isfinite(payoff):
                 raise ValueError("demand payoffs must be finite")
-            rc = payoff - self._u.get(agent, 0.0)
+            u_a = u_dense[agent] if u_dense is not None else self._u.get(agent, 0.0)
+            rc = payoff - u_a
             if rc > worst:
                 worst = rc
             if pending is not None:
@@ -573,6 +612,17 @@ class NSlack(Formulation):
         local_u = self._local_u(full_u)
         return self._adopt_owner_state(state, local_u=local_u, full_u=full_u)
 
+    def _u_gather(self, agent_ids: np.ndarray) -> np.ndarray:
+        """Per-agent u values for ``agent_ids``, zero where absent."""
+        u = self._u
+        if isinstance(u, _DenseU):
+            return u.dense[agent_ids]
+        return np.fromiter(
+            (u.get(int(agent_id), 0.0) for agent_id in agent_ids),
+            dtype=np.float64,
+            count=len(agent_ids),
+        )
+
     def _received_violations(self, rows: tuple[CutRow, ...]) -> np.ndarray:
         if not rows:
             return np.empty(0, dtype=np.float64)
@@ -590,12 +640,14 @@ class NSlack(Formulation):
                 dtype=np.float64,
                 count=len(chunk),
             )
-            u = np.fromiter(
-                (self._u.get(row.agent_id, 0.0) for row in chunk),
-                dtype=np.float64,
+            agent_ids = np.fromiter(
+                (row.agent_id for row in chunk),
+                dtype=np.int64,
                 count=len(chunk),
             )
-            out[start : start + len(chunk)] = phi @ theta + epsilon - u
+            out[start : start + len(chunk)] = (
+                phi @ theta + epsilon - self._u_gather(agent_ids)
+            )
         return out
 
     def _emit(self, pending: _Pending) -> None:
@@ -699,11 +751,17 @@ class NSlack(Formulation):
 
     def _dense_u(self, u: Mapping[int, float]) -> np.ndarray:
         values = np.zeros(self._ctx.n_agents, dtype=np.float64)
-        for agent_id, value in u.items():
-            values[int(agent_id)] = float(value)
+        ids = np.fromiter(u.keys(), dtype=np.int64, count=len(u))
+        values[ids] = np.fromiter(u.values(), dtype=np.float64, count=len(u))
         return values
 
-    def _local_u(self, full_u: Mapping[int, float] | None) -> dict[int, float] | None:
+    def _local_u(
+        self, full_u: Mapping[int, float] | None
+    ) -> Mapping[int, float] | None:
+        # Single rank: this rank is the owner and _adopt takes full_u directly,
+        # so routing u through the transport would round-trip dead work.
+        if self._transport.size == 1:
+            return None
         if self._ctx.weight_mode == "distributed":
             return self._transport.route_agent_values(
                 full_u if self._is_owner else None,
@@ -714,18 +772,17 @@ class NSlack(Formulation):
         if self._owner_rank != 0:
             return None
         payload = {"u": self._dense_u(full_u or {})} if self._is_owner else None
-        rows = self._transport.scatter_by_agent(payload, self._ctx.local_ids)["u"]
-        return {
-            int(agent_id): float(value)
-            for agent_id, value in zip(self._ctx.local_ids, rows)
-            if float(value) != 0.0
-        }
-
-    def _local_slack_values(self) -> np.ndarray:
-        return np.asarray(
-            [self._u.get(int(agent_id), 0.0) for agent_id in self._ctx.local_ids],
+        local_ids = np.asarray(self._ctx.local_ids, dtype=np.int64)
+        rows = np.asarray(
+            self._transport.scatter_by_agent(payload, local_ids)["u"],
             dtype=np.float64,
         )
+        dense = np.zeros(self._ctx.n_agents, dtype=np.float64)
+        dense[local_ids] = rows
+        return _DenseU(dense, ids=local_ids[rows != 0.0])
+
+    def _local_slack_values(self) -> np.ndarray:
+        return self._u_gather(np.asarray(self._ctx.local_ids, dtype=np.int64))
 
     def _adopt(
         self,
@@ -735,12 +792,20 @@ class NSlack(Formulation):
         full_u: Mapping[int, float] | None = None,
     ) -> None:
         self._theta = np.asarray(state.theta, dtype=np.float64)
+        # Dense weight mode holds u dense-indexed; distributed mode keeps the
+        # sparse dicts whose size bounds per-replication memory.
+        dense_mode = self._ctx.weight_mode == "dense"
+        n_agents = self._ctx.n_agents
         if full_u is not None and self._is_owner:
-            self._u = dict(full_u)
+            self._u = (
+                _DenseU.from_mapping(full_u, n_agents) if dense_mode else dict(full_u)
+            )
         elif local_u is not None:
-            self._u = dict(local_u)
+            self._u = local_u if isinstance(local_u, _DenseU) else dict(local_u)
         elif state.u is not None:
-            self._u = dict(state.u)
+            self._u = (
+                _DenseU.from_mapping(state.u, n_agents) if dense_mode else dict(state.u)
+            )
         else:  # pragma: no cover - broken collective path
             raise RuntimeError("NSlack state adoption received no u values")
         self._objective = float(state.objective)

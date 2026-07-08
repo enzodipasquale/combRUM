@@ -16,7 +16,7 @@ import numpy as np
 from combrum.context import FitContext, ResultPublication
 from combrum.engine.observed import ObservedObjectiveCache, observed_objective
 from combrum.formulations import OneSlack
-from combrum.masters import make_master, resolve_master_backend
+from combrum.masters import make_master, master_environment, resolve_master_backend
 from combrum.parameters import Parameters
 from combrum.policies import CutPolicy
 from combrum.result import FitResult
@@ -25,6 +25,7 @@ from combrum.transport.base import CutRow, Transport
 __all__ = [
     "BuiltContext",
     "build_fit_context",
+    "master_environment",
     "prepare_warm_cuts",
     "resolve_master_backend",
 ]
@@ -86,6 +87,7 @@ def build_fit_context(
     warm_cuts: Sequence[CutRow] | None = None,
     cut_policy: CutPolicy | None = None,
     master: Any = None,
+    master_env: object | None = None,
     result_publication: ResultPublication | str | Iterable[str] = (
         ResultPublication.FULL
     ),
@@ -107,6 +109,10 @@ def build_fit_context(
         master: Live ``MasterBackend`` to reuse on rank 0 (skips ``make_master``
             and ``reinstall``), or ``None`` to build fresh. ``c_theta`` /
             ``empirical_moment`` are recomputed either way.
+        master_env: Caller-owned solver environment from
+            :func:`combrum.masters.master_environment`, shared by sequential
+            masters (one license checkout per run, not per build), or ``None``
+            for a master-owned environment.
 
     All optional inputs at default (``None``) reproduce the point-estimate
     context.
@@ -198,6 +204,7 @@ def build_fit_context(
             # OneSlack has one aggregate slack, so n_agents columns would be
             # spurious and degeneracy-inducing.
             n_agents=None if isinstance(formulation, OneSlack) else n_agents,
+            env=master_env,
         )
         if warm_cuts is not None:
             # Reinstall the prior cut set BEFORE setup's solve so the

@@ -79,7 +79,9 @@ class DualConcentration:
                 "max_weights are normalized single-cut shares and must"
                 f" lie in (0, 1]; got {max_weights.tolist()}"
             )
-        object.__setattr__(self, "agent_ids", _frozen(agent_ids.astype(np.int64)))
+        object.__setattr__(
+            self, "agent_ids", _frozen(agent_ids.astype(np.int64, copy=False))
+        )
         object.__setattr__(self, "max_weights", _frozen(max_weights))
 
     @classmethod

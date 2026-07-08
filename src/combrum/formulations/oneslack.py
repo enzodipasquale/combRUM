@@ -40,8 +40,9 @@ from combrum.interface_resolution import (
     FeatureMap,
     Mode,
     Resolution,
+    _aggregate_call,
+    _aggregate_wants_k,
     check_agreement,
-    feature_batch_aggregate,
     feature_rows,
     resolve_features,
 )
@@ -150,8 +151,15 @@ class OneSlack(Formulation):
         self._pending_penalty: tuple[np.ndarray, float] | None = None
         self._last_penalty_weight = 0.0
         # Resolve the active features path once, identically on every rank;
-        # the rank-agreement token rides the setup broadcast below.
+        # the rank-agreement token rides the setup broadcast below. The
+        # aggregate-mode signature is resolved here too, so contribute never
+        # re-inspects it per iteration.
         self._features_res: Resolution = resolve_features(self._features_arg)
+        self._aggregate_wants_k = (
+            _aggregate_wants_k(self._features_res.active)
+            if self._features_res.mode is Mode.OPTIMIZED
+            else None
+        )
         packet: _MasterState | None = None
         # The owner-only master check and the features rank-agreement sit
         # inside one guard so a missing master or divergent build fails as an
@@ -206,23 +214,22 @@ class OneSlack(Formulation):
             ids = np.fromiter(agent_ids, dtype=np.int64, count=len(agent_ids))
             bundles = np.asarray([demand.bundle for demand in demands.values()])
         aggregate_fast_path = self._trace_sink is None and self._transport.size == 1
-        if aggregate_fast_path and self._features_res.mode is Mode.OPTIMIZED:
-            aggregated = feature_batch_aggregate(
+        if aggregate_fast_path and self._aggregate_wants_k is not None:
+            phi_agg, eps_agg = _aggregate_call(
                 self._features_res.active,
                 ids,
                 bundles,
                 weights[ids],
                 K,
+                wants_K=self._aggregate_wants_k,
             )
-            if aggregated is not None:
-                phi_agg, eps_agg = aggregated
-                row = np.empty((1, K + 1), dtype=np.float64)
-                row[0, :K] = phi_agg
-                row[0, K] = eps_agg
-                return SumContribution(
-                    terms=row,
-                    ids=np.asarray([AGGREGATE_AGENT_ID], dtype=np.int64),
-                )
+            row = np.empty((1, K + 1), dtype=np.float64)
+            row[0, :K] = phi_agg
+            row[0, K] = eps_agg
+            return SumContribution(
+                terms=row,
+                ids=np.asarray([AGGREGATE_AGENT_ID], dtype=np.int64),
+            )
         phi_mat, eps_vec, featured = self._feature_block(ids, bundles)
         # Capture (sink only): open a fresh pending record and capture the
         # priced-demand/feature stream over all local agents from the same

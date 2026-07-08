@@ -375,6 +375,10 @@ def supports_feature_batch_aggregate(member: Callable[..., Any]) -> bool:
         params = inspect.signature(member).parameters
     except (TypeError, ValueError):
         return False
+    return _aggregate_capable(params)
+
+
+def _aggregate_capable(params: Mapping[str, inspect.Parameter]) -> bool:
     required = {"weights", "aggregate"}
     if not required.issubset(params):
         return False
@@ -387,17 +391,30 @@ def supports_feature_batch_aggregate(member: Callable[..., Any]) -> bool:
     return "K" not in params or params["K"].kind in keyword_capable
 
 
-def feature_batch_aggregate(
+def _aggregate_wants_k(member: Callable[..., Any]) -> bool | None:
+    """``None`` when ``member`` lacks aggregate mode, else whether it takes K.
+
+    One signature inspection per fit: callers resolve at setup and pass the
+    verdict to :func:`_aggregate_call` every iteration.
+    """
+    try:
+        params = inspect.signature(member).parameters
+    except (TypeError, ValueError):
+        return None
+    if not _aggregate_capable(params):
+        return None
+    return "K" in params
+
+
+def _aggregate_call(
     member: Callable[..., Any],
     ids: np.ndarray,
     bundles: np.ndarray,
     weights: np.ndarray,
     K: int,
-) -> tuple[np.ndarray, float] | None:
-    """Call optional aggregate mode on a batched feature map if available."""
-
-    if not supports_feature_batch_aggregate(member):
-        return None
+    *,
+    wants_K: bool,
+) -> tuple[np.ndarray, float]:
     weights = np.asarray(weights, dtype=np.float64)
     ids = np.asarray(ids, dtype=np.int64)
     if weights.shape != (ids.size,):
@@ -406,11 +423,7 @@ def feature_batch_aggregate(
             f" ({ids.size},); got {weights.shape}"
         )
     kwargs: dict[str, Any] = {"weights": weights, "aggregate": True}
-    try:
-        params = inspect.signature(member).parameters
-    except (TypeError, ValueError):
-        params = {}
-    if "K" in params:
+    if wants_K:
         kwargs["K"] = int(K)
     phi, eps = member(ids, bundles, **kwargs)
     phi = np.asarray(phi, dtype=np.float64)
@@ -420,6 +433,21 @@ def feature_batch_aggregate(
             f" {phi.shape}; expected ({int(K)},)"
         )
     return phi, float(eps)
+
+
+def feature_batch_aggregate(
+    member: Callable[..., Any],
+    ids: np.ndarray,
+    bundles: np.ndarray,
+    weights: np.ndarray,
+    K: int,
+) -> tuple[np.ndarray, float] | None:
+    """Call optional aggregate mode on a batched feature map if available."""
+
+    wants_k = _aggregate_wants_k(member)
+    if wants_k is None:
+        return None
+    return _aggregate_call(member, ids, bundles, weights, K, wants_K=wants_k)
 
 
 def _per_agent_rows(

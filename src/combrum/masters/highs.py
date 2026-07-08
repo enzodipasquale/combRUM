@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -35,9 +35,9 @@ class _Solution:
     theta: np.ndarray
     objective: float
     row_keys: tuple[tuple[int, bytes], ...]
-    sorted_row_keys: tuple[tuple[int, bytes], ...]
-    sorted_row_order: np.ndarray
     u_values: dict[int, float]
+    sorted_row_keys: tuple[tuple[int, bytes], ...] | None = None
+    sorted_row_order: np.ndarray | None = None
     row_duals: np.ndarray | None = None
     row_slacks: np.ndarray | None = None
     bound_duals: dict[int, float] | None = None
@@ -116,30 +116,38 @@ class HighsMaster(MasterBackend):
         self._row_keys: list[tuple[int, bytes]] = []
         self._u_cols: dict[int, int] = {}
         self._u_upper: dict[int, float] = {}
+        self._u_read: tuple[list[int], np.ndarray] | None = None
         self._solution: _Solution | None = None
         if self._n_agents is not None:
             # Pre-declare all u-columns in agent order: a fixed column structure
             # makes a warm in-place re-solve deterministic even at a degenerate
             # optimum. With the default lower bound, a cutless agent's u sits at
             # lb=0 -> 0, leaving the estimate unchanged.
-            for agent_id in range(self._n_agents):
+            n = self._n_agents
+            u_obj = np.empty(n, dtype=np.float64)
+            for agent_id in range(n):
                 coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
                 if not np.isfinite(coef):
                     raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
-                self._check_status(
-                    solver.addCol(
-                        coef,
-                        self._u_lb(),
-                        self._highspy.kHighsInf,
-                        0,
-                        np.array([], dtype=np.int32),
-                        np.array([], dtype=np.float64),
-                    ),
-                    f"addCol(u[{agent_id}])",
-                )
-                self._u_cols[agent_id] = self._n_cols
-                self._u_upper[agent_id] = float(self._highspy.kHighsInf)
-                self._n_cols += 1
+                u_obj[agent_id] = coef
+            inf = float(self._highspy.kHighsInf)
+            self._check_status(
+                solver.addCols(
+                    n,
+                    u_obj,
+                    np.full(n, self._u_lb(), dtype=np.float64),
+                    np.full(n, inf, dtype=np.float64),
+                    0,
+                    np.zeros(n, dtype=np.int32),
+                    no_index,
+                    no_value,
+                ),
+                "addCols(u)",
+            )
+            first = self._n_cols
+            self._u_cols = {agent_id: first + agent_id for agent_id in range(n)}
+            self._u_upper = dict.fromkeys(range(n), inf)
+            self._n_cols += n
 
     # -- cut management ----------------------------------------------------
 
@@ -156,63 +164,102 @@ class HighsMaster(MasterBackend):
         # leave accessors reporting pre-add results.
         if fresh:
             self._invalidate_solution()
+            self._u_read = None
         # Install in canonical key order so equal row sets build identical
         # models regardless of in-batch arrival permutation.
-        for row in sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key)):
-            self._install(row)
-            self._installed[(row.agent_id, row.bundle_key)] = row
+        ordered = sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key))
+        if ordered:
+            self._install_batch(ordered)
         return len(fresh)
 
-    def _install(self, row: CutRow) -> None:
-        u_col = self._u_cols.get(row.agent_id)
-        created_u_col = False
-        if u_col is None:
-            coef = self._u_obj.setdefault(
-                row.agent_id, float(self._u_coef(row.agent_id))
+    def _install_batch(self, rows: Sequence[CutRow]) -> None:
+        # Canonical row order means new agents appear in ascending order, so
+        # batch column creation reproduces the creation order — and with it
+        # the exact column indexing — of a one-row-at-a-time install. Row
+        # order and the per-row sparse pattern (nonzero theta entries, then
+        # the u column) likewise match the one-row form.
+        first_rows: dict[int, CutRow] = {}
+        for row in rows:
+            first_rows.setdefault(row.agent_id, row)
+        missing = [
+            agent_id for agent_id in first_rows if agent_id not in self._u_cols
+        ]
+        if missing:
+            self._add_u_columns(missing, first_rows)
+        n = len(rows)
+        phi = np.vstack([row.phi for row in rows])
+        u_cols = np.fromiter(
+            (self._u_cols[row.agent_id] for row in rows), dtype=np.int32, count=n
+        )
+        lower = np.fromiter((row.epsilon for row in rows), dtype=np.float64, count=n)
+        mask = phi != 0.0
+        nnz = np.count_nonzero(mask, axis=1)
+        ends = np.cumsum(nnz + 1)
+        starts = ends - (nnz + 1)
+        indices = np.empty(int(ends[-1]), dtype=np.int32)
+        values = np.empty(int(ends[-1]), dtype=np.float64)
+        # Row-major nonzero positions, shifted right by one u slot per prior row.
+        theta_rows, theta_cols = np.nonzero(mask)
+        theta_pos = np.arange(theta_cols.size) + theta_rows
+        indices[theta_pos] = theta_cols.astype(np.int32)
+        values[theta_pos] = -phi[mask]
+        indices[ends - 1] = u_cols
+        values[ends - 1] = 1.0
+        status = self._h.addRows(
+            n,
+            lower,
+            np.full(n, self._highspy.kHighsInf, dtype=np.float64),
+            int(ends[-1]),
+            starts.astype(np.int32),
+            indices,
+            values,
+        )
+        self._check_status(status, f"addRows({n} cuts)")
+        for row in rows:
+            key = (row.agent_id, row.bundle_key)
+            self._row_index[key] = len(self._row_keys)
+            self._row_keys.append(key)
+            self._installed[key] = row
+        if self._u_lower_bound is not None:
+            candidates = np.maximum(
+                self._u_lb(),
+                lower
+                + np.where(phi >= 0.0, phi * self._upper, phi * self._lower).sum(
+                    axis=1
+                ),
             )
+            for row, candidate in zip(rows, candidates.tolist()):
+                self._update_u_upper(row, candidate)
+
+    def _add_u_columns(
+        self, agent_ids: Sequence[int], first_rows: Mapping[int, CutRow]
+    ) -> None:
+        n = len(agent_ids)
+        coefs = np.empty(n, dtype=np.float64)
+        uppers = np.empty(n, dtype=np.float64)
+        for i, agent_id in enumerate(agent_ids):
+            coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
             if not np.isfinite(coef):
-                raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
-            self._add_u_columns(row.agent_id, coef, self._initial_u_upper(row, coef))
-            u_col = self._u_cols[row.agent_id]
-            created_u_col = True
-        else:
-            self._update_u_upper(row)
-        # Pass only nonzero theta entries to the sparse interface.
-        nonzero = np.flatnonzero(row.phi)
-        indices = np.append(nonzero, u_col).astype(np.int32)
-        values = np.append(-row.phi[nonzero], 1.0)
-        status = self._h.addRow(
-            float(row.epsilon), self._highspy.kHighsInf, indices.size, indices, values
-        )
-        try:
-            self._check_status(status, f"addRow({(row.agent_id, row.bundle_key)!r})")
-        except Exception:
-            if created_u_col:
-                self._remove_new_u_column(row.agent_id)
-            raise
-        key = (row.agent_id, row.bundle_key)
-        self._row_index[key] = len(self._row_keys)
-        self._row_keys.append(key)
-
-    def _add_u_columns(self, agent_id: int, coef: float, upper: float) -> None:
-        no_index = np.array([], dtype=np.int32)
-        no_value = np.array([], dtype=np.float64)
+                raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+            coefs[i] = coef
+            uppers[i] = self._initial_u_upper(first_rows[agent_id], coef)
         self._check_status(
-            self._h.addCol(coef, self._u_lb(), upper, 0, no_index, no_value),
-            f"addCol(u[{agent_id}])",
+            self._h.addCols(
+                n,
+                coefs,
+                np.full(n, self._u_lb(), dtype=np.float64),
+                uppers,
+                0,
+                np.zeros(n, dtype=np.int32),
+                np.array([], dtype=np.int32),
+                np.array([], dtype=np.float64),
+            ),
+            f"addCols({n} u columns)",
         )
-        self._u_cols[agent_id] = self._n_cols
-        self._u_upper[agent_id] = upper
-        self._n_cols += 1
-
-    def _remove_new_u_column(self, agent_id: int) -> None:
-        col = self._u_cols[agent_id]
-        status = self._h.deleteCols(1, np.array([col], dtype=np.int32))
-        self._check_status(status, f"deleteCols(u[{agent_id}])")
-        del self._u_cols[agent_id]
-        del self._u_upper[agent_id]
-        del self._u_obj[agent_id]
-        self._n_cols -= 1
+        for agent_id, upper in zip(agent_ids, uppers.tolist()):
+            self._u_cols[agent_id] = self._n_cols
+            self._u_upper[agent_id] = upper
+            self._n_cols += 1
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
@@ -257,10 +304,11 @@ class HighsMaster(MasterBackend):
         for k in retired:
             del self._installed[k]
             del self._row_index[k]
-        # Recompact tracked indices to contiguous 0..n-1, sorted by old index.
-        for new_i, k in enumerate(sorted(self._row_index, key=self._row_index.get)):
-            self._row_index[k] = new_i
-        self._row_keys = sorted(self._row_index, key=self._row_index.get)
+        # Recompact tracked indices to contiguous 0..n-1 in surviving row
+        # order; _row_keys already carries the old-index order.
+        self._row_keys = [k for k in self._row_keys if k in self._row_index]
+        self._row_index = {k: i for i, k in enumerate(self._row_keys)}
+        self._u_read = None
         self._invalidate_solution()
         return len(retired)
 
@@ -287,8 +335,9 @@ class HighsMaster(MasterBackend):
                     f" {status.name}; expected kOk"
                 )
             # Keep the installed-row mirror exact so extract_cuts/reinstall see
-            # the new RHS; phi is untouched.
-            row = replace(self._installed[key], epsilon=float(new_eps))
+            # the new RHS; the epsilon-only _replace shares phi and the
+            # decoded-bundle memo with the old row.
+            row = self._installed[key]._replace(epsilon=float(new_eps))
             self._installed[key] = row
             self._update_u_upper(row)
 
@@ -303,14 +352,15 @@ class HighsMaster(MasterBackend):
         )
         return max(self._u_lb(), rhs_max)
 
-    def _update_u_upper(self, row: CutRow) -> None:
+    def _update_u_upper(self, row: CutRow, candidate: float | None = None) -> None:
         if self._u_lower_bound is None:
             return
         coef = self._u_obj[row.agent_id]
         if coef < 0.0:
             return
         current = self._u_upper.get(row.agent_id, float(self._highspy.kHighsInf))
-        candidate = self._finite_u_upper(row)
+        if candidate is None:
+            candidate = self._finite_u_upper(row)
         if current < self._highspy.kHighsInf and candidate <= current:
             return
         col = self._u_cols[row.agent_id]
@@ -334,31 +384,26 @@ class HighsMaster(MasterBackend):
         col_values = np.asarray(self._h.allVariableValues(), dtype=np.float64)
         theta = np.array(col_values[: self._K], dtype=np.float64)
         theta.setflags(write=False)
-        row_keys = tuple(self._row_keys)
-        sorted_row_keys = tuple(sorted(row_keys))
-        index = {key: i for i, key in enumerate(row_keys)}
-        sorted_row_order = np.fromiter(
-            (index[key] for key in sorted_row_keys),
-            dtype=np.int64,
-            count=len(sorted_row_keys),
-        )
-        sorted_row_order.setflags(write=False)
         self._solution = _Solution(
             theta=theta,
             objective=float(self._h.getObjectiveValue()),
-            row_keys=row_keys,
-            sorted_row_keys=sorted_row_keys,
-            sorted_row_order=sorted_row_order,
+            row_keys=tuple(self._row_keys),
             u_values=self._u_values_now(col_values),
         )
 
     def _u_values_now(self, col_values: np.ndarray) -> dict[int, float]:
-        out: dict[int, float] = {}
-        active_agents = {agent_id for agent_id, _key in self._installed}
-        for agent_id in sorted(active_agents):
-            col = self._u_cols[agent_id]
-            out[int(agent_id)] = float(col_values[col])
-        return out
+        # (agent ids, u columns) of the active set, cached until the installed
+        # row membership changes; the per-solve read is then one gather.
+        if self._u_read is None:
+            agent_ids = sorted({int(agent_id) for agent_id, _key in self._installed})
+            cols = np.fromiter(
+                (self._u_cols[agent_id] for agent_id in agent_ids),
+                dtype=np.int64,
+                count=len(agent_ids),
+            )
+            self._u_read = (agent_ids, cols)
+        agent_ids, cols = self._u_read
+        return dict(zip(agent_ids, col_values[cols].tolist()))
 
     def _bound_duals_now(self, solution: object) -> dict[int, float]:
         at_bound = (
@@ -393,10 +438,26 @@ class HighsMaster(MasterBackend):
         duals = self._row_duals(last)
         return {key: float(value) for key, value in zip(last.row_keys, duals)}
 
+    def _sorted_rows(
+        self, last: _Solution
+    ) -> tuple[tuple[tuple[int, bytes], ...], np.ndarray]:
+        # Canonical-order view of the solved rows, built on first use only:
+        # solve() itself never needs it.
+        if last.sorted_row_keys is None:
+            last.sorted_row_keys = tuple(sorted(last.row_keys))
+            index = {key: i for i, key in enumerate(last.row_keys)}
+            order = np.fromiter(
+                (index[key] for key in last.sorted_row_keys),
+                dtype=np.int64,
+                count=len(last.sorted_row_keys),
+            )
+            order.setflags(write=False)
+            last.sorted_row_order = order
+        return last.sorted_row_keys, last.sorted_row_order
+
     def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
         last = self._last()
-        keys = last.sorted_row_keys
-        order = last.sorted_row_order
+        keys, order = self._sorted_rows(last)
         dual_arr = (
             np.asarray(self._row_duals(last)[order], dtype=np.float64) if dual else None
         )

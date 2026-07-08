@@ -15,14 +15,20 @@ on machines that hold neither solver.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 
 import numpy as np
 
 from combrum.master import MasterBackend
 from combrum.transport.base import Transport
 
-__all__ = ["MasterBackend", "make_master", "resolve_master_backend"]
+__all__ = [
+    "MasterBackend",
+    "make_master",
+    "master_environment",
+    "resolve_master_backend",
+]
 
 
 def _validate_backend_name(requested: str) -> None:
@@ -199,6 +205,30 @@ def resolve_master_backend(
     )
 
 
+@contextmanager
+def master_environment(backend: str) -> Iterator[object | None]:
+    """One caller-owned solver environment for sequential masters.
+
+    Gurobi's environment start is the license checkout, so a run that
+    builds one master per bootstrap replication can hold a single
+    checkout by passing the yielded environment to every
+    :func:`make_master` call. Yields ``None`` for backends without a
+    shareable environment; passing that through is a no-op.
+    """
+    _validate_backend_name(backend)
+    if backend != "gurobi":
+        yield None
+        return
+    import combrum.masters.gurobi as gurobi
+    import gurobipy
+
+    env = gurobi._started_env(gurobipy)
+    try:
+        yield env
+    finally:
+        env.dispose()
+
+
 def make_master(
     K: int,
     theta_bounds: tuple[np.ndarray, np.ndarray],
@@ -208,6 +238,7 @@ def make_master(
     backend: str = "auto",
     params: Mapping[str, object] | None = None,
     n_agents: int | None = None,
+    env: object | None = None,
 ) -> MasterBackend:
     """One relaxation host on a real solver.
 
@@ -231,6 +262,11 @@ def make_master(
     ``n_agents`` pre-declares that many slack (epigraph) columns up front for
     a fixed, deterministic column structure; ``None`` adds each agent's column
     lazily on its first cut.
+
+    ``env`` is an optional caller-owned solver environment from
+    :func:`master_environment`; the master then skips its own environment
+    start and never disposes the shared one. Only gurobi has a shareable
+    environment.
     """
     _validate_backend_name(backend)
     # "auto" picks the first available solver (gurobi, then highs); reuse the
@@ -242,8 +278,10 @@ def make_master(
         import combrum.masters.gurobi as gurobi
 
         return gurobi.GurobiMaster(
-            K, theta_bounds, c_theta, u_coef, params=params, n_agents=n_agents
+            K, theta_bounds, c_theta, u_coef, params=params, n_agents=n_agents, env=env
         )
+    if env is not None:
+        raise ValueError("env is only meaningful for the gurobi backend")
     import combrum.masters.highs as highs
 
     return highs.HighsMaster(

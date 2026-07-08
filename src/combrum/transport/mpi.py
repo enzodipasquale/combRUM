@@ -28,7 +28,7 @@ import numpy as np
 
 from combrum.reductions import canonical_sum, canonical_sum_window_rows
 from combrum.transport._common import (
-    agent_owner_rank as _agent_owner_rank,
+    agent_owner_ranks as _agent_owner_ranks,
 )
 from combrum.transport._common import (
     ids_validated as _ids_validated,
@@ -144,8 +144,105 @@ def _write_cut(buf: np.ndarray, offset: int, row: CutRow) -> int:
     return pos + int(key_bytes.size)
 
 
+def _cut_record_dtype(k: int, key_len: int) -> np.dtype:
+    # Mirrors _CUT_HEADER + phi payload + key byte-for-byte: numpy packs
+    # structured dtypes without padding, so a records array views as the
+    # exact wire bytes of the equivalent _write_cut sequence.
+    dtype = np.dtype(
+        [
+            ("rep", np.int64),
+            ("agent", np.int64),
+            ("eps", np.float64),
+            ("k", np.int64),
+            ("klen", np.int64),
+            ("phi", np.float64, (k,)),
+            ("key", np.void, key_len),
+        ]
+    )
+    assert dtype.itemsize == _CUT_HEADER.size + 8 * k + key_len
+    return dtype
+
+
+def _pack_cuts(
+    rows: tuple[CutRow, ...], canon: np.ndarray, size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Destination-grouped wire buffer plus per-destination byte counts.
+
+    Within one fit every row shares the phi width and bundle-key length, so
+    the common case packs as one fixed-stride records array; heterogeneous
+    rows fall back to the per-row writer. Both produce identical bytes:
+    rows grouped by destination, input order within each destination.
+    """
+    if not rows:
+        return np.empty(0, dtype=np.uint8), np.zeros(size, dtype=np.int64)
+    k = int(rows[0].phi.shape[0])
+    key_len = len(rows[0].bundle_key)
+    uniform = k > 0 and all(
+        row.phi.shape[0] == k and len(row.bundle_key) == key_len for row in rows
+    )
+    if not uniform:
+        send_counts = np.zeros(size, dtype=np.int64)
+        for row in rows:
+            send_counts[int(canon[row.rep_id])] += _cut_row_nbytes(row)
+        send_buf = np.empty(int(send_counts.sum()), dtype=np.uint8)
+        cursors = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
+        for row in rows:
+            dest = int(canon[row.rep_id])
+            cursors[dest] = _write_cut(send_buf, int(cursors[dest]), row)
+        return send_buf, send_counts
+    n = len(rows)
+    rep_ids = np.fromiter((row.rep_id for row in rows), np.int64, count=n)
+    dests = canon[rep_ids]
+    order = np.argsort(dests, kind="stable")
+    ordered = [rows[i] for i in order.tolist()]
+    rec = np.empty(n, dtype=_cut_record_dtype(k, key_len))
+    rec["rep"] = rep_ids[order]
+    rec["agent"] = np.fromiter((row.agent_id for row in ordered), np.int64, count=n)
+    rec["eps"] = np.fromiter((row.epsilon for row in ordered), np.float64, count=n)
+    rec["k"] = k
+    rec["klen"] = key_len
+    rec["phi"] = np.stack([row.phi for row in ordered])
+    rec["key"] = np.frombuffer(
+        b"".join(row.bundle_key for row in ordered),
+        dtype=np.dtype((np.void, key_len)),
+    )
+    send_counts = np.bincount(dests, minlength=size).astype(np.int64)
+    send_counts *= rec.dtype.itemsize
+    return rec.view(np.uint8), send_counts
+
+
 def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
     view = memoryview(block)
+    if not len(view):
+        return []
+    _rep0, _agent0, _eps0, k, key_len = _CUT_HEADER.unpack_from(view, 0)
+    row_nbytes = _CUT_HEADER.size + 8 * k + key_len
+    if k > 0 and key_len > 0 and len(view) % row_nbytes == 0:
+        rec = np.frombuffer(view, dtype=_cut_record_dtype(k, key_len))
+        if bool((rec["k"] == k).all()) and bool((rec["klen"] == key_len).all()):
+            # The fixed-stride reading is exact, not heuristic: rows sit
+            # back-to-back, so matching k/klen at every stride position pins
+            # each row's true offset by induction from row 0.
+            # One matrix copy detaches every phi from the receive buffer.
+            phis = np.array(rec["phi"], dtype=np.float64)
+            phis.setflags(write=False)
+            keys = rec["key"].tobytes()
+            return [
+                CutRow._from_parts(
+                    rep_id=rep,
+                    agent_id=agent,
+                    phi=phis[i],
+                    epsilon=eps,
+                    bundle_key=keys[i * key_len : (i + 1) * key_len],
+                )
+                for i, (rep, agent, eps) in enumerate(
+                    zip(
+                        rec["rep"].tolist(),
+                        rec["agent"].tolist(),
+                        rec["eps"].tolist(),
+                    )
+                )
+            ]
     rows: list[CutRow] = []
     offset = 0
     while offset < len(view):
@@ -903,17 +1000,20 @@ class MpiTransport(Transport):
         )
 
         if self._rank == src:
-            buckets: list[list[tuple[int, float]]] = [[] for _ in range(self._size)]
-            for gid, value in sorted(normalized.items()):
-                owner = _agent_owner_rank(gid, n_agents_i, self._size)
-                buckets[owner].append((gid, value))
-            send_counts = np.array([len(bucket) for bucket in buckets], dtype=np.int64)
-            send = np.empty(int(send_counts.sum()), dtype=_ROUTE_VALUE_DTYPE)
-            offset = 0
-            for bucket in buckets:
-                for gid, value in bucket:
-                    send[offset] = (int(gid), float(value))
-                    offset += 1
+            gids = np.fromiter(normalized.keys(), dtype=np.int64, count=len(normalized))
+            vals = np.fromiter(
+                normalized.values(), dtype=np.float64, count=len(normalized)
+            )
+            order = np.argsort(gids)
+            gids = gids[order]
+            vals = vals[order]
+            # Owner rank is monotone in gid under contiguous sharding, so gid
+            # order is already owner-bucketed wire order.
+            owners = _agent_owner_ranks(gids, n_agents_i, self._size)
+            send_counts = np.bincount(owners, minlength=self._size).astype(np.int64)
+            send = np.empty(gids.size, dtype=_ROUTE_VALUE_DTYPE)
+            send["gid"] = gids
+            send["value"] = vals
         else:
             send_counts = np.zeros(self._size, dtype=np.int64)
             send = np.empty(0, dtype=_ROUTE_VALUE_DTYPE)
@@ -936,18 +1036,24 @@ class MpiTransport(Transport):
 
         out: dict[int, float] = {}
         local_error = None
-        for row in recv:
-            gid = int(row["gid"])
-            value = float(row["value"])
-            if gid < 0 or gid >= n_agents_i:
+        gids = recv["gid"]
+        oob = (gids < 0) | (gids >= n_agents_i)
+        owners = _agent_owner_ranks(
+            np.clip(gids, 0, n_agents_i - 1), n_agents_i, self._size
+        )
+        misrouted = ~oob & (owners != self._rank)
+        bad = oob | misrouted
+        if bad.any():
+            first = int(np.flatnonzero(bad)[0])
+            gid = int(gids[first])
+            if oob[first]:
                 local_error = f"{what}: received out-of-range agent id {gid}"
-                break
-            if _agent_owner_rank(gid, n_agents_i, self._size) != self._rank:
+            else:
                 local_error = (
                     f"{what}: received agent {gid} on non-owner rank {self._rank}"
                 )
-                break
-            out[gid] = value
+        else:
+            out = dict(zip(gids.tolist(), recv["value"].tolist()))
         self._agree_route_error(local_error)
         return out
 
@@ -1080,18 +1186,33 @@ class MpiTransport(Transport):
             owners=owners,
             n_agents=n_agents,
         )
-        send_counts = np.zeros(self._size, dtype=np.int64)
-        for values in normalized.values():
-            for gid in values:
-                send_counts[_agent_owner_rank(int(gid), n_agents_i, self._size)] += 1
-        send = np.empty(int(send_counts.sum()), dtype=_ROUTE_BATCH_VALUE_DTYPE)
-        cursors = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
-        for rep, values in sorted(normalized.items()):
-            for gid, value in sorted(values.items()):
-                owner = _agent_owner_rank(int(gid), n_agents_i, self._size)
-                offset = int(cursors[owner])
-                send[offset] = (int(rep), int(gid), float(value))
-                cursors[owner] += 1
+        if normalized:
+            rep_parts = []
+            gid_parts = []
+            val_parts = []
+            for rep in sorted(normalized):
+                values = normalized[rep]
+                gids = np.fromiter(values.keys(), dtype=np.int64, count=len(values))
+                vals = np.fromiter(values.values(), dtype=np.float64, count=len(values))
+                order = np.argsort(gids)
+                rep_parts.append(np.full(gids.size, rep, dtype=np.int64))
+                gid_parts.append(gids[order])
+                val_parts.append(vals[order])
+            reps = np.concatenate(rep_parts)
+            gids = np.concatenate(gid_parts)
+            vals = np.concatenate(val_parts)
+            owners = _agent_owner_ranks(gids, n_agents_i, self._size)
+            # Stable sort by owner keeps (rep asc, gid asc) order within each
+            # destination bucket, matching the per-bucket append wire order.
+            order = np.argsort(owners, kind="stable")
+            send_counts = np.bincount(owners, minlength=self._size).astype(np.int64)
+            send = np.empty(gids.size, dtype=_ROUTE_BATCH_VALUE_DTYPE)
+            send["rep"] = reps[order]
+            send["gid"] = gids[order]
+            send["value"] = vals[order]
+        else:
+            send_counts = np.zeros(self._size, dtype=np.int64)
+            send = np.empty(0, dtype=_ROUTE_BATCH_VALUE_DTYPE)
 
         recv_counts = np.empty(self._size, dtype=np.int64)
         self._tick("alltoall")
@@ -1112,26 +1233,36 @@ class MpiTransport(Transport):
         out: dict[int, dict[int, float]] = {}
         local_error = None
         B = int(agreed.size)
-        for row in recv:
-            rep = int(row["rep"])
-            gid = int(row["gid"])
-            value = float(row["value"])
-            if rep < 0 or rep >= B:
-                local_error = f"route_agent_values_batched: received rep {rep}"
-                break
-            if gid < 0 or gid >= n_agents_i:
+        reps = recv["rep"]
+        gids = recv["gid"]
+        rep_bad = (reps < 0) | (reps >= B)
+        oob = (gids < 0) | (gids >= n_agents_i)
+        owners = _agent_owner_ranks(
+            np.clip(gids, 0, n_agents_i - 1), n_agents_i, self._size
+        )
+        misrouted = ~oob & (owners != self._rank)
+        bad = rep_bad | oob | misrouted
+        if bad.any():
+            first = int(np.flatnonzero(bad)[0])
+            if rep_bad[first]:
+                local_error = (
+                    f"route_agent_values_batched: received rep {int(reps[first])}"
+                )
+            elif oob[first]:
                 local_error = (
                     "route_agent_values_batched: received out-of-range"
-                    f" agent id {gid}"
+                    f" agent id {int(gids[first])}"
                 )
-                break
-            if _agent_owner_rank(gid, n_agents_i, self._size) != self._rank:
+            else:
                 local_error = (
                     "route_agent_values_batched: received agent"
-                    f" {gid} on non-owner rank {self._rank}"
+                    f" {int(gids[first])} on non-owner rank {self._rank}"
                 )
-                break
-            out.setdefault(rep, {})[gid] = value
+        else:
+            for rep, gid, value in zip(
+                reps.tolist(), gids.tolist(), recv["value"].tolist()
+            ):
+                out.setdefault(rep, {})[gid] = value
         self._agree_route_error(local_error)
         return out
 
@@ -1410,9 +1541,7 @@ class MpiTransport(Transport):
         self, rows: Sequence[CutRow], owners: np.ndarray
     ) -> tuple[CutRow, ...]:
         rows, canon = self._checked_exchange_cut_inputs(rows, owners)
-        send_counts = np.zeros(self._size, dtype=np.int64)
-        for row in rows:
-            send_counts[int(canon[row.rep_id])] += _cut_row_nbytes(row)
+        send_buf, send_counts = _pack_cuts(rows, canon, self._size)
         recv_counts = np.empty_like(send_counts)
         # Per-destination byte counts depend on what every peer generated, so
         # exchange is one counts Alltoall then one packed-payload Alltoallv:
@@ -1420,11 +1549,6 @@ class MpiTransport(Transport):
         self._tick("alltoall")
         self._comm.Alltoall(send_counts, recv_counts)
         send_displs = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
-        cursors = send_displs.copy()
-        send_buf = np.empty(int(send_counts.sum()), dtype=np.uint8)
-        for row in rows:
-            dest = int(canon[row.rep_id])
-            cursors[dest] = _write_cut(send_buf, int(cursors[dest]), row)
         recv_buf = np.empty(int(recv_counts.sum()), dtype=np.uint8)
         recv_displs = np.concatenate(([0], np.cumsum(recv_counts)[:-1]))
         byte = self._mpi.BYTE

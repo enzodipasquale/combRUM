@@ -156,23 +156,35 @@ class CutRow:
         self,
         *,
         rep_id: int | None = None,
+        epsilon: float | None = None,
         bundle_key: bytes | None = None,
     ) -> "CutRow":
         new_rep_id = self.rep_id if rep_id is None else rep_id
         if not isinstance(new_rep_id, (int, np.integer)) or new_rep_id < 0:
             raise ValueError(f"rep_id must be an integer >= 0; got {new_rep_id!r}")
+        new_eps = self.epsilon if epsilon is None else float(epsilon)
         new_key = self.bundle_key if bundle_key is None else bundle_key
         if not isinstance(new_key, bytes) or not new_key:
             raise ValueError("bundle_key must be nonempty bytes")
-        if int(new_rep_id) == self.rep_id and new_key == self.bundle_key:
+        if (
+            int(new_rep_id) == self.rep_id
+            and new_eps == self.epsilon
+            and new_key == self.bundle_key
+        ):
             return self
-        return self._from_parts(
+        row = self._from_parts(
             rep_id=int(new_rep_id),
             agent_id=self.agent_id,
             phi=self.phi,
-            epsilon=self.epsilon,
+            epsilon=new_eps,
             bundle_key=new_key,
         )
+        if new_key == self.bundle_key:
+            # Same key, same bundle: carry the decode memo to the new row.
+            cached = self.__dict__.get("_bundle")
+            if cached is not None:
+                object.__setattr__(row, "_bundle", cached)
+        return row
 
     @property
     def canonical_key(self) -> tuple[int, int, bytes]:
@@ -187,9 +199,21 @@ class CutRow:
         (those produced by :class:`~combrum.NSlack`). Raises ``ValueError``
         for cuts whose key is an opaque aggregate digest
         (:class:`~combrum.OneSlack`), which pool many bundles and so carry no
-        single generating bundle.
+        single generating bundle. Decoded once per row: installed rows are
+        read across many iterations, so the decode is memoized.
         """
-        return _unpack_bundle(self.bundle_key)
+        cached = self.__dict__.get("_bundle")
+        if cached is None:
+            cached = _unpack_bundle(self.bundle_key)
+            object.__setattr__(self, "_bundle", cached)
+        return cached
+
+    def __getstate__(self) -> dict[str, object]:
+        # The decoded-bundle memo stays process-local: re-decoding on the
+        # receiving side is cheaper than shipping the array beside its bytes.
+        state = dict(self.__dict__)
+        state.pop("_bundle", None)
+        return state
 
 
 def _cut_row_nbytes(row: CutRow) -> int:

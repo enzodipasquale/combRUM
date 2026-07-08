@@ -21,7 +21,12 @@ from combrum.activity import (
 )
 from combrum.dual import DualSolution
 from combrum.dualstore import DualStoreWriter
-from combrum.engine import build_fit_context, resolve_master_backend, run_fit
+from combrum.engine import (
+    build_fit_context,
+    master_environment,
+    resolve_master_backend,
+    run_fit,
+)
 from combrum.engine.agreement import reject_multirank_dense_transport
 from combrum.engine.driver import LoopConfig
 from combrum.engine.observed import observed_objective_cache
@@ -230,60 +235,64 @@ def bootstrap(
         total_iterations = 0
         thetas = np.zeros((n_bootstrap, K), dtype=np.float64)
         converged = np.zeros(n_bootstrap, dtype=bool)
-        for b in range(n_bootstrap):
-            rep_t0 = perf_counter() if log_details else None
-            weights_b = np.asarray(weights.weights_for(b), dtype=np.float64)
-            formulation = formulation_factory()
-            built = build_fit_context(
-                parameters,
-                observables=observables,
-                observed_bundles=observed_bundles,
-                shocks=shocks,
-                formulation=formulation,
-                features=features,
-                observed_features=observed_features,
-                transport=transport,
-                master_backend=master_backend,
-                resolved_master_backend=resolved_master_backend,
-                master_params=master_params,
-                tolerance=tolerance,
-                weights=weights_b,
-                result_publication=result_publication,
-                observed_cache=observed_cache,
-            )
-            outcome = run_fit(built.ctx, oracle, formulation, config)
-            thetas[b] = outcome.result.theta_hat
-            converged[b] = outcome.diagnostics.converged
-            total_iterations += int(outcome.diagnostics.iterations)
-
-            if writer is not None:
-                dual = outcome.result.dual
-                if dual is not None:
-                    restamped = _restamp(dual, b)
-                    writer.write(restamped)
-                    stored += 1
-                    del restamped
-
-            if log_details:
-                log.emit(
-                    BootstrapRepFinal(
-                        run_id=log.config.run_id,
-                        label=log.config.label,
-                        rep_id=b,
-                        state=(
-                            "computed"
-                            if outcome.diagnostics.converged
-                            else "nonconverged"
-                        ),
-                        converged=bool(outcome.diagnostics.converged),
-                        iterations=int(outcome.diagnostics.iterations),
-                        objective=float(outcome.result.objective),
-                        active_cuts=int(outcome.result.n_active_cuts),
-                        wall_seconds=(
-                            perf_counter() - rep_t0 if rep_t0 is not None else None
-                        ),
-                    )
+        # One shared solver environment for the whole run: each replication's
+        # master is still built fresh, but the license checkout happens once.
+        with master_environment(resolved_master_backend) as master_env:
+            for b in range(n_bootstrap):
+                rep_t0 = perf_counter() if log_details else None
+                weights_b = np.asarray(weights.weights_for(b), dtype=np.float64)
+                formulation = formulation_factory()
+                built = build_fit_context(
+                    parameters,
+                    observables=observables,
+                    observed_bundles=observed_bundles,
+                    shocks=shocks,
+                    formulation=formulation,
+                    features=features,
+                    observed_features=observed_features,
+                    transport=transport,
+                    master_backend=master_backend,
+                    resolved_master_backend=resolved_master_backend,
+                    master_params=master_params,
+                    tolerance=tolerance,
+                    weights=weights_b,
+                    result_publication=result_publication,
+                    observed_cache=observed_cache,
+                    master_env=master_env,
                 )
+                outcome = run_fit(built.ctx, oracle, formulation, config)
+                thetas[b] = outcome.result.theta_hat
+                converged[b] = outcome.diagnostics.converged
+                total_iterations += int(outcome.diagnostics.iterations)
+
+                if writer is not None:
+                    dual = outcome.result.dual
+                    if dual is not None:
+                        restamped = _restamp(dual, b)
+                        writer.write(restamped)
+                        stored += 1
+                        del restamped
+
+                if log_details:
+                    log.emit(
+                        BootstrapRepFinal(
+                            run_id=log.config.run_id,
+                            label=log.config.label,
+                            rep_id=b,
+                            state=(
+                                "computed"
+                                if outcome.diagnostics.converged
+                                else "nonconverged"
+                            ),
+                            converged=bool(outcome.diagnostics.converged),
+                            iterations=int(outcome.diagnostics.iterations),
+                            objective=float(outcome.result.objective),
+                            active_cuts=int(outcome.result.n_active_cuts),
+                            wall_seconds=(
+                                perf_counter() - rep_t0 if rep_t0 is not None else None
+                            ),
+                        )
+                    )
 
         log.emit(
             BootstrapFinal(

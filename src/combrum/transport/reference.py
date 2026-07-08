@@ -103,8 +103,10 @@ def _combine_sum(
             arr if arr.ndim == 2 else np.empty((0, width), dtype=np.float64)
             for arr in arrays
         ]
-    values = np.concatenate(arrays, axis=0)
-    ids = np.concatenate(ids_parts, axis=0)
+    # Single contributor (the serial case): canonical_sum never mutates its
+    # inputs, so the concatenate copy is pure overhead.
+    values = arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=0)
+    ids = ids_parts[0] if len(ids_parts) == 1 else np.concatenate(ids_parts, axis=0)
     return canonical_sum(values, ids)
 
 

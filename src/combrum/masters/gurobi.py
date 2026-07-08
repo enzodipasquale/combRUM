@@ -1,15 +1,18 @@
 """Gurobi-hosted master problem with native quadratic penalty support.
 
-Each instance owns an isolated ``gurobipy`` environment; the shared
-process-global default is never used so masters don't couple lifetimes
-and license checkouts. Output is muted before start (also silencing the
-license banner); the caller's ``params`` may re-enable it.
+By default each instance owns an isolated ``gurobipy`` environment; the
+shared process-global default is never used so masters don't couple
+lifetimes and license checkouts. A caller building many sequential
+masters may pass one started ``env`` instead — the caller then owns its
+lifetime, and each ``Env.start()`` it saves is one license checkout.
+Output is muted before start (also silencing the license banner); the
+caller's ``params`` may re-enable it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -85,8 +88,11 @@ class GurobiMaster(MasterBackend):
         u_coef: Callable[[int], float],
         params: Mapping[str, object] | None = None,
         n_agents: int | None = None,
+        *,
+        env: object | None = None,
     ) -> None:
         self._env = None
+        self._env_owned = env is None
         self._model = None
         # n_agents given -> all u-columns declared up front (fixed column
         # structure); None -> lazy per-first-cut columns.
@@ -107,14 +113,15 @@ class GurobiMaster(MasterBackend):
         import gurobipy
 
         self._gp = gurobipy
-        self._env = _started_env(gurobipy)
+        self._env = env if env is not None else _started_env(gurobipy)
         self._build()
 
     def _invalidate_solution(self) -> None:
+        # The sorted-block cache survives invalidation: it is keyed on
+        # _constrs_version, so it stays valid across solves that leave the
+        # installed row set unchanged (e.g. after set_rhs).
         self._solution = None
-        self._solved_constrs = None
-        self._solved_block_keys = None
-        self._solved_block = None
+        self._solved_keys = None
         self._cut_duals = None
         self._bound_duals = None
 
@@ -137,7 +144,13 @@ class GurobiMaster(MasterBackend):
         self._u_mvar = None
         self._penalty: tuple[np.ndarray, float] | None = None
         self._solution: _Solution | None = None
-        self._solved_constrs: dict[tuple[int, bytes], object] | None = None
+        # Bumped on every installed-row membership change; solve() stamps the
+        # key snapshot with it so readers can reuse the sorted MConstr block
+        # for as long as the row set stands.
+        self._constrs_version = 0
+        self._solved_version = -1
+        self._solved_keys: tuple[tuple[int, bytes], ...] | None = None
+        self._solved_block_version = -1
         self._solved_block_keys: tuple[tuple[int, bytes], ...] | None = None
         self._solved_block = None
         self._cut_duals: dict[tuple[int, bytes], float] | None = None
@@ -173,14 +186,37 @@ class GurobiMaster(MasterBackend):
         # Install in canonical key order so equal row sets build identical
         # models regardless of in-batch arrival permutation.
         ordered = sorted(fresh, key=lambda r: (r.agent_id, r.bundle_key))
-        if self._u_mvar is None:
-            for row in ordered:
-                self._install(row)
-        else:
+        if ordered:
             self._install_batch(ordered)
+            self._constrs_version += 1
         return len(fresh)
 
     def _install_batch(self, rows: Sequence[CutRow]) -> None:
+        if self._u_mvar is None:
+            # Canonical row order means new agents appear in ascending order,
+            # so batch variable creation reproduces the creation order — and
+            # with it the column indexing — of a one-row-at-a-time install.
+            missing = [
+                agent_id
+                for agent_id in dict.fromkeys(row.agent_id for row in rows)
+                if agent_id not in self._u_vars
+            ]
+            if missing:
+                u_obj = np.empty(len(missing), dtype=np.float64)
+                for i, agent_id in enumerate(missing):
+                    coef = self._u_obj.setdefault(
+                        agent_id, float(self._u_coef(agent_id))
+                    )
+                    if not np.isfinite(coef):
+                        raise ValueError(
+                            f"u_coef({agent_id}) must be finite; got {coef!r}"
+                        )
+                    u_obj[i] = coef
+                new_vars = self._model.addMVar(
+                    len(missing), lb=self._u_lb(), obj=u_obj
+                ).tolist()
+                self._u_vars.update(zip(missing, new_vars))
+                self._invalidate_objective_cache()
         for start in range(0, len(rows), _CUT_BATCH_SIZE):
             chunk = rows[start : start + _CUT_BATCH_SIZE]
             agent_ids = np.fromiter(
@@ -194,27 +230,18 @@ class GurobiMaster(MasterBackend):
                 dtype=np.float64,
                 count=len(chunk),
             )
+            u_block = (
+                self._u_mvar[agent_ids]
+                if self._u_mvar is not None
+                else self._gp.MVar.fromlist(
+                    [self._u_vars[int(agent_id)] for agent_id in agent_ids]
+                )
+            )
             constrs = self._model.addConstr(
-                self._u_mvar[agent_ids] >= phi @ self._theta_mvar + epsilon
+                u_block >= phi @ self._theta_mvar + epsilon
             ).tolist()
             for row, constr in zip(chunk, constrs):
                 self._constrs[(row.agent_id, row.bundle_key)] = constr
-
-    def _install(self, row: CutRow) -> None:
-        u_var = self._u_vars.get(row.agent_id)
-        if u_var is None:
-            coef = self._u_obj.setdefault(
-                row.agent_id, float(self._u_coef(row.agent_id))
-            )
-            if not np.isfinite(coef):
-                raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
-            u_var = self._model.addVar(lb=self._u_lb(), obj=coef)
-            self._u_vars[row.agent_id] = u_var
-            self._invalidate_objective_cache()
-        expr = self._gp.LinExpr([1.0, *(-row.phi)], [u_var, *self._theta_vars])
-        self._constrs[(row.agent_id, row.bundle_key)] = self._model.addConstr(
-            expr >= row.epsilon
-        )
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
@@ -250,6 +277,7 @@ class GurobiMaster(MasterBackend):
             del self._installed[key]
             removed += 1
         if removed:
+            self._constrs_version += 1
             self._invalidate_solution()
         return removed
 
@@ -262,10 +290,13 @@ class GurobiMaster(MasterBackend):
         # Invalidate before the writes so a mid-loop solver error cannot leave
         # accessors reporting the pre-edit solve.
         self._invalidate_solution()
-        for key, new_eps in updates.items():
-            self._constrs[key].RHS = float(new_eps)
-            # Mirror the new RHS into the installed row; phi is untouched.
-            self._installed[key] = replace(self._installed[key], epsilon=float(new_eps))
+        keys = list(updates)
+        values = [float(updates[key]) for key in keys]
+        self._model.setAttr("RHS", [self._constrs[key] for key in keys], values)
+        for key, new_eps in zip(keys, values):
+            # Mirror the new RHS into the installed row; the epsilon-only
+            # _replace shares phi and the decoded-bundle memo with the old row.
+            self._installed[key] = self._installed[key]._replace(epsilon=new_eps)
 
     # -- solving and reporting ----------------------------------------------
 
@@ -278,13 +309,17 @@ class GurobiMaster(MasterBackend):
                 "master solve terminated"
                 f" {_status_name(self._gp, status)}; expected OPTIMAL"
             )
-        theta = np.array([var.X for var in self._theta_vars], dtype=np.float64)
+        theta = np.array(self._theta_mvar.X, dtype=np.float64)
         theta.setflags(write=False)
         self._solution = _Solution(
             theta=theta,
             objective=float(self._model.ObjVal),
         )
-        self._solved_constrs = dict(self._constrs)
+        # Snapshot the solved key set (not the dict): later installs only ever
+        # ADD keys, and removals invalidate the solution, so readers can fetch
+        # the live constraint objects by these keys.
+        self._solved_keys = tuple(self._constrs)
+        self._solved_version = self._constrs_version
         self._cut_duals = None
         self._bound_duals = None
 
@@ -360,20 +395,20 @@ class GurobiMaster(MasterBackend):
         return CutReadings(keys=keys, dual=dual_arr, slack=slack_arr)
 
     def _solved_block_now(self) -> tuple[tuple[tuple[int, bytes], ...], object | None]:
-        solved = self._solved_constrs or {}
-        keys = tuple(sorted(solved))
-        if not keys:
-            return keys, None
-        if self._solved_block_keys != keys:
+        if not self._solved_keys:
+            return (), None
+        if self._solved_block_version != self._solved_version:
+            keys = tuple(sorted(self._solved_keys))
             self._solved_block = self._gp.MConstr.fromlist(
-                [solved[key] for key in keys]
+                [self._constrs[key] for key in keys]
             )
             self._solved_block_keys = keys
-        return keys, self._solved_block
+            self._solved_block_version = self._solved_version
+        return self._solved_block_keys, self._solved_block
 
     def solved_cut_keys(self) -> frozenset[tuple[int, bytes]]:
         self._last()
-        return frozenset(self._solved_constrs or {})
+        return frozenset(self._solved_keys or ())
 
     def bound_duals(self) -> dict[int, float]:
         solution = self._last()
@@ -483,12 +518,13 @@ class GurobiMaster(MasterBackend):
     # -- lifecycle ------------------------------------------------------------
 
     def close(self) -> None:
-        """Release the model and the per-instance environment."""
+        """Release the model, and the environment when this master owns it."""
         if self._model is not None:
             self._model.dispose()
             self._model = None
         if self._env is not None:
-            self._env.dispose()
+            if self._env_owned:
+                self._env.dispose()
             self._env = None
 
     def __enter__(self) -> GurobiMaster:

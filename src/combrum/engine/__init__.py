@@ -14,6 +14,9 @@ from combrum.engine.context_builder import (
     build_fit_context as build_fit_context,
 )
 from combrum.engine.context_builder import (
+    master_environment as master_environment,
+)
+from combrum.engine.context_builder import (
     resolve_master_backend as resolve_master_backend,
 )
 from combrum.engine.driver import (

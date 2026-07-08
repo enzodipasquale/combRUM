@@ -70,6 +70,14 @@ def _splitmix64_step(x: int) -> int:
     return (z ^ (z >> 31)) & MASK64
 
 
+def _splitmix64_steps(x: np.ndarray) -> np.ndarray:
+    # uint64 wraparound reproduces _splitmix64_step elementwise, bit for bit.
+    x = x + np.uint64(0x9E3779B97F4A7C15)
+    z = (x ^ (x >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return z ^ (z >> np.uint64(31))
+
+
 def _bootstrap_word(base_seed: int, rep_id: int, obs_id: int) -> int:
     x = BOOTSTRAP_NAMESPACE
     for name, field in (
@@ -100,6 +108,39 @@ def bootstrap_multiplier(base_seed: int, rep_id: int, obs_id: int) -> float:
     return -math.log1p(-u)
 
 
+def bootstrap_multipliers(
+    base_seed: int, rep_id: int, obs_ids: np.ndarray
+) -> np.ndarray:
+    """Vector of :func:`bootstrap_multiplier` draws over ``obs_ids``.
+
+    Bitwise-equal to the scalar draw at every observation, so batched and
+    per-observation callers stay interchangeable.
+    """
+    obs = np.asarray(obs_ids)
+    if obs.ndim != 1 or not np.issubdtype(obs.dtype, np.integer):
+        raise ValueError(
+            "obs_ids must be a 1-D integer array;"
+            f" got shape {obs.shape}, dtype {obs.dtype}"
+        )
+    if obs.size and int(obs.min()) < 0:
+        raise ValueError(
+            f"bootstrap RNG keys must be nonnegative; obs_id={int(obs.min())!r}"
+        )
+    # The (base_seed, rep_id) prefix of the mix is observation-invariant.
+    x = BOOTSTRAP_NAMESPACE
+    for name, field in (("base_seed", base_seed), ("rep_id", rep_id)):
+        value = operator.index(field)
+        if value < 0:
+            raise ValueError(
+                f"bootstrap RNG keys must be nonnegative; {name}={field!r}"
+            )
+        x ^= value & MASK64
+        x = _splitmix64_step(x)
+    words = _splitmix64_steps(np.uint64(x) ^ obs.astype(np.uint64))
+    u = (words >> np.uint64(11)).astype(np.float64) * 2.0**-53
+    return -np.log1p(-u)
+
+
 def bootstrap_observation_weights(
     n_observations: int, base_seed: int, rep_id: int
 ) -> np.ndarray:
@@ -107,10 +148,7 @@ def bootstrap_observation_weights(
     n = operator.index(n_observations)
     if n < 1:
         raise ValueError(f"n_observations must be >= 1; got {n_observations!r}")
-    raw = np.array(
-        [bootstrap_multiplier(base_seed, rep_id, obs_id) for obs_id in range(n)],
-        dtype=np.float64,
-    )
+    raw = bootstrap_multipliers(base_seed, rep_id, np.arange(n, dtype=np.int64))
     return _normalize_to_sum(raw, n)
 
 

@@ -75,6 +75,18 @@ def agent_owner_rank(agent_id: int, n_agents: int, size: int) -> int:
     return extra + (agent - front) // base
 
 
+def agent_owner_ranks(agent_ids: np.ndarray, n_agents: int, size: int) -> np.ndarray:
+    """Vector of :func:`agent_owner_rank` over in-range ``agent_ids``."""
+    if n_agents <= 0:
+        raise ValueError(f"n_agents must be > 0; got {n_agents}")
+    if size <= 0:
+        raise ValueError(f"size must be > 0; got {size}")
+    base, extra = divmod(int(n_agents), int(size))
+    ranks = np.arange(size, dtype=np.int64)
+    starts = ranks * base + np.minimum(ranks, extra)
+    return np.searchsorted(starts, agent_ids, side="right") - 1
+
+
 def owned_agent_ids(n_agents: int, rank: int, size: int) -> np.ndarray:
     """Contiguous global-agent ids owned by ``rank``."""
 
@@ -209,6 +221,11 @@ def route_values_validated(
         gid = int(key)
         if gid in normalized:
             raise ValueError(f"{what}: duplicate value key {gid}")
+        # Fast path for the dominant payload shape (plain floats, np.float64):
+        # skip the 0-d array round-trip below.
+        if isinstance(value, float):
+            normalized[gid] = float(value)
+            continue
         scalar = np.asarray(value)
         if scalar.shape != ():
             raise ValueError(
@@ -232,8 +249,12 @@ def route_bucket_for_rank(
     size: int,
     rank: int,
 ) -> dict[int, float]:
-    return {
-        int(gid): float(value)
-        for gid, value in sorted(values.items())
-        if agent_owner_rank(int(gid), n_agents, size) == int(rank)
-    }
+    if not values:
+        return {}
+    gids = np.fromiter(values.keys(), dtype=np.int64, count=len(values))
+    vals = np.fromiter(values.values(), dtype=np.float64, count=len(values))
+    order = np.argsort(gids)
+    gids = gids[order]
+    vals = vals[order]
+    mine = agent_owner_ranks(gids, n_agents, size) == int(rank)
+    return dict(zip(gids[mine].tolist(), vals[mine].tolist()))

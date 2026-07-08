@@ -262,12 +262,8 @@ def test_bootstrap_wave_reduction_is_keyed_by_observations() -> None:
 
     assert c_thetas.shape == (3, 2)
     assert normalizers.shape == (3,)
-    # Independent expectation from the fixture math: for each rep, raw =
-    # bootstrap_multiplier(11, rep_id, obs), normalizer = sum(raw), and the
-    # unscaled c_theta row is sum_obs(-S * raw * phi_obs); the wave then scales
-    # by N / normalizer. Computed here directly from bootstrap_multiplier so a
-    # dropped sign in _bootstrap_local_rows or an inverted N/normalizer scale in
-    # _finish_bootstrap_reduction is caught.
+    # Per rep: raw = bootstrap_multiplier(11, rep_id, obs), normalizer =
+    # sum(raw), c_theta = sum_obs(-S * raw * phi_obs) * N / normalizer.
     raw = np.array(
         [
             [bootstrap_multiplier(11, rep_id, int(obs)) for obs in prep.owned_obs]
@@ -487,10 +483,8 @@ def test_bootstrap_distributed_wires_split_axis_without_full_data(monkeypatch) -
         )
         return _fake_replica(rep_id, kwargs["prep"])
 
-    # Return per-slot-distinct thetas/converged so the outer slot->rep_id
-    # scatter is observable in the assembled BootstrapResult. The oracle rep_id
-    # seeds each row (row = [1000*rep_id + 1, 1000*rep_id + 2]); rep 1 is the
-    # only non-converged one. Independent of any combrum accessor.
+    # Per-slot-distinct thetas/converged make the slot->rep_id scatter visible:
+    # row = [1000*rep_id + 1, 1000*rep_id + 2], and rep 1 alone non-converged.
     def distinct_replica_wave(replicas, **kwargs):
         K = kwargs["K"]
         rep_ids = [replica.rep_id for replica in replicas]
@@ -522,20 +516,16 @@ def test_bootstrap_distributed_wires_split_axis_without_full_data(monkeypatch) -
         base_seed=5,
         transport=transport,
         master_backend="highs",
-        # Two waves ((0,1) and (2,)) so slot!=rep_id in the second wave; a
-        # swapped or offset slot->rep_id scatter mis-places the assembled rows.
+        # Two waves ((0,1) and (2,)) so slot != rep_id in the second wave.
         max_live_reps=2,
     )
 
     assert result.thetas.shape == (3, 2)
-    # Independent oracle: the mock stamps row rep_id, so the assembled result
-    # must reproduce it verbatim per global rep index. Catches a corrupted or
-    # mis-mapped `thetas[rep_id] = wave.thetas[slot]` scatter.
+    # Each stamped row must land at its global rep index, not its wave slot.
     np.testing.assert_array_equal(
         result.thetas,
         np.array([[1.0, 2.0], [1001.0, 1002.0], [2001.0, 2002.0]]),
     )
-    # Only rep 1 is non-converged; catches an inverted converged scatter.
     assert result.converged.tolist() == [True, False, True]
     assert observed.setup_ids == tuple(range(252))
     assert len(oracle.setup_ids) == 252 * 20
@@ -546,14 +536,10 @@ def test_bootstrap_distributed_wires_split_axis_without_full_data(monkeypatch) -
     assert all(len(r["local_ids"]) == 252 * 20 for r in records)
     assert [r["owner_rank"] for r in records] == [0, 0, 0]
 
-    # Per-rep bootstrap weights must be wired by slot into _build_distributed_replica,
-    # not shared from slot 0. Independent oracle from the fixture math: N=252,
-    # S=20, phi_obs row obs = [obs+1, obs+2] (the _ObservedSurface(K=2) formula),
-    # raw = bootstrap_multiplier(base_seed, rep_id, obs) drawn on all 252 obs.
-    # normalizer = sum(raw); c_theta = sum_obs(-S * raw * phi) * (N / normalizer).
-    # Recomputed here for each record's OWN rep_id, so c_thetas[slot]->c_thetas[0]
-    # (or normalizers[slot]->normalizers[0]) hands rep 1/2 rep-0's weights and
-    # this pin fires.
+    # Each replica must receive its own rep's bootstrap weights, not slot 0's.
+    # Expected values recomputed per rep_id: phi_obs row = [obs+1, obs+2]
+    # (_ObservedSurface(K=2)), raw = bootstrap_multiplier(5, rep_id, obs),
+    # normalizer = sum(raw), c_theta = sum_obs(-S * raw * phi) * N / normalizer.
     N, S = 252, 20
     obs = np.arange(N, dtype=np.float64)
     phi_obs = np.column_stack([obs + 1.0, obs + 2.0])
@@ -571,8 +557,7 @@ def test_bootstrap_distributed_wires_split_axis_without_full_data(monkeypatch) -
         np.testing.assert_allclose(
             record["c_theta"], expected_c_theta, rtol=0.0, atol=1e-6
         )
-    # Reps must differ: rep 1's weights are not rep 0's, so the shared-slot-0
-    # regression is a genuine behavioral change here, not a coincidental match.
+    # Distinct reps draw distinct weights, so sharing slot 0's could not pass.
     assert records[0]["normalizer"] != pytest.approx(records[1]["normalizer"])
     assert not np.allclose(records[0]["c_theta"], records[1]["c_theta"])
     # Empirical observed moments (1), the two live waves' c_theta/normalizers
@@ -623,9 +608,8 @@ def test_bootstrap_distributed_routes_wave_masters_by_rep_id(monkeypatch) -> Non
     LocalCluster(3).run(run)
 
     rank0_seen = {rep_id: owner for (rank, rep_id), owner in seen.items() if rank == 0}
-    # On one node, node-interleaved placement reduces to rep_id % size:
-    # [0, 1, 2, 0, 1]. owners[slot] (slot is always 0) would give all zeros,
-    # so this pins rep-id keying across waves.
+    # On one node, node-interleaved placement reduces to rep_id % size =
+    # [0, 1, 2, 0, 1]; owners[slot] (slot is always 0) would give all zeros.
     assert rank0_seen == {0: 0, 1: 1, 2: 2, 3: 0, 4: 1}
     for rank in range(3):
         rank_seen = {rid: owner for (rk, rid), owner in seen.items() if rk == rank}
@@ -676,9 +660,7 @@ def test_bootstrap_start_event_reports_resolved_split_axis_metadata(
     assert start.n_agents == 55
     assert start.min_iterations == 3
     assert start.master_backend == "highs"
-    # Every field the call supplies, pinned against the distinct literals passed
-    # in (not read back from any combrum accessor). Catches a mis-wired
-    # BootstrapStart(...) emit that drops or swaps a control field.
+    # Each field echoes the distinct literal supplied in the call.
     assert start.n_bootstrap == 2
     assert start.base_seed == 99
     assert start.tolerance == pytest.approx(3e-4)
@@ -809,9 +791,8 @@ def test_bootstrap_distributed_rejects_min_iterations_above_max() -> None:
             tolerance=1e-6,
         )
 
-    # The guard is strictly-greater: min_iterations == max_iterations is the
-    # valid boundary and must be accepted (running exactly that many iterations).
-    # An inclusive `>=` guard would wrongly reject this config.
+    # min_iterations == max_iterations is a valid boundary: the guard is
+    # strictly-greater, and the run does exactly that many iterations.
     result = bootstrap_distributed(
         _model(),
         n_observations=3,
@@ -826,12 +807,9 @@ def test_bootstrap_distributed_rejects_min_iterations_above_max() -> None:
     )
     assert result.iterations == 2
 
-    # End-to-end floor threading: the default model certifies each rep in 2
-    # iterations (min=0,max=5 -> 2), so a min_iterations=4 floor that reaches the
-    # replica-wave loop forces exactly 4 extra-held iterations while max=5 leaves room.
-    # 4 is not the natural stop; it can only come from the public floor being
-    # threaded into _run_replica_wave's convergence check. Dropping the floor at the
-    # internal call site (min_iterations=0) collapses this back to 2.
+    # The default model certifies in 2 iterations (min=0, max=5 -> 2), so
+    # iterations == 4 can only come from the public min_iterations floor being
+    # threaded through to _run_replica_wave's convergence check.
     floored = bootstrap_distributed(
         _model(),
         n_observations=3,
@@ -1152,25 +1130,19 @@ def test_bootstrap_replicas_receive_warm_start_and_isolated_policy(monkeypatch) 
         assert record["policy"] is not policy
     p0, p1 = records[0]["policy"], records[1]["policy"]
     assert p0 is not p1
-    # Deep isolation: each rep gets its own copy of the nested aging state, and
-    # neither aliases the template. A shallow copy would share these dicts, so
-    # same-keyed cuts from different reps would age each other.
     assert p0.ages is not policy.ages
     assert p1.ages is not policy.ages
     assert p0.ages is not p1.ages
-    # Mutating one rep's aging state leaves the other rep and the template
-    # untouched -- pins the full isolation, not just distinct top-level objects.
+    # Mutation through one copy must not reach the other rep or the template.
     p0.ages[(0, b"k")] = 1
     assert p1.ages == {}
     assert policy.ages == {}
 
 
 def test_bootstrap_distributed_callback_index_resets_by_live_wave() -> None:
-    # Drive the reset through the real _run_replica_wave: max_live_reps=1 with
-    # n_bootstrap=2 runs two single-rep waves, each a fresh _run_replica_wave call.
-    # The default model's rows each take two iterations to certify, so a wave
-    # that reset its per-iteration index reports [0, 1]; if the index were a
-    # running global counter the second wave would report [2, 3].
+    # max_live_reps=1 with n_bootstrap=2 runs two single-rep waves, each
+    # certifying in two iterations. A per-wave index reports [0, 1] twice; a
+    # running global counter would report [2, 3] in the second wave.
     calls: list[int] = []
 
     bootstrap_distributed(
@@ -1568,7 +1540,9 @@ def test_replica_wave_chunks_cut_exchange_by_live_rep_blocks(monkeypatch) -> Non
     )
 
     assert result.converged.tolist() == [True, True]
-    assert transport.max_shapes == [(1,), (1,)]
+    # One batched max per single-slot block, plus the row-width lane that
+    # rides it in place of a separate allreduce.
+    assert transport.max_shapes == [(2,), (2,)]
     assert transport.exchange_owner_shapes == [(1,), (1,)]
 
 
@@ -1653,7 +1627,9 @@ def test_replica_wave_batches_no_row_wave_without_slot_probing() -> None:
 
     assert result.converged.tolist() == [True, True, True]
     assert [replica.formulation.finalise_calls for replica in replicas] == [1, 1, 1]
-    assert transport.max_shapes == [(3,)]
+    # All three live slots reduce in one round; the extra lane is the
+    # row-width bookkeeping riding the same batched max.
+    assert transport.max_shapes == [(4,)]
     assert transport.exchange_owner_shapes == [(3,)]
 
 
@@ -1718,23 +1694,9 @@ def test_replica_wave_does_not_reprocess_no_row_prefix(monkeypatch) -> None:
 def test_cut_exchange_block_size_uses_cut_row_bytes(monkeypatch) -> None:
     boot_module = importlib.import_module("combrum.bootstrap_distributed")
     monkeypatch.setattr(boot_module, "_CUT_EXCHANGE_BLOCK_ELEMENTS", 4)
-    replicas = [
-        SimpleNamespace(scheduled_local_ids=np.arange(2, dtype=np.int64))
-        for _ in range(3)
-    ]
 
-    small = _cut_exchange_block_size(
-        replicas,
-        (0, 1, 2),
-        row_nbytes=8,
-        transport=SerialTransport(),
-    )
-    wide = _cut_exchange_block_size(
-        replicas,
-        (0, 1, 2),
-        row_nbytes=128,
-        transport=SerialTransport(),
-    )
+    small = _cut_exchange_block_size(3, row_nbytes=8, max_scheduled_ids=2)
+    wide = _cut_exchange_block_size(3, row_nbytes=128, max_scheduled_ids=2)
 
     assert small == 2
     assert wide == 1
@@ -1763,10 +1725,9 @@ def test_observed_cut_row_nbytes_includes_bundle_key_bytes() -> None:
 
 
 def test_replica_wave_uses_max_of_min_iterations_and_callback_floor() -> None:
-    # The floor is max(min_iterations, callback_floor); exercise BOTH arms so a
-    # build that keeps only one fails. The formulation converges on iteration 0
-    # (violation 0.0 <= tol), so the number of iterations equals the floor and
-    # the callback sees it = 0..floor-1.
+    # floor = max(min_iterations, callback_floor). The formulation converges on
+    # iteration 0 (violation 0.0 <= tol), so iterations equals the floor and
+    # the callback sees 0..floor-1.
     def run(*, min_iterations: int, callback_floor: int) -> tuple[list[int], int, list[bool]]:
         oracle = _CallbackOracle()
         resolution = _price_resolution(oracle, SerialTransport())
@@ -1793,15 +1754,13 @@ def test_replica_wave_uses_max_of_min_iterations_and_callback_floor() -> None:
         )
         return calls, int(result.iterations), result.converged.tolist()
 
-    # Callback floor dominates: floor = max(1, 3) = 3. Dropping the callback arm
-    # (return base_floor) would fall to 1 and stop after one iteration.
+    # Callback floor dominates: max(1, 3) = 3.
     calls, iterations, converged = run(min_iterations=1, callback_floor=3)
     assert calls == [0, 1, 2]
     assert iterations == 3
     assert converged == [True]
 
-    # min_iterations dominates: floor = max(3, 1) = 3. Dropping the base arm
-    # (return callback_floor) would fall to 1 and stop after one iteration.
+    # min_iterations dominates: max(3, 1) = 3.
     calls, iterations, converged = run(min_iterations=3, callback_floor=1)
     assert calls == [0, 1, 2]
     assert iterations == 3
@@ -1963,11 +1922,11 @@ def test_batched_reduce_max_kind_routes_rows_by_rep_to_owner() -> None:
 
     got = LocalCluster(2).run(per_rank)
 
-    # Hand-derived from the input rows + owners: slot 0 lands on rank 0 with both
-    # ranks' rows restamped rep_id=0 (canonical (rep_id, agent_id, bundle_key)
-    # order puts rank-0's phi=0.0 before rank-1's phi=1.0); slot 1 lands on
-    # rank 1 restamped rep_id=1; the non-owning rank sees an empty tuple. worsts:
-    # slot 0 = max(0.0, 1.0) = 1.0, slot 1 = max(3.0, 3.0) = 3.0.
+    # Slot 0 lands on rank 0 with both ranks' rows restamped rep_id=0
+    # (canonical (rep_id, agent_id, bundle_key) order puts rank-0's phi=0.0
+    # before rank-1's phi=1.0); slot 1 lands on rank 1 restamped rep_id=1; the
+    # non-owning rank sees an empty tuple. worsts: slot 0 = max(0.0, 1.0),
+    # slot 1 = max(3.0, 3.0).
     slot0_rows = ((0, 10, 0.0, 0.5), (0, 10, 1.0, 0.5))
     slot1_rows = ((1, 20, 100.0, 0.7), (1, 20, 101.0, 0.7))
     rank0 = [(1.0, slot0_rows), (3.0, ())]

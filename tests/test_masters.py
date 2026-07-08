@@ -22,7 +22,7 @@ import pytest
 from combrum.master import MasterBackend
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
-from combrum.masters import make_master, resolve_master_backend
+from combrum.masters import make_master, master_environment, resolve_master_backend
 from combrum.masters.gurobi import GurobiMaster
 from combrum.masters.highs import HighsMaster
 from combrum.transport import LocalCluster
@@ -138,9 +138,7 @@ def test_resolve_with_transport_probes_owner_rank_only(monkeypatch) -> None:
     )
 
     assert results == ["highs", "highs", "highs"]
-    # The highs probe must fire exactly once and only on the declared owner
-    # (rank 1), so a guard that probed rank 0 or every rank is caught. Recording
-    # the probing thread is what gives this check a meaningful signal.
+    # One probe, on the declared owner rank only.
     assert calls == ["local-rank-1"]
 
 
@@ -177,11 +175,8 @@ def test_resolve_with_transport_intersects_all_owner_ranks(monkeypatch) -> None:
 def test_resolve_with_transport_prefers_gurobi_when_owner_intersection_has_it(
     monkeypatch,
 ) -> None:
-    # The other two transport resolve tests both drive auto to 'highs' (gurobi
-    # forced unavailable everywhere, or on one owner rank). This one makes
-    # gurobi available on every owner rank so the distributed auto resolver's
-    # gurobi-preference branch is the only thing that decides the outcome, and
-    # every rank must agree on 'gurobi' from the owner intersection.
+    # With gurobi available on every owner rank, the resolver's gurobi
+    # preference decides, and all ranks must agree on it.
     monkeypatch.setattr(gurobi_backend, "available", lambda: True)
     monkeypatch.setattr(highs_backend, "available", lambda: True)
     results = LocalCluster(3).run(
@@ -391,13 +386,11 @@ def test_cut_readings_are_row_aligned_and_normalized(
 
 @needs_highs
 def test_cut_readings_realign_when_install_order_is_unsorted() -> None:
-    # cut_readings labels its arrays by sorted key, but the highs backend caches
-    # per-row solver signals in install order and must gather them back into
-    # sorted order first. Feeding the rows across two add_cuts batches (agent 2
-    # then agent 1) makes install order != sorted order, so that gather is the
-    # only thing standing between correct and transposed per-row duals/slacks.
-    # (Gurobi rebuilds its readings block from sorted keys directly, so this
-    # realignment path is highs-specific.)
+    # cut_readings labels its arrays by sorted key, but the highs backend
+    # caches per-row solver signals in install order and must gather them back
+    # into sorted order. Adding agent 2's rows before agent 1's makes install
+    # order != sorted order. (Gurobi rebuilds its readings from sorted keys
+    # directly, so this path is highs-specific.)
     agent2 = tuple(row for row in LP_ROWS if row.agent_id == 2)
     agent1 = tuple(row for row in LP_ROWS if row.agent_id == 1)
     with lp_master("highs") as master:
@@ -405,9 +398,8 @@ def test_cut_readings_realign_when_install_order_is_unsorted() -> None:
         master.add_cuts(agent1)
         master.solve()
 
-        # Guard: the split must actually produce an unsorted install order, or
-        # the realignment path is not exercised and the test has no meaningful signal.
-        # highs keys dual_values() by install order, so this reads it directly.
+        # highs keys dual_values() by install order; confirm the split really
+        # left it unsorted.
         install_order = tuple(master.dual_values())
         assert install_order != tuple(sorted(install_order))
 
@@ -415,8 +407,8 @@ def test_cut_readings_realign_when_install_order_is_unsorted() -> None:
         assert readings.keys == tuple(sorted(LP_DUALS))
         assert readings.dual_map() == pytest.approx(LP_DUALS, abs=1e-9)
         assert readings.slack_map() == pytest.approx(LP_SLACKS, abs=1e-9)
-        # Independent cross-check: dual_values is keyed by install order and
-        # bypasses the sorted-order gather, so it must agree key-for-key.
+        # dual_values bypasses the sorted-order gather; the two views must
+        # agree key for key.
         assert master.dual_values() == pytest.approx(readings.dual_map(), abs=1e-9)
 
 
@@ -481,9 +473,8 @@ def test_u_values_publish_cut_bearing_agents_with_predeclared_columns(
 def _rows_with_epsilon(
     key: tuple[int, bytes], new_eps: float
 ) -> tuple[CutRow, ...]:
-    # The LP_ROWS set with exactly one row's epsilon overwritten — the
-    # ground truth a fresh master builds to compare against an in-place
-    # set_rhs on a persistent one.
+    # LP_ROWS with one epsilon overwritten, for fresh-build comparisons
+    # against an in-place set_rhs.
     return tuple(
         replace(row, epsilon=new_eps)
         if (row.agent_id, row.bundle_key) == key
@@ -495,9 +486,7 @@ def _rows_with_epsilon(
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_rhs_matches_fresh_build_without_rebuild(backend: str) -> None:
     # Overwriting one cut's RHS in place must land the same relaxation a
-    # fresh master gets from the modified row set, without rebuilding, so
-    # the persistent master survives reuse across an outer search. Row
-    # (1, a) moves epsilon 2.0 -> 3.5.
+    # fresh master gets from the modified row set. Row (1, a): eps 2.0 -> 3.5.
     key = (1, b"a")
     new_eps = 3.5
     with lp_master(backend) as persistent:
@@ -510,8 +499,7 @@ def test_set_rhs_matches_fresh_build_without_rebuild(backend: str) -> None:
         persistent.set_rhs({key: new_eps})
         persistent.solve()
 
-        # No rebuild: the master object AND its live solver handle are the
-        # same instances reinstall would have replaced.
+        # No rebuild: the live solver handle is the same instance.
         model_after = getattr(persistent, "_model", None) or getattr(
             persistent, "_h"
         )
@@ -548,8 +536,6 @@ def test_set_rhs_updates_extracted_epsilon_phi_unchanged(
         master.set_rhs({key: new_eps})
 
         extracted = _rows_by_key(master)
-        # The targeted row's epsilon is the new value; every other row's
-        # epsilon is its original; phi is byte-identical for all rows.
         assert extracted[key].epsilon == new_eps
         for row in LP_ROWS:
             rkey = (row.agent_id, row.bundle_key)
@@ -559,14 +545,11 @@ def test_set_rhs_updates_extracted_epsilon_phi_unchanged(
         # The internal installed mirror agrees with the extracted view.
         assert master._installed[key].epsilon == new_eps
 
-        # The mirror/extract assertions above only read the Python-side copy,
-        # so a set_rhs that updates the mirror but skips the solver-side RHS
-        # write would pass them all. Pin the actual relaxation: dropping (1,a)
-        # from eps 2.0 to -4.25 slackens it out of the active set and moves the
-        # optimum from (1, 2) to (2, 0) at objective 3.0 (hand-derived, and
-        # cross-checked by a grid search independent of combrum). Re-solve and
-        # confirm the solver truly moved there — a mirror-only write would leave
-        # the pre-edit (1, 2)/3.75 vertex intact.
+        # The checks above only read the Python-side mirror, so a set_rhs
+        # that skipped the solver-side RHS write would still pass them.
+        # Dropping (1, a) to eps -4.25 slackens it out of the active set and
+        # moves the optimum from (1, 2)/3.75 to (2, 0)/3.0 (hand-derived);
+        # re-solve and check the solver actually moved.
         master.solve()
         moved_theta = np.array([2.0, 0.0])
         moved_objective = 3.0
@@ -574,10 +557,8 @@ def test_set_rhs_updates_extracted_epsilon_phi_unchanged(
             master.theta(), moved_theta, rtol=0, atol=1e-9
         )
         assert master.objective() == pytest.approx(moved_objective, abs=1e-9)
-        # Full-output oracle: every solved quantity (theta, objective, and the
-        # complete dual map over all six rows) must match a fresh master built
-        # straight from the modified row set, so an entire class of partial or
-        # wrong solver writes dies here, not just the one deleted call.
+        # And theta, objective, and the full dual map must match a fresh
+        # master built from the modified row set.
         with lp_master(backend) as fresh:
             fresh.add_cuts(_rows_with_epsilon(key, new_eps))
             fresh.solve()
@@ -594,9 +575,8 @@ def test_set_rhs_updates_extracted_epsilon_phi_unchanged(
 
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_rhs_invalidates_solution_until_resolve(backend: str) -> None:
-    # After set_rhs and before re-solving, the cached solve is stale, so
-    # every accessor must hit the no-solve path rather than return duals
-    # of the pre-edit problem.
+    # Between set_rhs and the next solve the cached solution is stale;
+    # every accessor must refuse rather than report the pre-edit problem.
     with lp_master(backend) as master:
         master.add_cuts(LP_ROWS)
         master.solve()
@@ -629,10 +609,9 @@ def test_set_rhs_unknown_key_raises_key_error(backend: str) -> None:
 def test_set_rhs_missing_key_after_valid_does_not_partially_mutate(
     backend: str,
 ) -> None:
-    # set_rhs pre-validates the whole key set, so a missing key aborts the
-    # update before any RHS is rewritten — a valid key ordered before the
-    # missing one is not written, and the unchanged relaxation keeps its
-    # cached solve rather than being left partially mutated.
+    # set_rhs validates the whole key set before writing, so a missing key
+    # aborts the update with nothing rewritten — even for valid keys ordered
+    # ahead of it.
     valid = (1, b"a")
     with lp_master(backend) as master:
         master.add_cuts(LP_ROWS)
@@ -643,28 +622,24 @@ def test_set_rhs_missing_key_after_valid_does_not_partially_mutate(
         with pytest.raises(KeyError):
             master.set_rhs({valid: 3.5, (99, b"missing"): 1.0})
 
-        # No partial write: the valid key's epsilon is untouched in both the
-        # installed mirror and the extracted view.
+        # The valid key's epsilon is untouched in mirror and extract.
         assert master._installed[valid].epsilon == eps_before
         extracted = _rows_by_key(master)
         assert extracted[valid].epsilon == eps_before
-        # The relaxation never moved, so the cached solve is still valid (the
-        # accessors are not invalidated) and reports the same theta.
+        # The relaxation never moved, so the cached solve stays valid.
         assert master.theta().tobytes() == theta_before
 
 
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_rhs_leaves_add_extract_reinstall_unchanged(backend: str) -> None:
-    # set_rhs must not perturb the other cut-management primitives: an
-    # extract after a set_rhs still round-trips through a fresh reinstall
-    # to a bitwise-identical relaxation, and add_cuts still dedups.
+    # set_rhs must not perturb the other cut primitives: extract still
+    # round-trips through reinstall bitwise, and add_cuts still dedups.
     with lp_master(backend) as master:
         master.add_cuts(LP_ROWS)
         master.solve()
         master.set_rhs({(1, b"a"): 3.5})
         master.solve()
         artifact = master.extract_cuts()
-        # add_cuts still treats the installed keys as duplicates.
         assert master.add_cuts(LP_ROWS) == 0
 
         with lp_master(backend) as fresh:
@@ -696,24 +671,19 @@ def test_penalty_pulls_toward_ref_then_reverts_exactly() -> None:
             theta_lp - ref
         )
         assert master.bound_duals() == {}
-        # A bare "closer to ref" inequality tolerates a badly mis-scaled weight.
-        # Pin theta_pen to the exact QP optimum instead: near theta=0 the active
-        # epigraph rows are (1,a) u1=t0+2 and (2,d) u2=-t0+3, so the objective
-        # reduces to -0.25*t0 - 1.25*t1 + 6.5 + 10*(t0^2 + t1^2), whose unique
-        # stationary point is t0=0.25/20=0.0125, t1=1.25/20=0.0625. (Verified
-        # independently with a scipy QP solve.) A wrongly scaled weight lands a
-        # different vertex and is caught here.
+        # Exact QP optimum: near theta = 0 the active epigraph rows are
+        # (1,a) u1 = t0+2 and (2,d) u2 = -t0+3, so the objective reduces to
+        # -0.25*t0 - 1.25*t1 + 6.5 + 10*(t0^2 + t1^2), stationary at
+        # t0 = 0.25/20, t1 = 1.25/20 (cross-checked with a scipy QP solve).
         np.testing.assert_allclose(
             theta_pen, np.array([0.0125, 0.0625]), rtol=0, atol=1e-9
         )
 
         master.set_penalty(ref, weight=0.0)
         master.solve()
-        # weight=0.0 must tear the penalty down to a pure LP, not leave a
-        # zero-weight QP hanging (the "removed entirely, not zeroed" contract).
-        # theta/objective/duals coincide with the LP either way at this optimum,
-        # so pin the teardown directly and reconstruct the objective as strictly
-        # linear (no quadratic term), which a residual QP would not satisfy.
+        # weight=0.0 removes the penalty outright rather than leaving a
+        # zero-weight QP hanging: the model reverts to a pure LP and the
+        # reported objective is strictly linear.
         assert master._penalty is None
         np.testing.assert_allclose(
             master.theta(), theta_lp, rtol=0, atol=1e-12
@@ -767,19 +737,15 @@ def test_bound_duals_under_active_penalty_then_revert() -> None:
         duals_pen = master.bound_duals()
         assert set(duals_pen) == {0}
         assert duals_pen[0] < 0
-        # theta_0 sits exactly on its 0.5 upper bound at the penalty-centered
-        # optimum, so the proximity path's reduced cost is the same -1.0 the
-        # LP/VBasis path reports. Pin the value, not just the sign, so a
-        # mis-scaled RC on this distinct QP-with-no-basis path is caught here.
+        # The proximity path must report the same -1.0 reduced cost the
+        # LP/VBasis path does — the value, not just the sign.
         assert duals_pen[0] == pytest.approx(BOUND_DUAL_T0, abs=1e-9)
 
         master.set_penalty(BOUND_THETA, weight=0.0)
         master.solve()
-        # weight=0.0 must fully remove the penalty, so the terminating solve is
-        # a true LP whose bound dual comes off the simplex VBasis, not a residual
-        # zero-weight QP falling through the proximity path. Both paths report
-        # -1.0 at this at-bound optimum, so the numeric bound_duals check below
-        # cannot see the difference; pin the teardown itself.
+        # After weight=0.0 the terminating solve is a true LP whose bound dual
+        # comes off the simplex VBasis, not a residual zero-weight QP on the
+        # proximity path. Both report -1.0 here, so pin the teardown itself.
         assert master._penalty is None
         assert master.bound_duals() == pytest.approx(duals_lp, abs=1e-9)
 
@@ -890,6 +856,47 @@ def test_extracted_cuts_warm_start_across_backends() -> None:
 def test_factory_explicit_gurobi() -> None:
     with lp_master("gurobi") as master:
         assert isinstance(master, GurobiMaster)
+
+
+@needs_gurobi
+def test_master_environment_shares_one_gurobi_env() -> None:
+    with master_environment("gurobi") as env:
+        assert env is not None
+        # Sequential masters on the shared environment: each close() releases
+        # only the model, so the next build needs no fresh license checkout.
+        for _ in range(2):
+            with make_master(
+                K,
+                LP_BOUNDS,
+                LP_C_THETA,
+                LP_U_COEF.__getitem__,
+                backend="gurobi",
+                env=env,
+            ) as master:
+                assert master._env is env
+                master.add_cuts(LP_ROWS)
+                master.solve()
+                np.testing.assert_allclose(
+                    master.theta(), LP_THETA, rtol=0, atol=1e-9
+                )
+
+
+def test_master_environment_yields_none_for_highs() -> None:
+    with master_environment("highs") as env:
+        assert env is None
+
+
+@needs_highs
+def test_make_master_rejects_env_for_highs() -> None:
+    with pytest.raises(ValueError, match="only meaningful for the gurobi backend"):
+        make_master(
+            K,
+            LP_BOUNDS,
+            LP_C_THETA,
+            LP_U_COEF.__getitem__,
+            backend="highs",
+            env=object(),
+        )
 
 
 @needs_highs
