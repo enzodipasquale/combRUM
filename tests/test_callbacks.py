@@ -1,15 +1,10 @@
-"""Conformance of the adaptive-timeout callback helpers.
+"""Adaptive-timeout callback helpers.
 
-The gate has three legs:
-
-- **schedule replay** — the helpers reproduce captured per-iteration solver
-  settings over a representative schedule. Bootstrap also replays the captured
-  retirement floors exactly. Point estimation shares bounded-phase floors but
-  has its own terminal policy: no sentinel after the bounded schedule is spent.
-- **capability** — a callback reaches a configurable target's settings; on a
-  non-configurable target it returns the floor and raises nothing.
-- **determinism** — the same ``(schedule, iteration)`` yields the same
-  ``(settings, floor)`` on every call.
+Three properties: the helpers reproduce captured per-iteration solver
+settings and floors over a representative schedule (bootstrap keeps the
+terminal sentinel, point estimation drops it); a callback configures a
+configurable target and silently skips a non-configurable one; and the same
+``(schedule, iteration)`` yields the same ``(settings, floor)`` on every call.
 
 The helpers are tested as pure functions against the hook contract
 ``(iteration, oracle) -> int | None``; no live row-generation loop runs here.
@@ -201,7 +196,7 @@ def test_schedule_requires_one_terminal_phase_last() -> None:
         Schedule([Phase(timeout=1.0), Phase(timeout=5.0)])
 
 
-# ---- schedule replay: the gate ----------------------------------------------
+# ---- schedule replay ---------------------------------------------------------
 
 
 def test_bootstrap_helper_matches_captured_schedule_field_by_field(
@@ -309,26 +304,22 @@ def test_same_schedule_and_iteration_is_deterministic(schedule, n_iters) -> None
 def test_cold_start_hint_tracks_schedule_iteration_not_call_order(
     schedule, n_iters
 ) -> None:
-    # MIPFocus=1 is the cold-start hint for schedule iteration 0, not for
-    # whatever iteration a callback instance first happens to be invoked at.
-    # A stateful "first call" flag would flip mip_focus=1 on the first call
-    # regardless of iteration; pin the hint to iteration 0 by giving a fresh
-    # callback its first call at a non-zero iteration and at 0.
+    # MIPFocus=1 belongs to schedule iteration 0, not to an instance's first
+    # call: a fresh callback first invoked at a non-zero iteration must not
+    # carry the hint.
     for helper in (point_timeout_callback, bootstrap_timeout_callback):
         for first_it in range(1, n_iters):
             cb = helper(schedule)
             rec = _Recorder()
             cb(first_it, rec)  # type: ignore[arg-type]
             assert rec.last.mip_focus == 0, (
-                f"{helper.__name__}: first call at iter {first_it} must not"
-                " carry the cold-start hint"
+                f"{helper.__name__}: cold-start hint at iter {first_it}"
             )
         cb0 = helper(schedule)
         rec0 = _Recorder()
         cb0(0, rec0)  # type: ignore[arg-type]
         assert rec0.last.mip_focus == 1, (
-            f"{helper.__name__}: a fresh callback first called at iter 0 must"
-            " carry the cold-start hint"
+            f"{helper.__name__}: cold-start hint missing at iter 0"
         )
 
 
@@ -336,20 +327,15 @@ def test_cold_start_hint_tracks_schedule_iteration_not_call_order(
 
 
 def test_callback_applies_settings_to_a_configurable_target(schedule) -> None:
-    # A configurable target receives exactly the phase's settings, and the
-    # callback still returns the floor.
     callback = point_timeout_callback(schedule)
     recorder = _Recorder()
     floor0 = callback(0, recorder)  # type: ignore[arg-type]
-    # Exactly one apply per call: the side effect is applied once, not skipped
-    # and not duplicated. A redundant re-apply (double solver reconfiguration)
-    # dies here.
+    # exactly one apply per call -- no duplicate solver reconfiguration
     assert len(recorder.received) == 1
     assert recorder.last.time_limit_seconds == 1.0
     assert recorder.last.mip_focus == 1  # cold-start hint at iter 0
     assert floor0 == 2
     floor2 = callback(2, recorder)  # type: ignore[arg-type]
-    # A second call appends exactly one more: two calls => two records.
     assert len(recorder.received) == 2
     assert recorder.last.time_limit_seconds == 5.0
     assert recorder.last.mip_focus == 0
@@ -357,8 +343,7 @@ def test_callback_applies_settings_to_a_configurable_target(schedule) -> None:
 
 
 def test_callback_skips_a_non_configurable_target(schedule) -> None:
-    # The capability gate: a target without apply_solver_settings is skipped,
-    # never an error, and the floor still comes back.
+    # no apply_solver_settings: skipped silently, floor still returned
     target = _Plain()
     assert not isinstance(target, SolverConfigurable)
     for helper in (point_timeout_callback, bootstrap_timeout_callback):

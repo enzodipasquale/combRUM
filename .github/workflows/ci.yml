@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly slow-tier run; timing gates stay off the per-push path.
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -18,15 +26,45 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test,highs]"
       - name: Run tests
-        # HiGHS is installed; Gurobi-dependent tests skip when no license is available.
-        run: pytest tests -m "not slow and not requires_mpi" --cov=combrum -q
+        # HiGHS is installed; Gurobi-dependent tests skip when no license is
+        # available. Coverage is reported once, on the 3.12 leg.
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            pytest tests -m "not slow and not requires_mpi" --cov=combrum -q
+          else
+            pytest tests -m "not slow and not requires_mpi" -q
+          fi
+
+  slow:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    # Timing-ratio gates can flake on shared runners; this job exists to catch
+    # rot in the slow tier, not to gate merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,highs]"
+      - name: Run slow tier
+        run: pytest tests -m "slow and not requires_mpi" -q
 
   mpi-smoke:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +76,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test,mpi,highs]"
       - name: Run MPI smoke tests
-        run: |
-          pytest \
-            tests/test_mpi_transport.py::test_internal_counters_pin_the_round_shape \
-            tests/test_mpi_transport.py::test_every_rank_matches_the_reference_battery \
-            tests/test_mpi_transport.py::test_nslack_bootstrap_distributed_matches_serial_bitwise \
-            -q
+        # Selection lives on the mpi_smoke marker, next to the tests.
+        run: pytest tests -m mpi_smoke -q
 
   package:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -58,16 +95,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Build artifacts
         run: |
           python -m pip install --upgrade pip build
           python -m build
       - name: Import built wheel
+        # Test deps come from the wheel's own extras, so this venv cannot
+        # drift from pyproject.
         run: |
           python -m venv /tmp/combrum-wheel
           /tmp/combrum-wheel/bin/python -m pip install --upgrade pip
-          /tmp/combrum-wheel/bin/python -m pip install pytest psutil scipy highspy tomli
-          /tmp/combrum-wheel/bin/python -m pip install dist/*.whl
+          /tmp/combrum-wheel/bin/python -m pip install "$(ls dist/*.whl)[test,highs]"
           /tmp/combrum-wheel/bin/python - <<'PY'
           import pathlib
           import combrum as cb

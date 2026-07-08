@@ -59,6 +59,16 @@ highs = ["highspy>=1.7"]
 gurobi = ["gurobipy>=10.0", "scipy>=1.10"]
 mpi = ["mpi4py>=4.0"]
 
+[tool.pytest.ini_options]
+# --strict-markers: a typo'd marker would otherwise silently drop a test out of
+# its CI tier instead of erroring.
+addopts = "--strict-markers"
+markers = [
+  "slow: repeated real solves, timing/RSS probes, or large synthetic sweeps",
+  "requires_mpi: shells out to mpirun (skipped unless mpirun is on PATH or COMBRUM_MPIRUN is set, and mpi4py is importable)",
+  "mpi_smoke: the requires_mpi subset CI runs on every push",
+]
+
 # Version is single-sourced from the package so releases can't drift from code.
 [tool.hatch.version]
 path = "src/combrum/_version.py"

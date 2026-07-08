@@ -32,8 +32,7 @@ def make_fit(
 
 
 def _percentile_linear(sorted_col: np.ndarray, tail: float) -> float:
-    # Independent plain-Python linear-interpolation percentile (numpy 'linear'
-    # method), so ci()'s level->tail mapping is checked against a distinct oracle.
+    # linear-interpolation percentile (numpy 'linear' method)
     n = len(sorted_col)
     pos = tail / 100.0 * (n - 1)
     lo_i = int(np.floor(pos))
@@ -42,7 +41,7 @@ def _percentile_linear(sorted_col: np.ndarray, tail: float) -> float:
     return float(sorted_col[lo_i] + frac * (sorted_col[hi_i] - sorted_col[lo_i]))
 
 
-def _ci_oracle(thetas: np.ndarray, level: float) -> tuple[np.ndarray, np.ndarray]:
+def _ci_by_hand(thetas: np.ndarray, level: float) -> tuple[np.ndarray, np.ndarray]:
     tail = 100.0 * (1.0 - level) / 2.0
     K = thetas.shape[1]
     lo = np.empty(K)
@@ -54,9 +53,8 @@ def _ci_oracle(thetas: np.ndarray, level: float) -> tuple[np.ndarray, np.ndarray
     return lo, hi
 
 
-def _cov_oracle(rows: np.ndarray) -> np.ndarray:
-    # Plain-Python ddof=1 covariance; structurally distinct from np.cov so a
-    # ddof/rowvar regression in cov() is caught by value.
+def _cov_by_hand(rows: np.ndarray) -> np.ndarray:
+    # ddof=1 covariance without np.cov
     B, K = rows.shape
     means = [sum(rows[b, k] for b in range(B)) / B for k in range(K)]
     cov = np.empty((K, K))
@@ -69,9 +67,8 @@ def _cov_oracle(rows: np.ndarray) -> np.ndarray:
     return cov
 
 
-def _se_oracle(rows: np.ndarray) -> np.ndarray:
-    # Plain-Python ddof=1 standard error, distinct from np.std(ddof=1), so an
-    # se() that summed over the wrong rows (or ddof) is caught by value.
+def _se_by_hand(rows: np.ndarray) -> np.ndarray:
+    # ddof=1 standard error without np.std
     B, K = rows.shape
     out = np.empty(K)
     for k in range(K):
@@ -115,11 +112,10 @@ def test_fit_result_validation() -> None:
         make_fit(empirical_moment=np.zeros(4))
     with pytest.raises(ValueError, match="n_active_cuts must be >= 0"):
         make_fit(n_active_cuts=-1)
-    # Zero is the inclusive lower boundary the message promises is legal: a
-    # `<= 0` guard would wrongly reject a fit that activated no cuts.
+    # A fit may legitimately activate no cuts; zero is legal.
     assert make_fit(n_active_cuts=0).n_active_cuts == 0
-    # Non-finite estimates must be rejected at construction; otherwise a NaN/inf
-    # theta_hat or moment is stored and contaminates every downstream summary.
+    # NaN/inf estimates are rejected at construction, before they can spread
+    # into downstream summaries.
     with pytest.raises(ValueError, match="theta_hat must be finite"):
         make_fit(theta=(np.nan, 2.0, 3.0))
     with pytest.raises(ValueError, match="empirical_moment must be finite"):
@@ -129,9 +125,8 @@ def test_fit_result_validation() -> None:
 def test_fit_result_to_dict_json_round_trip() -> None:
     fit = make_fit(slack=np.array([0.0, 0.5]), metadata={"seed": 7})
     doc = fit.to_dict()
-    # Contract: to_dict exposes exactly these JSON-ready fields and excludes the
-    # run_info/cuts/cut_duals provenance, so a leaked extra key (even a
-    # serializable one) is a regression.
+    # to_dict exposes exactly these JSON-ready fields; run_info/cuts/cut_duals
+    # provenance stays out.
     assert set(doc) == {
         "theta_hat",
         "objective",
@@ -155,8 +150,7 @@ def test_fit_result_to_dict_json_round_trip() -> None:
 def test_slack_summary_requires_slack() -> None:
     with pytest.raises(ValueError, match="requires the slack field"):
         make_fit().slack_summary()
-    # An empty slack vector is a distinct error from slack=None: without the
-    # guard, mean_slack is nan and max_slack raises a cryptic numpy message.
+    # Empty slack is a distinct error from slack=None (mean would be nan).
     with pytest.raises(ValueError, match="nonempty slack vector"):
         make_fit(slack=np.array([])).slack_summary()
 
@@ -171,12 +165,10 @@ def test_slack_summary_from_slack() -> None:
     assert summary["max_slack"] == 3.0
     assert summary["n_binding"] == 3
 
-    # n_binding counts *exactly* zero slack, not slack below a tolerance. Put one
-    # entry strictly inside (0, 1e-9): it is nonbinding, so n_binding stays 3,
-    # but a count_nonzero(slack < 1e-9) regression would report 4.
+    # n_binding counts exactly-zero slack, not slack below a tolerance: the
+    # 1e-12 entry is nonbinding, so n_binding stays 3.
     tiny = np.array([0.0, 0.0, 0.0, 1e-12, 1.0, 3.0])
     tiny_summary = make_fit(slack=tiny).slack_summary()
-    # Independent plain-Python oracle for the whole summary.
     vals = tiny.tolist()
     exp_total = 0.0
     for v in vals:
@@ -226,17 +218,14 @@ def test_fit_and_bootstrap_results_pickle_and_deepcopy_round_trip() -> None:
                 np.testing.assert_array_equal(
                     restored.empirical_moment, source.empirical_moment
                 )
-                # slack must survive the round trip (a __getstate__ that dropped
-                # it would leave restored.slack=None).
+                # slack must survive the round trip, not come back None.
                 assert restored.slack is not None
                 np.testing.assert_array_equal(restored.slack, source.slack)
                 assert restored.objective == source.objective
                 assert restored.runtime_seconds == source.runtime_seconds
                 assert restored.n_active_cuts == source.n_active_cuts
-                # The read-only invariant must survive the round trip: numpy
-                # drops the WRITEABLE flag through pickle/deepcopy, so
-                # __setstate__ re-freezes the arrays. Without it these come back
-                # mutable.
+                # numpy drops the WRITEABLE flag through pickle/deepcopy;
+                # __setstate__ has to re-freeze the arrays.
                 for arr in (
                     restored.theta_hat,
                     restored.empirical_moment,
@@ -246,12 +235,9 @@ def test_fit_and_bootstrap_results_pickle_and_deepcopy_round_trip() -> None:
             else:
                 np.testing.assert_array_equal(restored.thetas, source.thetas)
                 np.testing.assert_array_equal(restored.converged, source.converged)
-                # The read-only invariant must survive the round trip (see the
-                # FitResult branch): __setstate__ re-freezes the arrays.
+                # Same re-freeze requirement as the FitResult branch.
                 assert not restored.thetas.flags.writeable
                 assert not restored.converged.flags.writeable
-                # point_estimate provenance must survive; a payload that dropped
-                # it would restore point_estimate=None.
                 assert restored.point_estimate is not None
                 np.testing.assert_array_equal(
                     restored.point_estimate.theta_hat, source.point_estimate.theta_hat
@@ -266,8 +252,7 @@ def test_bootstrap_validation() -> None:
         make_boot(thetas=np.zeros((4, 2)))
     with pytest.raises(ValueError, match="B must be >= 1"):
         make_boot(thetas=np.zeros((0, 3)), converged=np.zeros(0, dtype=bool))
-    # One replication is the inclusive lower boundary: a `B < 2` guard would
-    # wrongly reject a single-replication bootstrap.
+    # A single-replication bootstrap is legal.
     single = make_boot(thetas=np.zeros((1, 3)), converged=np.array([True]))
     assert single.thetas.shape == (1, 3)
     assert single.converged.shape == (1,)
@@ -314,24 +299,22 @@ def test_bootstrap_ddof1_summaries_require_two_selected_replications() -> None:
 
 
 def test_bootstrap_exclusion_warning_semantics() -> None:
-    # Every default summary over a partially-converged result warns; the
+    # Default summaries over a partially-converged result warn; the
     # all-converged and include-all paths stay silent.
     partial = make_boot()
-    # Pin summaries against the selected rows, not just the warning.
     selected = partial.thetas[partial.converged]
     assert selected.shape == (3, 3)
     with pytest.warns(UserWarning, match="exclude 1 non-converged"):
-        np.testing.assert_allclose(partial.se(), _se_oracle(selected))
+        np.testing.assert_allclose(partial.se(), _se_by_hand(selected))
     with pytest.warns(UserWarning, match="exclude 1 non-converged"):
-        np.testing.assert_allclose(partial.cov(), _cov_oracle(selected))
+        np.testing.assert_allclose(partial.cov(), _cov_by_hand(selected))
     with pytest.warns(UserWarning, match="exclude 1 non-converged"):
         lo, hi = partial.ci(level=0.9)
-    exp_lo, exp_hi = _ci_oracle(selected, 0.9)
+    exp_lo, exp_hi = _ci_by_hand(selected, 0.9)
     np.testing.assert_allclose(lo, exp_lo)
     np.testing.assert_allclose(hi, exp_hi)
-    # The masked values must differ from the all-row summaries; otherwise the
-    # oracle above would not distinguish selection from no selection.
-    assert not np.allclose(partial.se(only_converged=False), _se_oracle(selected))
+    # Selection has to matter on this fixture: all-row se differs.
+    assert not np.allclose(partial.se(only_converged=False), _se_by_hand(selected))
 
     all_ok = make_boot(converged=np.ones(4, dtype=bool))
     with warnings.catch_warnings():
@@ -347,13 +330,12 @@ def test_bootstrap_summary_shapes() -> None:
     assert boot.se().shape == (3,)
     np.testing.assert_allclose(boot.se(), selected.std(axis=0, ddof=1))
     assert boot.cov().shape == (3, 3)
-    np.testing.assert_allclose(boot.cov(), _cov_oracle(boot.thetas))
+    np.testing.assert_allclose(boot.cov(), _cov_by_hand(boot.thetas))
     lo, hi = boot.ci(level=0.9)
     assert lo.shape == (3,) and hi.shape == (3,)
     assert np.all(lo <= hi)
-    # ci() must honour level: the band matches the 5/95 percentiles for 0.9 and
-    # differs from the 25/75 band for 0.5, so a level-ignoring tail fails.
-    exp_lo, exp_hi = _ci_oracle(boot.thetas, 0.9)
+    # level=0.9 is the 5/95 percentile band, distinct from the 25/75 band.
+    exp_lo, exp_hi = _ci_by_hand(boot.thetas, 0.9)
     np.testing.assert_allclose(lo, exp_lo)
     np.testing.assert_allclose(hi, exp_hi)
     assert not np.allclose(lo, boot.ci(level=0.5)[0])
@@ -383,22 +365,20 @@ def test_bootstrap_named_summaries() -> None:
 
 
 def test_named_summaries_forward_only_converged() -> None:
-    # The named methods must forward only_converged through the block split, not
-    # silently default to converged-only. Use the partially-converged default
-    # fixture (the [9, 9, 9] outlier row is non-converged) so the all-row and
-    # converged-only summaries are far apart, and pin the full named dict against
-    # the independent oracle over *every* row.
+    # The named methods forward only_converged through the block split. The
+    # default fixture's non-converged [9, 9, 9] outlier keeps the all-row and
+    # converged-only summaries far apart.
     partial = make_boot()
     all_rows = partial.thetas
     assert all_rows.shape == (4, 3)
 
-    se_all = _se_oracle(all_rows)
+    se_all = _se_by_hand(all_rows)
     se_named_all = partial.se_named(only_converged=False)
     assert set(se_named_all) == {"beta", "gamma"}
     np.testing.assert_allclose(se_named_all["beta"], se_all[:2])
     np.testing.assert_allclose(se_named_all["gamma"], se_all[2:])
 
-    lo_all, hi_all = _ci_oracle(all_rows, 0.9)
+    lo_all, hi_all = _ci_by_hand(all_rows, 0.9)
     ci_named_all = partial.ci_named(level=0.9, only_converged=False)
     assert set(ci_named_all) == {"beta", "gamma"}
     lo_beta, hi_beta = ci_named_all["beta"]
@@ -408,8 +388,7 @@ def test_named_summaries_forward_only_converged() -> None:
     np.testing.assert_allclose(lo_gamma, lo_all[2:])
     np.testing.assert_allclose(hi_gamma, hi_all[2:])
 
-    # The converged-only named summaries must genuinely differ, so the oracle
-    # above distinguishes forwarded selection from a hardcoded only_converged.
+    # And the converged-only summaries differ, so forwarding is observable.
     with pytest.warns(UserWarning, match="exclude 1 non-converged"):
         se_named_conv = partial.se_named()
     assert not np.allclose(se_named_conv["beta"], se_all[:2])
@@ -453,21 +432,17 @@ def test_concat_merges_replications() -> None:
     assert merged.point_estimate.metadata == {"shard": "first"}
     assert merged.u_samples is not None
     assert merged.u_samples.shape == (5, 5)
-    # The u_samples payload must stay row-aligned with thetas/converged/duals:
-    # the first shard's all-zero rows lead, the second shard's all-one rows
-    # follow. A reversed/misaligned concat keeps shape (5, 5) but fails here.
+    # u_samples stays row-aligned with thetas/converged/duals: first shard's
+    # all-zero rows lead, second shard's all-one rows follow.
     np.testing.assert_array_equal(merged.u_samples[:2], first.u_samples)
     np.testing.assert_array_equal(merged.u_samples[2:], second.u_samples)
     assert merged.duals == ("d0", "d1", "d2", "d3", "d4")
 
 
 def test_concat_aggregates_certification_metadata() -> None:
-    # Two distinct nonzero finite worst gaps: merged worst_gap must be the max
-    # (7.0), not the sum (10.0), mean (5.0), or a single shard's value.
-    #
-    # Each shard also carries non-certification metadata so concat's generic
-    # merge loop is exercised: a shard-local key must survive, and a shared key
-    # ("tag") must resolve to the *later* shard's value.
+    # Merged worst_gap is the max (7.0), not the sum (10.0) or mean (5.0).
+    # The extra metadata exercises concat's generic merge: shard-local keys
+    # survive, and the shared "tag" resolves to the later shard's value.
     low_cert = {
         "n_priced": 4,
         "n_inexact": 1,
@@ -493,8 +468,7 @@ def test_concat_aggregates_certification_metadata() -> None:
         "worst_gap": 7.0,
         "worst_gap_unknown": False,
     }
-    # Full-metadata oracle for each shard order: aggregated certification plus
-    # both shard-local keys, with the later shard's "tag" winning the collision.
+    # Expected full metadata for each shard order.
     expected_by_order = {
         (id(low_gap), id(high_gap)): {
             "seed": 1,

@@ -252,8 +252,6 @@ def test_root_table_formatter_renders_nonconverged_rowgen_final() -> None:
 
 
 def test_root_table_formatter_renders_nonconverged_bootstrap_rep() -> None:
-    # The per-rep table's "conv" column must read "no" for a rep that failed to
-    # converge, with the expected column alignment.
     stream = io.StringIO()
     formatter = RootTableFormatter(stream=stream)
 
@@ -273,9 +271,6 @@ def test_root_table_formatter_renders_nonconverged_bootstrap_rep() -> None:
     )
 
     lines = stream.getvalue().splitlines()
-    # Header + value row hand-derived from _MIN_COLUMN_WIDTHS, _fmt_sci and
-    # _fmt_time; the conv cell is the only difference from the converged=True
-    # row in the header/final-rows test above.
     assert lines[0] == (
         "[boot] rep  slot      state  conv  iters         gap   cuts"
         "         obj     wall"
@@ -292,17 +287,14 @@ def test_root_table_formatter_renders_nonconverged_bootstrap_rep() -> None:
         # n_requested missing -> would print "397/None" without the guard.
         (None, 397, "converged=397/None"),
         # n_converged missing -> would print "None/400" without the guard.
-        # This crosses the other half of the AND, so a guard that only checks
-        # n_requested (dropping the n_converged conjunct) is caught here.
         (400, None, "converged=None/400"),
     ],
 )
 def test_root_table_formatter_bootstrap_converged_pair_is_all_or_nothing(
     n_requested: int | None, n_converged: int | None, stray_fragment: str
 ) -> None:
-    # The "converged=X/Y" fragment requires BOTH counts. With either count
-    # missing the fragment must be omitted entirely, never printed with a
-    # "None" side.
+    # With either count missing the "converged=X/Y" fragment is omitted
+    # entirely, never printed with a "None" side.
     stream = io.StringIO()
     formatter = RootTableFormatter(stream=stream)
 
@@ -324,9 +316,7 @@ def test_root_table_formatter_bootstrap_converged_pair_is_all_or_nothing(
     # Leading space avoids a false match on the "nonconverged=" token.
     assert " converged=" not in line
     assert stray_fragment not in line
-    # Full-line oracle hand-derived from _named_values + _fmt_time(19440.0):
-    # with the fragment dropped, the tail is identical regardless of which
-    # count is missing, so both parametrizations pin the same expected string.
+    # With the fragment dropped the line is identical for both parametrizations.
     assert line == (
         "[boot] done persisted=40 computed=360 nonconverged=3 "
         "super_steps=73 wall=19440.00s stored=397"
@@ -373,19 +363,13 @@ def test_safe_activity_sink_disables_only_failing_children() -> None:
     assert len(good.events) == 2
     assert safe.failed
 
-    # Two distinct sinks fail on the first emit, so both failures are recorded.
-    # Bodies hand-derived from the BadSink/RuntimeError and
-    # SecondBadSink/ValueError fixtures.
     assert safe.failures == (
         "BadSink: RuntimeError: boom",
         "SecondBadSink: ValueError: kaboom",
     )
 
-    # Only the first failure's message is printed; the warn-once guard suppresses
-    # the warning line (message included) on every later failure. So the header
-    # appears exactly once and only the first sink's message is on the stream.
-    # Without the guard, two failures would print two header lines and both
-    # messages.
+    # The warn-once guard prints only the first failure's warning; later
+    # failures are silent.
     assert warn.getvalue().count("disabled failing sink") == 1
     assert "BadSink: RuntimeError: boom" in warn.getvalue()
     assert "SecondBadSink: ValueError: kaboom" not in warn.getvalue()

@@ -1,17 +1,14 @@
-"""Gate: the opt-in run-metadata side-channel costs the default path nothing.
+"""The opt-in run-metadata side-channel costs the default path nothing.
 
-``estimate`` takes a ``level: RunInfoLevel`` and attaches a
-``RunMetadata`` to ``run_info``. Two invariants hold at every level:
+``estimate`` takes a ``level: RunInfoLevel`` and attaches ``RunMetadata`` to
+``run_info``. Two invariants hold at every level:
 
-* **No collective delta.** Metadata is built from already-computed data plus
-  cached rank-local reads (rank/size/node, provenance, a rank-0 getrusage), so
-  OFF/DEFAULT/META issue identical collectives; FULL adds exactly one
-  ``batched_max``. Asserted through the comm-probe's per-kind counts.
-* **No pinned byte moves.** The parity-pinned fields (theta_hat, objective,
-  empirical_moment, n_active_cuts, slack, metadata) are byte-identical across
-  OFF/DEFAULT/META/FULL, and ``run_info`` is never a ``to_dict`` key — it rides
-  alongside the result, not inside the captured bytes. FULL is pinned too, so
-  the guard stays permanent.
+* Metadata is built from already-computed data plus cached rank-local reads,
+  so OFF/DEFAULT/META issue identical collectives; FULL adds exactly one
+  ``batched_max``.
+* The ``_PINNED`` result fields are byte-identical across levels, and
+  ``run_info`` is never a ``to_dict`` key — it rides alongside the result,
+  not inside the serialised surface.
 
 Tiers stack: DEFAULT fills diagnostics/certification/runtime + layout; META
 adds provenance + rank-0 peak RSS; FULL adds the cross-rank peaks.
@@ -22,12 +19,8 @@ Deterministic serial runs; HiGHS.
 from __future__ import annotations
 
 import importlib
-import os
 import platform
-import subprocess
 import sys
-import textwrap
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -38,22 +31,14 @@ from combrum.engine.certify import certification_metadata
 from combrum.formulations import NSlack
 from _support.constants import MAX_ITERATIONS, THETA_BOUND, TOLERANCE
 from _support.commprobe import CountingTransport
-from _support.families import load_family
+from _support.families import FAMILY_DIR, load_family
 from combrum.masters import highs as highs_backend
 from combrum.model import Data, Model
 from combrum.parameters import Parameters
 import combrum.runinfo as runinfo
-from combrum.runinfo import (
-    Provenance,
-    RunInfoLevel,
-    RunMetadata,
-    normalize_maxrss,
-)
+from combrum.runinfo import Provenance, RunInfoLevel, RunMetadata
 from combrum.transport import LocalCluster, SerialTransport
 from combrum.transport.base import NodeTopology, Transport
-
-TESTS = Path(__file__).resolve().parent
-FAMILY_DIR = TESTS / "fixtures" / "families"
 
 needs_highs = pytest.mark.skipif(
     not highs_backend.available(), reason="highspy missing or broken"
@@ -61,18 +46,14 @@ needs_highs = pytest.mark.skipif(
 
 _PROBLEMS = {"toy": toy_problem, "qkp": qkp_problem}
 
-# The pinned parity surface: everything a parity gate captures off the result.
-# runtime_seconds is the wall clock — performance, not a parity pin — so it
-# jitters run-to-run and is excluded from the byte-identical comparison.
+# Result fields that must be byte-identical across run-info levels.
+# runtime_seconds is wall clock and jitters run-to-run, so it is excluded.
 _PINNED = ("theta_hat", "objective", "empirical_moment", "n_active_cuts", "slack", "metadata")
 
 
 def test_provenance_positional_constructor_keeps_old_optional_order() -> None:
-    # Distinguishable sentinel per slot so any reorder of the positional fields
-    # binds a value to the wrong attribute and fails. Pinning all eight slots
-    # (not just the optional tail) makes the whole positional order the oracle:
-    # a head swap (python_version/numpy_version/platform) or a
-    # platform<->solver_backend swap diverges here.
+    # One distinguishable sentinel per positional slot: any reorder binds a
+    # value to the wrong attribute.
     provenance = Provenance(
         "py",
         "np",
@@ -170,9 +151,9 @@ def _assert_same_collectives(baseline: RunInfoLevel, candidate: RunInfoLevel) ->
 def test_off_vs_default_zero_collective_delta() -> None:
     """A DEFAULT run issues exactly the collectives an OFF run does.
 
-    Tier-0 metadata reads rank/size/node (cached rank-local properties the
-    comm-probe does not count) + already-computed diagnostics/certification, so
-    surfacing it adds no collective. The per-kind counts must match exactly.
+    Tier-0 metadata comes from cached rank-local properties plus
+    already-computed diagnostics/certification, so surfacing it adds no
+    collective.
     """
     _assert_same_collectives(RunInfoLevel.OFF, RunInfoLevel.DEFAULT)
 
@@ -180,7 +161,7 @@ def test_off_vs_default_zero_collective_delta() -> None:
 @needs_highs
 @pytest.mark.parametrize("family", ["toy", "qkp"])
 def test_off_vs_default_pinned_bytes_identical(family: str) -> None:
-    """Every parity-pinned field is byte-identical; run_info never in to_dict."""
+    """Every _PINNED field is byte-identical OFF vs DEFAULT; run_info stays out of to_dict."""
     off = _estimate(family, SerialTransport(), level=RunInfoLevel.OFF)
     default = _estimate(family, SerialTransport(), level=RunInfoLevel.DEFAULT)
 
@@ -191,10 +172,8 @@ def test_off_vs_default_pinned_bytes_identical(family: str) -> None:
     assert "run_info" not in off_d and "run_info" not in default_d, (
         "run_info leaked into the result's plain rendering (the parity surface)"
     )
-    # Pin the exact metadata key set, not just the absence of "run_info": the
-    # dict is a closed 3-key literal, so `"run_info" not in metadata` is always
-    # true no matter how the run-info wiring breaks. The exact set catches any
-    # stray key — run_info or otherwise — entering the pinned parity metadata.
+    # The metadata dict is a closed 3-key literal; comparing the exact key set
+    # notices any stray key, run_info or otherwise.
     assert set(default_d["metadata"]) == {"certification", "converged", "iterations"}, (
         "the pinned metadata gained/lost a key — parity surface moved"
     )
@@ -213,12 +192,8 @@ def test_default_surfaces_tier0_only() -> None:
     ri = fit.run_info
     assert ri.level == RunInfoLevel.DEFAULT
     assert ri.rank == 0 and ri.size == 1
-    # Pin the whole node layout, not just its type. isinstance is redundant with
-    # RunMetadata.__post_init__ (it already rejects a non-NodeTopology), so it
-    # cannot catch a fabricated-but-valid topology. Hand-construct the serial
-    # layout from the topology contract (rank 0 of 1, one node) as an oracle that
-    # never routes through transport.node: a wrong node_id/node_rank/node_size/
-    # n_nodes diverges here. Also equals the independent SerialTransport().node.
+    # Serial layout is rank 0 of 1 on a single node; compare against a
+    # hand-built topology and against SerialTransport().node.
     assert isinstance(ri.node, NodeTopology)
     assert ri.node == NodeTopology(node_id=0, node_rank=0, node_size=1, n_nodes=1)
     assert (ri.node.node_id, ri.node.node_rank, ri.node.node_size, ri.node.n_nodes) == (
@@ -228,23 +203,15 @@ def test_default_surfaces_tier0_only() -> None:
         1,
     )
     assert ri.node == SerialTransport().node
-    # estimate.py bcasts one runtime_seconds and wires it into BOTH
-    # FitResult.runtime_seconds and RunMetadata.runtime_seconds, so they are the
-    # same value bit for bit. fit.runtime_seconds is the independent oracle: it
-    # is set from the real run outside the run_info wiring, so pointing run_info's
-    # runtime at a wrong constant (0.0) or scaling it diverges here, where the
-    # bare `>= 0.0` never noticed.
+    # estimate.py bcasts one runtime_seconds into both FitResult and
+    # RunMetadata, so the two are the same value bit for bit.
     assert ri.runtime_seconds == fit.runtime_seconds
     assert ri.runtime_seconds >= 0.0
     assert ri.diagnostics is not None
     assert ri.diagnostics.iterations >= 1
     assert ri.certification is not None
-    # The surfaced Tier-0 objects must describe this run. metadata is built
-    # independently from the real outcome
-    # (estimate.py: metadata["iterations"] = int(outcome.diagnostics.iterations),
-    # metadata["certification"] = certification_metadata(certification)), so it
-    # is the distinct oracle: swapping a fabricated diagnostics/certification
-    # into RunMetadata leaves metadata pointed at the real run and diverges here.
+    # The surfaced Tier-0 objects must describe this run: fit.metadata is
+    # filled from the real outcome by a separate path in estimate.py.
     assert ri.diagnostics.iterations == fit.metadata["iterations"]
     assert ri.diagnostics.converged == fit.metadata["converged"]
     assert certification_metadata(ri.certification) == fit.metadata["certification"]
@@ -253,18 +220,11 @@ def test_default_surfaces_tier0_only() -> None:
     assert ri.peak_rss_bytes is None
 
 
-@needs_highs
-def test_off_attaches_nothing() -> None:
-    """level=OFF leaves run_info None (the explicit no-metadata path)."""
-    fit = _estimate("qkp", SerialTransport(), level=RunInfoLevel.OFF)
-    assert fit.run_info is None
-
-
 # --- Tier 1 (META) -----------------------------------------------------------
 
 
-def _mpi_lib_oracle() -> str | None:
-    """The MPI library banner, read straight from mpi4py (not collect_provenance)."""
+def _expected_mpi_lib() -> str | None:
+    """MPI library banner, read straight from mpi4py."""
     try:
         from mpi4py import MPI
     except ImportError:
@@ -272,8 +232,8 @@ def _mpi_lib_oracle() -> str | None:
     return MPI.Get_library_version()
 
 
-def _gurobi_version_oracle() -> str | None:
-    """Dotted gurobi version, composed independently from the raw tuple."""
+def _expected_gurobi_version() -> str | None:
+    """Dotted gurobi version, composed from the raw tuple."""
     try:
         import gurobipy as grb
     except Exception:
@@ -281,13 +241,10 @@ def _gurobi_version_oracle() -> str | None:
     return ".".join(str(x) for x in grb.gurobi.version())
 
 
-def _blas_oracle() -> str | None:
-    """BLAS name/version, recomposed from numpy's config by the documented rule.
-
-    Distinct from collect_provenance: this reads np.show_config directly and
-    applies the contract ("name/version when both present and version is known,
-    else name-or-None") so a swap or separator change inside collect_provenance
-    diverges from this value.
+def _expected_blas() -> str | None:
+    """BLAS field recomputed from np.show_config by the documented rule:
+    name/version when both are present and the version is known, else the
+    bare name or None.
     """
     try:
         cfg = np.show_config(mode="dicts")
@@ -308,27 +265,21 @@ def test_meta_populates_provenance_and_peak_rss() -> None:
     ri = fit.run_info
     assert ri.level == RunInfoLevel.META
     assert isinstance(ri.provenance, Provenance)
-    # The three "always populated" fields must carry the right content, not just
-    # be non-empty: a swapped assignment (python_version=np.__version__, etc.)
-    # keeps all three truthy but wrong. Oracles come from stdlib/numpy directly.
+    # Content, not just non-emptiness: compare against stdlib/numpy directly.
     assert ri.provenance.python_version == platform.python_version()
     assert ri.provenance.numpy_version == np.__version__
     assert ri.provenance.platform == platform.platform()
     assert ri.provenance.solver_backend == "highs"
     assert ri.provenance.resolved_backend == "highs"
     assert isinstance(ri.peak_rss_bytes, int) and ri.peak_rss_bytes > 0
-    # Optional provenance fields: pin the exact composed value against an
-    # independently-derived oracle (raw library reads) where the library is
-    # present, else None. isinstance alone let a derivation regression inside
-    # collect_provenance slip through (a ',' gurobi join, a swapped blas
-    # name/version) while the field stayed a non-None str. The oracles below
-    # never route through collect_provenance. Guarded with `is None or` so the
-    # test stays portable to hosts missing any of these libraries.
-    assert ri.provenance.mpi_lib is None or ri.provenance.mpi_lib == _mpi_lib_oracle()
-    assert ri.provenance.blas is None or ri.provenance.blas == _blas_oracle()
+    # Optional fields must match a recomputation from raw library reads when
+    # the library is present; `is None or` keeps this portable to hosts
+    # missing any of them.
+    assert ri.provenance.mpi_lib is None or ri.provenance.mpi_lib == _expected_mpi_lib()
+    assert ri.provenance.blas is None or ri.provenance.blas == _expected_blas()
     assert (
         ri.provenance.gurobi_version is None
-        or ri.provenance.gurobi_version == _gurobi_version_oracle()
+        or ri.provenance.gurobi_version == _expected_gurobi_version()
     )
 
 
@@ -355,13 +306,11 @@ def test_meta_records_requested_and_resolved_backend(monkeypatch) -> None:
 def _install_provenance_fakes(
     monkeypatch, *, mpi_ver, gurobi_tuple, blas_name, blas_version
 ) -> None:
-    """Fake the three probed libraries so collect_provenance's composition is
-    exercised on known inputs, host-independent.
+    """Fake the three probed libraries so collect_provenance sees known inputs.
 
     collect_provenance imports mpi4py/gurobipy lazily and calls np.show_config,
-    so replacing sys.modules entries and runinfo.np.show_config feeds it exact
-    values without touching whatever is really installed. monkeypatch restores
-    everything on teardown.
+    so sys.modules entries and runinfo.np.show_config are enough to feed it
+    exact values regardless of what is really installed.
     """
     import types
 
@@ -384,15 +333,11 @@ def _install_provenance_fakes(
 
 
 def test_collect_provenance_composes_optional_fields_exactly(monkeypatch) -> None:
-    """collect_provenance pins the EXACT composed strings for the optional fields.
+    """The exact composed strings for the optional provenance fields.
 
-    Feeds known library readings through fakes and checks the whole composed
-    output against hand-derived expected values (dotted gurobi version, BLAS
-    name/version joined by '/', MPI banner passed through verbatim). This is the
-    only place collect_provenance's derivation is exercised, and pinning the
-    exact strings kills the composition class wholesale: a ',' gurobi join, a
-    swapped blas name/version, a wrong separator, or a mangled MPI read all
-    diverge from these oracles. The always-populated head is pinned too.
+    Dotted gurobi version, BLAS name/version joined by '/', MPI banner passed
+    through verbatim — checked against hand-derived values on faked library
+    readings.
     """
     _install_provenance_fakes(
         monkeypatch,
@@ -403,7 +348,6 @@ def test_collect_provenance_composes_optional_fields_exactly(monkeypatch) -> Non
     )
     prov = runinfo.collect_provenance("auto", resolved_backend="highs")
 
-    # Hand-derived expected, never read off collect_provenance:
     assert prov.mpi_lib == "Open MPI v9.9.9, faked banner"
     assert prov.gurobi_version == "11.2.3"  # ".".join(map(str, (11, 2, 3)))
     assert prov.blas == "openblas/0.3.21"   # name/version, both present & known
@@ -458,23 +402,10 @@ def test_collect_provenance_none_when_libraries_absent(monkeypatch) -> None:
 
 @needs_highs
 def test_meta_adds_zero_collectives_vs_default() -> None:
-    """META's extra reads (provenance + one getrusage) add NO collective.
-
-    The Tier-1 reads are rank-local — interpreter/library versions + a single
-    getrusage on rank 0 — so a META run issues exactly DEFAULT's collectives.
+    """Tier-1 reads are rank-local (interpreter/library versions plus a single
+    getrusage on rank 0), so a META run issues exactly DEFAULT's collectives.
     """
     _assert_same_collectives(RunInfoLevel.DEFAULT, RunInfoLevel.META)
-
-
-@needs_highs
-def test_meta_keeps_pinned_bytes_identical() -> None:
-    """META still never touches the parity surface (run_info out of to_dict)."""
-    default = _estimate("qkp", SerialTransport(), level=RunInfoLevel.DEFAULT)
-    meta = _estimate("qkp", SerialTransport(), level=RunInfoLevel.META)
-    assert "run_info" not in meta.to_dict()
-    d_d, m_d = default.to_dict(), meta.to_dict()
-    for key in _PINNED:
-        assert d_d[key] == m_d[key], f"META perturbed pinned field {key!r}"
 
 
 # --- Capture metadata --------------------------------------------------------
@@ -489,11 +420,11 @@ _CAPTURE_METADATA_KEYS = (
 
 @needs_highs
 def test_run_info_quarantined_from_captured_bytes() -> None:
-    """A META run captures byte-identical to an OFF run.
+    """A META run serialises byte-identical to an OFF run.
 
     Every field the capture _doc/manifest consume — objective, theta_hat,
-    empirical_moment, and the pinned metadata subset — matches, and run_info
-    is not a key in the serialised surface, so the capture is blind to it.
+    empirical_moment, the metadata subset — matches, and run_info is not a
+    key in the serialised surface.
     """
     off = _estimate("qkp", SerialTransport(), level=RunInfoLevel.OFF)
     meta = _estimate("qkp", SerialTransport(), level=RunInfoLevel.META)
@@ -507,9 +438,7 @@ def test_run_info_quarantined_from_captured_bytes() -> None:
         assert off.metadata[key] == meta.metadata[key], (
             f"run_info moved metadata[{key!r}] the capture _doc/manifest reads"
         )
-    # The capture reads a fixed metadata key set; pin it exactly rather than the
-    # always-true `"run_info" not in meta.metadata` (the dict is a closed literal
-    # that no run-info code writes into). This catches any stray metadata key.
+    # The metadata key set is closed; compare it exactly so any stray key shows.
     assert set(meta.metadata) == set(_CAPTURE_METADATA_KEYS)
 
 
@@ -520,12 +449,9 @@ def test_run_info_quarantined_from_captured_bytes() -> None:
     ids=["DEFAULT", "META", "FULL"],
 )
 def test_pins_identical_to_off_at_every_level(level: RunInfoLevel) -> None:
-    """Parity bytes are byte-identical to OFF at every level, FULL included.
-
-    Pinning FULL (not just OFF/DEFAULT/META) makes the guard permanent: future
-    work that lights up at FULL fails the instant it moves a captured byte.
-    Every pinned to_dict field and every capture-read metadata field must match
-    the OFF baseline, and run_info must stay out of the serialised surface.
+    """Every level, FULL included, matches the OFF baseline byte for byte on
+    the ``_PINNED`` to_dict fields and the capture-read metadata, with
+    run_info out of the serialised surface.
     """
     off = _estimate("qkp", SerialTransport(), level=RunInfoLevel.OFF)
     fit = _estimate("qkp", SerialTransport(), level=level)
@@ -551,28 +477,17 @@ def test_full_populates_tier2_cross_rank_peaks() -> None:
     ri = fit.run_info
     assert ri.level == RunInfoLevel.FULL
     assert isinstance(ri.wall_max_seconds, float)
-    # On a serial transport batched_max over [local_wall, rss] is the identity,
-    # so peaks[0] is exactly the local wall — the same value bcast into
-    # runtime_seconds. wall_max_seconds must therefore equal runtime_seconds bit
-    # for bit; a bug that reduced the wrong element into it (e.g. RSS-as-seconds)
-    # would break this while still passing a loose >= 0.0 check.
+    # On a serial transport batched_max is the identity, so wall_max_seconds
+    # is exactly the local wall bcast into runtime_seconds — equal bit for bit.
     assert ri.wall_max_seconds == ri.runtime_seconds
-    # RSS is read twice: batched_max reads peak_rss_bytes() at reduce time
-    # (estimate.py:199), then rank 0 reads it again for peak_rss_bytes
-    # (estimate.py:221). ru_maxrss is a monotone non-decreasing high-water mark
-    # and the reduce read happens first, so rss_max_bytes <= peak_rss_bytes is an
-    # invariant independent of the FULL-tier reduce arithmetic. A scaling/unit
-    # bug in that reduce (2x inflation, kib-vs-byte drift, +constant) breaks the
-    # ordering while still passing a bare positive-int shape check.
+    # RSS is read twice: once at reduce time, then again on rank 0. ru_maxrss
+    # is a monotone high-water mark and the reduce read happens first, so
+    # rss_max_bytes <= peak_rss_bytes regardless of the reduce arithmetic.
     assert isinstance(ri.rss_max_bytes, int) and ri.rss_max_bytes > 0
     assert ri.rss_max_bytes <= ri.peak_rss_bytes
-    # The upper bound alone catches upward mis-scale but is blind to a downward
-    # one (bytes reported as kibibytes, ~1024x too small, e.g. `// 1024`). Both
-    # values come from the same monotone ru_maxrss high-water mark: the reduce
-    # read (estimate.py:199) then the rank-0 read (estimate.py:221). Real growth
-    # between them is bounded, so a floor at half the later read brackets
-    # rss_max_bytes to the correct magnitude and kills the whole scaling class
-    # (1024x down, 1024x up, +constant, 2x) that a bare positive-int check misses.
+    # And a floor at half the later read: real RSS growth between the two reads
+    # is small, so this brackets rss_max_bytes to the right magnitude and rules
+    # out a kibibyte-vs-byte mis-scale in either direction.
     assert ri.rss_max_bytes >= ri.peak_rss_bytes // 2
     # Each level adds to the prior: Tier-0/1 are still present at FULL.
     assert ri.provenance is not None and ri.peak_rss_bytes is not None
@@ -593,9 +508,8 @@ def test_below_full_leaves_tier2_none(level: RunInfoLevel) -> None:
 def test_full_adds_exactly_one_max_collective_vs_meta() -> None:
     """FULL adds exactly one collective over META: the end-of-fit batched_max.
 
-    Tier 2 reduces ``[wall, rss]`` in one vector max-collective (batched_max,
-    since scalar allreduce_max cannot reduce both at once). FULL's comm profile
-    is META's plus that one batched_max — no new primitive, no per-iteration cost.
+    Tier 2 reduces ``[wall, rss]`` in a single vector max-collective — no new
+    primitive, no per-iteration cost.
     """
     meta = CountingTransport(SerialTransport())
     full = CountingTransport(SerialTransport())
@@ -621,92 +535,15 @@ def test_full_adds_exactly_one_max_collective_vs_meta() -> None:
 def test_dense_estimate_rejects_multirank_transport_at_every_level(
     size: int, level: RunInfoLevel
 ) -> None:
-    """The dense estimator refuses a non-serial transport regardless of level.
+    """The dense estimator refuses a non-serial transport at every level.
 
-    ``estimate`` guards ``reject_multirank_dense_transport`` at the very top,
-    before it inspects ``level`` or reaches any run_info / batched_max code. The
-    rejection is therefore level-agnostic: OFF through FULL all raise on a
-    multirank transport, and none of them ever construct a RunMetadata or run the
-    Tier-2 collective. Parametrizing over level documents that the guard, not the
-    metadata path, is what fires — and pins that no level slips past it.
+    ``estimate`` guards ``reject_multirank_dense_transport`` before it inspects
+    ``level``, so OFF through FULL all raise without constructing RunMetadata
+    or reaching the Tier-2 collective.
     """
     with pytest.raises(ValueError, match="does not support non-serial"):
         LocalCluster(size).run(lambda t: _estimate("qkp", t, level=level))
 
 
-# --- Direct unit tests for the RSS unit logic --------------------------------
-#
-# The estimate-path tests above only pin peak_rss_bytes as a positive int, which
-# cannot catch a wrong unit convention (darwin and linux disagree by 1024x).
-# normalize_maxrss is the sole place that conversion lives, so it gets tested
-# directly by faking the platform. Expected values are hand-derived from the
-# kibibyte convention (1 KiB = 1024 bytes), never read off combrum output.
-
-
-@pytest.mark.parametrize(
-    "fake_platform, raw, expected",
-    [
-        ("darwin", 1000, 1000),          # darwin ru_maxrss is already bytes
-        ("linux", 1000, 1000 * 1024),    # linux ru_maxrss is kibibytes -> ×1024
-        ("linux2", 7, 7 * 1024),         # startswith("linux") also converts
-    ],
-)
-def test_normalize_maxrss_unit_convention(
-    monkeypatch, fake_platform, raw, expected
-) -> None:
-    monkeypatch.setattr(runinfo.sys, "platform", fake_platform)
-    assert normalize_maxrss(raw) == expected
-
-
-@pytest.mark.parametrize("fake_platform", ["win32", "cygwin", "freebsd12"])
-def test_normalize_maxrss_rejects_unknown_platform(monkeypatch, fake_platform) -> None:
-    """An unrecognised platform must raise rather than silently mis-scale."""
-    monkeypatch.setattr(runinfo.sys, "platform", fake_platform)
-    with pytest.raises(RuntimeError, match="unit convention unknown"):
-        normalize_maxrss(1000)
-
-
-def test_peak_rss_bytes_rises_after_large_allocation(tmp_path: Path) -> None:
-    """peak_rss_bytes must report a real, unit-correct peak in bytes.
-
-    Checked in a FRESH subprocess so the reading is independent of whatever the
-    parent pytest process already pushed the per-process high-water mark to. The
-    child faults in a large buffer page by page, then requires the reported peak
-    to be at least the buffer size. Anchoring to the buffer -- not to a rise over
-    the pre-allocation reading -- is robust to the interpreter's own import
-    footprint (on Linux importing numpy alone can peak ru_maxrss above a small
-    allocation, so a rise-based check is flaky). A kibibyte mis-scale (~1024x too
-    small), a zeroed reading, and a stale pre-allocation reading all land below
-    the buffer size and fail.
-    """
-    src = Path(__file__).resolve().parents[1] / "src"
-    probe = textwrap.dedent(
-        """
-        import resource
-        from combrum.runinfo import peak_rss_bytes, normalize_maxrss
-
-        before = normalize_maxrss(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        n_bytes = 256 * 1024 * 1024
-        buf = bytearray(n_bytes)
-        for i in range(0, n_bytes, 4096):
-            buf[i] = 1
-        reported = peak_rss_bytes()
-        # The peak must be at least the buffer we faulted in. Anchoring to the
-        # buffer size catches all three failure modes at once and does not depend
-        # on beating the import-time high-water mark: a zeroed reading (0), a
-        # kibibyte mis-scale (~1024x too small), and a stale pre-allocation
-        # reading all fall below n_bytes.
-        assert reported >= n_bytes, (before, reported, n_bytes)
-        print("OK")
-        """
-    )
-    env = dict(os.environ, PYTHONPATH=str(src))
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        cwd=tmp_path,
-        env=env,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().endswith("OK")
+# RSS unit conventions (normalize_maxrss / peak_rss_bytes) are covered in
+# tests/test_probes.py.

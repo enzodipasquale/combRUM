@@ -23,6 +23,25 @@ class _Oracle(Oracle):
     pass
 
 
+def _fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
+    raise AssertionError("estimate_distributed must not call build_fit_context")
+
+
+def _converged_outcome(K: int) -> LoopOutcome:
+    return LoopOutcome(
+        result=FormulationResult(
+            theta_hat=np.zeros(K, dtype=np.float64),
+            objective=0.0,
+            n_active_cuts=0,
+        ),
+        diagnostics=LoopDiagnostics(
+            converged=True,
+            iterations=0,
+            cuts_admitted=0,
+        ),
+    )
+
+
 class _ObservedSurface:
     def setup_observed(self, transport, observation_ids: np.ndarray) -> None:
         self.setup_ids = tuple(map(int, observation_ids))
@@ -44,29 +63,15 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
     surface = _ObservedSurface()
     seen = {}
 
-    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("estimate_distributed must not call build_fit_context")
-
     def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
         seen["ctx"] = ctx
         seen["config"] = config
-        return LoopOutcome(
-            result=FormulationResult(
-                theta_hat=np.zeros(ctx.K, dtype=np.float64),
-                objective=0.0,
-                n_active_cuts=0,
-            ),
-            diagnostics=LoopDiagnostics(
-                converged=True,
-                iterations=0,
-                cuts_admitted=0,
-            ),
-        )
+        return _converged_outcome(ctx.K)
 
-    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "build_fit_context", _fail_serial_builder)
     monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
-    # qp_weight>0 makes require_quadratic true; pin the resolved backend so the
-    # loop-control propagation is what's under test, not backend selection.
+    # qp_weight>0 makes require_quadratic true; fix the resolved backend so
+    # loop-control propagation is under test, not backend selection.
     monkeypatch.setattr(
         estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"
     )
@@ -106,19 +111,14 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
     assert ctx.weight_mode == "distributed"
     assert ctx.theta_coef is None
     assert ctx.agent_weights is None
-    # Serial owns the full [0,5) shard, so local_ids is arange(20) under any
-    # blocking order; the per-simulation vs per-observation layout is pinned by
-    # test_estimate_distributed_local_ids_use_per_simulation_blocking below,
-    # which shards the observations so the two orders diverge.
+    # Serial owns everything, so local_ids is arange(20) under any blocking
+    # order; the layout itself is covered by the agent-axis shard test below.
     np.testing.assert_array_equal(ctx.local_ids, np.arange(20, dtype=np.int64))
     np.testing.assert_array_equal(ctx.theta_init, warm_start.theta_hat)
     assert ctx.theta_init.flags.writeable is False
-    # tolerance must propagate from the caller into the built context, not be
-    # hardcoded to the 1e-6 default.
     assert ctx.tolerance == 7e-3
-    # Pin the whole LoopConfig: every loop control must propagate from the
-    # caller into the config the driver receives. Each field here is a
-    # non-default value that a hardcoded constant would not reproduce.
+    # Every loop control must reach the driver's config; each value here is
+    # non-default so a hardcoded constant would not reproduce it.
     config = seen["config"]
     assert config.max_iterations == 7
     assert config.min_iterations == 3
@@ -130,38 +130,22 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
         result.empirical_moment,
         np.array([3.0, 5.0], dtype=np.float64),
     )
-    # setup_observed must receive the owned observation shard (serial owns all
-    # five); a wrong-id or skipped call would preload the wrong observed rows.
+    # setup_observed receives the owned observation shard; serial owns all five.
     assert surface.setup_ids == tuple(range(5))
 
 
 def test_estimate_distributed_empirical_moment_divides_by_global_n(
     monkeypatch,
 ) -> None:
-    # N=5 over two ranks: shards are [0,1,2] and [3,4], so no single rank owns
-    # all N rows. The moment normalizer must divide the global feature sum by
-    # N, not by a rank's shard size, so the denominator is exercised through
-    # the public entry point (serial can't: there owned_obs.size == N).
+    # N=5 over two ranks gives shards [0,1,2] and [3,4]: no rank owns all N
+    # rows, so dividing by N and dividing by shard size disagree — serial
+    # (owned_obs.size == N) cannot tell them apart.
     estimate_module = importlib.import_module("combrum.engine.estimate")
 
-    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("estimate_distributed must not call build_fit_context")
-
     def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
-        return LoopOutcome(
-            result=FormulationResult(
-                theta_hat=np.zeros(ctx.K, dtype=np.float64),
-                objective=0.0,
-                n_active_cuts=0,
-            ),
-            diagnostics=LoopDiagnostics(
-                converged=True,
-                iterations=0,
-                cuts_admitted=0,
-            ),
-        )
+        return _converged_outcome(ctx.K)
 
-    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "build_fit_context", _fail_serial_builder)
     monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
 
     def run(transport):
@@ -182,9 +166,7 @@ def test_estimate_distributed_empirical_moment_divides_by_global_n(
         )
         return np.asarray(result.empirical_moment, dtype=np.float64).copy()
 
-    # Hand-computed: rows i -> [i+1, 2i+1] for i in 0..4, so sum(phi) = [15, 25]
-    # and sum(phi)/N = [3.0, 5.0]. A /shard-size faulty implementation would give rank 0
-    # [5, 8.33...] and rank 1 [7.5, 12.5] instead.
+    # Rows i -> [i+1, 2i+1] for i in 0..4: sum(phi) = [15, 25], /N = [3, 5].
     for moment in LocalCluster(2).run(run):
         np.testing.assert_allclose(
             moment, np.array([3.0, 5.0], dtype=np.float64)
@@ -200,25 +182,11 @@ def test_estimate_distributed_local_ids_use_agent_axis_shards(
 
     captured: dict[int, np.ndarray] = {}
 
-    def fail_serial_builder(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("estimate_distributed must not call build_fit_context")
-
     def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
         captured[ctx.transport.rank] = np.asarray(ctx.local_ids).copy()
-        return LoopOutcome(
-            result=FormulationResult(
-                theta_hat=np.zeros(ctx.K, dtype=np.float64),
-                objective=0.0,
-                n_active_cuts=0,
-            ),
-            diagnostics=LoopDiagnostics(
-                converged=True,
-                iterations=0,
-                cuts_admitted=0,
-            ),
-        )
+        return _converged_outcome(ctx.K)
 
-    monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "build_fit_context", _fail_serial_builder)
     monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
 
     def run(transport):
@@ -249,8 +217,7 @@ def test_estimate_distributed_local_ids_use_agent_axis_shards(
         captured[1],
         np.arange(10, 20, dtype=np.int64),
     )
-    # Together the shards tile [0, N*S) exactly once (a partition invariant a
-    # duplicating/dropping layout would break).
+    # Together the shards tile [0, N*S) exactly once.
     np.testing.assert_array_equal(
         np.sort(np.concatenate([captured[0], captured[1]])),
         np.arange(20, dtype=np.int64),
@@ -328,8 +295,8 @@ def test_estimate_distributed_requires_rank_uniform_master_backend() -> None:
                 n_observations=5,
                 n_simulations=4,
                 transport=transport,
-                # Both are valid backend choices, so the error can only come from
-                # cross-rank value disagreement, not from choice validation.
+                # Both are valid backends, so only cross-rank disagreement
+                # can raise here.
                 master_backend="highs" if transport.rank == 0 else "gurobi",
             )
         except TransportError as exc:
@@ -349,10 +316,8 @@ def test_estimate_distributed_requires_rank_uniform_master_backend() -> None:
         ("shape", "warm_start must match"),
         ("value", "warm_start must match"),
         ("access", "warm_start must match"),
-        # Both ranks pass an unreadable warm start: the cross-rank disagreement
-        # axis cannot fire (tokens are identical failures), so the message can
-        # only come from the access guard rejecting the warm start on its own
-        # merits. Pins the guard against silent coercion of a broken warm start.
+        # Both ranks fail identically, so cross-rank disagreement cannot fire;
+        # the message must come from the access guard itself.
         ("access_both", "warm_start.theta_hat could not be read"),
         ("nonfinite_head", "warm_start.theta_hat must be finite"),
         ("nonfinite_tail", "warm_start.theta_hat must be finite"),
@@ -389,8 +354,7 @@ def test_estimate_distributed_requires_rank_uniform_warm_start(
         elif case == "nonfinite_head":
             warm_start = warm([np.nan, 0.0])
         elif case == "nonfinite_tail":
-            # non-finite value away from index 0: a finiteness guard that only
-            # inspects the first entry must still reject this.
+            # NaN away from index 0, in case only the first entry is inspected.
             warm_start = warm([0.0, np.nan])
         else:
             warm_start = warm([0.0, np.inf])
@@ -418,10 +382,8 @@ def test_estimate_distributed_requires_rank_uniform_warm_start(
 
 
 def test_estimate_distributed_serial_rejects_unreadable_warm_start(monkeypatch) -> None:
-    # On the serial (size==1) path there is no cross-rank axis at all, so a
-    # warm start whose theta_hat cannot be read must be rejected directly by
-    # the access guard. Silent coercion (or None-substitution) of the broken
-    # warm start would let the run proceed, so pin the guard's own ValueError.
+    # size==1 has no cross-rank axis, so the access guard alone must reject an
+    # unreadable theta_hat rather than silently coercing it to None.
     estimate_module = importlib.import_module("combrum.engine.estimate")
     monkeypatch.setattr(
         estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"

@@ -157,9 +157,8 @@ def _model(surface: object, *, features: object | None = None) -> Model:
 
 
 def test_observation_owned_geometry() -> None:
-    # Pin the exact contiguous shards, not just their lengths, so a
-    # length-preserving repartition (round-robin), an off-by-one start, or
-    # remainder-to-trailing-ranks all fail. Even split of 7 over 3 ranks:
+    # Exact shard contents, not just lengths: round-robin, an off-by-one
+    # start, and remainder-to-trailing-ranks all keep the sizes. 7 over 3:
     np.testing.assert_array_equal(
         owned_observation_ids(7, 0, 3), np.array([0, 1, 2], dtype=np.int64)
     )
@@ -169,8 +168,8 @@ def test_observation_owned_geometry() -> None:
     np.testing.assert_array_equal(
         owned_observation_ids(7, 2, 3), np.array([5, 6], dtype=np.int64)
     )
-    # Uneven 252 over 5 ranks: the two-observation remainder lands on the
-    # leading ranks and every shard stays a contiguous arange.
+    # 252 over 5 ranks: the remainder lands on the leading ranks and every
+    # shard stays a contiguous arange.
     shards = [owned_observation_ids(252, rank, 5) for rank in range(5)]
     assert [shard.size for shard in shards] == [51, 51, 50, 50, 50]
     np.testing.assert_array_equal(shards[0], np.arange(0, 51, dtype=np.int64))
@@ -213,8 +212,7 @@ def test_prepare_distributed_observed_splits_observed_and_agent_axes() -> None:
         )
         assert prep.phi_obs_local.shape == (owned.size, K)
         # phi_obs_local is frozen by _checked_distributed_phi; the other three
-        # arrays are frozen only by DistributedObservedPrep.__post_init__, so
-        # asserting all four pins that freeze loop, not just the phi path.
+        # only by DistributedObservedPrep.__post_init__, so check all four.
         assert not prep.phi_obs_local.flags.writeable
         assert not prep.owned_obs.flags.writeable
         assert not prep.local_ids.flags.writeable
@@ -390,11 +388,9 @@ def test_distributed_observed_reductions_are_keyed_by_observations() -> None:
     c_theta = distributed_c_theta(prep, transport=transport)
 
     assert c_theta.shape == (3,)
-    # This is the only call in the file that leaves obs_weights_local at its
-    # None default, so nothing else pins the unit-weight branch. Column j of the
-    # [i, i+1, i+2] rows sums to sum_i(i + j) = 55 + 11*j over i in [0, 11);
-    # unit weights give c_theta = -S * that with S=5. Pin the whole vector so a
-    # zeros default, a dropped -S, a sign flip, or a wrong reduction axis all die.
+    # obs_weights_local is left at its None default here (nowhere else), so
+    # this exercises the unit-weight branch. Column j sums to
+    # sum_i(i + j) = 55 + 11*j over i in [0, 11); c_theta = -S * that, S=5.
     np.testing.assert_array_equal(
         c_theta, np.array([-275.0, -330.0, -385.0])
     )
@@ -502,13 +498,10 @@ def test_prepare_distributed_observed_rejects_noncontiguous_phi() -> None:
 
 
 def test_prepare_distributed_observed_validates_phi_surface_return() -> None:
-    # Every leg of _checked_distributed_phi, not just the C-contiguous branch.
-    # Each match string is specific to the leg it guards so that removing that
-    # guard cannot be masked by a different (downstream) error: a list makes
-    # value.shape AttributeError once the ndarray check is gone; the K+1-column
-    # array otherwise sails into sum_reproducible and trips the reduction-shape
-    # guard whose message also says "expected", so pin the exact source shape;
-    # a float32 array otherwise flows silently into the float64 coercion.
+    # Each match string is specific to its leg of _checked_distributed_phi:
+    # without the ndarray check a list fails later with AttributeError, the
+    # K+1-column array would instead trip the reduction-shape guard inside
+    # sum_reproducible, and float32 would coerce to float64 silently.
     cases = [
         ("list", r"observed_features_batch must return a numpy\.ndarray"),
         ("wrong_shape", r"observed_features_batch returned shape \(3, 4\)"),
@@ -591,21 +584,20 @@ def test_build_distributed_fit_context_has_no_dense_weight_arrays(
     assert made[0]["u0"] == 10.0
     assert made[0]["u4"] == 11.0
     assert made[0]["backend"] == "highs"
-    # K and theta bounds plumbed build -> master come from prep.K and the
-    # model's Parameters, a path distinct from the FitContext K. Pin the whole
-    # (lb, ub) pair from the (-10,10,2)+(-5,5,1) block spec so a wrong-K or
-    # swapped/shifted-bounds arg to make_master cannot survive.
+    # K and theta bounds reach make_master via prep.K and the model's
+    # Parameters, a path distinct from the FitContext K; lb/ub follow the
+    # (-10,10,2)+(-5,5,1) block spec.
     assert made[0]["K"] == 3
     np.testing.assert_array_equal(made[0]["lb"], np.array([-10.0, -10.0, -5.0]))
     np.testing.assert_array_equal(made[0]["ub"], np.array([10.0, 10.0, 5.0]))
-    # objective coefficients plumbed build -> master: phi column sums [3,6,9]
-    # over the [0,1,2],[1,2,3],[2,3,4] rows, times -S=-2 with unit weights.
+    # phi column sums [3,6,9] over rows [0,1,2],[1,2,3],[2,3,4], times -S=-2
+    # with unit weights.
     expected_c_theta = np.array([-6.0, -12.0, -18.0])
     np.testing.assert_array_equal(made[0]["c_theta"], expected_c_theta)
     np.testing.assert_array_equal(np.asarray(built.c_theta), expected_c_theta)
 
-    # A distinct 'dual' request must land as DUAL and nothing else, so the
-    # SUMMARY assertion above cannot be satisfied by a hardcoded constant.
+    # A 'dual' request lands as DUAL, so the SUMMARY mapping above is not a
+    # constant.
     dual_built = build_distributed_fit_context(
         prep,
         model=_model(_ObservedSurface(3)),
@@ -745,12 +737,9 @@ def test_nslack_validates_lazy_slack_strip_with_no_installed_rows() -> None:
 
 
 def test_nslack_lazy_slack_strip_counts_distinct_installed_agents() -> None:
-    # hard_threshold == K so the installed_agents term is the only thing that
-    # can cross the guard: with an empty set (installed_agents=0) validation
-    # passes (3 >= 3), so any populated case that raises proves the term is
-    # load-bearing. Dropping the term, or forcing installed_agents=0, lets the
-    # populated cases through to the missing _master and raises AttributeError
-    # instead of the pinned ValueError.
+    # hard_threshold == K, so only the installed_agents term can push the
+    # total over the guard: the empty case passes (3 >= 3), and each populated
+    # case below must raise on that term alone.
     formulation = NSlack(lambda agent_id, bundle: (bundle, 0.0))
     formulation._ctx = SimpleNamespace(weight_mode="distributed", K=3)
     policy = SlackStrip(hard_threshold=3)
@@ -767,8 +756,8 @@ def test_nslack_lazy_slack_strip_counts_distinct_installed_agents() -> None:
             policy, profile, (_cut_row(0, b"a"), _cut_row(1, b"b"))
         )
 
-    # Two rows on one agent dedup to installed_agents=1 (K + installed = 4),
-    # pinning the len({agent_id, ...}) count, not just the row count.
+    # Two rows on one agent dedup to installed_agents=1: distinct agents are
+    # counted, not rows.
     with pytest.raises(
         ValueError,
         match=r"hard_threshold=3, K=3, installed_agents=1, K \+ installed_agents=4",

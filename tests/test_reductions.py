@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import combrum.reductions as reductions
+from _support.commprobe import spread_values
 from combrum.reductions import canonical_sum, canonical_sum_window_rows
 
 
@@ -11,18 +12,12 @@ def float_bytes(x: object) -> bytes:
     return np.asarray(x, dtype=np.float64).tobytes()
 
 
-def windowed_oracle(
+def expected_windowed_sum(
     values: np.ndarray, ids: np.ndarray, window_rows: int
 ) -> np.ndarray:
-    """Independent windowed sum: a plain-Python block loop keyed to window_rows.
-
-    Deliberately structured differently from the numpy-vectorized kernel: it
-    sorts by id, walks id-range blocks ``[lo, lo + window_rows)`` starting from
-    the minimum id, sums each block's rows element by element in Python, then
-    accumulates block totals with ``+=``. Pinning ``float_bytes`` against this
-    oracle fixes the exact block boundaries, so removing the windowed branch
-    (whole-array reduce) or shifting a boundary produces different bytes.
-    """
+    """Plain-Python windowed sum -- sort by id, sum id-range blocks
+    ``[lo, lo + window_rows)`` starting from the minimum id, accumulate
+    block totals."""
     vals = np.asarray(values, dtype=np.float64)
     ids = np.asarray(ids)
     order = np.argsort(ids, kind="stable")
@@ -60,43 +55,23 @@ def windowed_oracle(
     return np.array(total, dtype=np.float64)
 
 
-def ascending_reduce_oracle(
+def ascending_reduce(
     values: np.ndarray, ids: np.ndarray
 ) -> np.ndarray:
-    """Independent ascending-id reduce for the fast (span <= window) path.
-
-    Sorts by id with its own ``argsort`` and reduces the sorted rows in
-    ascending order. The independence is in the ordering: it never reads the
-    kernel's canonical array, it re-derives ascending order from the ids. On
-    magnitude-spread data the ascending reduce differs bitwise from any
-    reversed or reordered reduce, so pinning ``float_bytes`` against this
-    fixes the fast-path summation order at ascending specifically -- not merely
-    "some consistent order".
-    """
+    """Reduce rows in ascending id order -- the summation order of the fast
+    (span <= window) path."""
     vals = np.asarray(values, dtype=np.float64)
     ids = np.asarray(ids)
     order = np.argsort(ids, kind="stable")
     return np.add.reduce(vals[order], axis=0)
 
 
-def spread_values(
-    rng: np.random.Generator, shape: tuple[int, ...]
-) -> np.ndarray:
-    # Magnitudes across many orders of magnitude: the regime where addition
-    # order visibly moves the result, giving the bitwise assertions a real signal.
-    magnitude = rng.uniform(-10.0, 10.0, size=shape)
-    sign = rng.choice([-1.0, 1.0], size=shape)
-    return sign * 10.0**magnitude
-
-
 def block_material_values(
     rng: np.random.Generator, shape: tuple[int, ...]
 ) -> np.ndarray:
     # Magnitudes over ~6 orders: wide enough that block-summation order moves
-    # the low bits (windowed output differs from a whole-array reduce), yet
-    # bounded so every block stays material relative to the running total.
-    # A dropped or misaccumulated block therefore shifts the bytes rather than
-    # vanishing under a single dominant term.
+    # the low bits, bounded so every block stays material relative to the
+    # running total (no single dominant term).
     magnitude = rng.uniform(0.0, 6.0, size=shape)
     sign = rng.choice([-1.0, 1.0], size=shape)
     return sign * 10.0**magnitude
@@ -104,9 +79,8 @@ def block_material_values(
 
 def test_scalar_value_and_type() -> None:
     result = canonical_sum(np.array([1.0, 2.0, 4.0]), np.array([2, 0, 1]))
-    # Exact type, not isinstance: numpy.float64 is a float subclass, so the
-    # docstring's "Returns float for (n,) input" contract only bites if the
-    # float(...) coercion is actually applied.
+    # numpy.float64 subclasses float, so isinstance would miss a dropped
+    # float() coercion.
     assert type(result) is float
     assert result == 7.0
 
@@ -158,59 +132,47 @@ def test_permutation_invariance_matrix() -> None:
 
 
 def test_fast_path_ascending_order_scalar() -> None:
-    # Fast path (span <= window_rows) with magnitude-spread values, pinned
-    # bytewise against an independent ascending-id reduce. The ids are strictly
-    # ascending so canonical_sum takes the sorted_unique fast branch (src
-    # reductions.py lines 61-63) that skips argsort and reduces the input rows
-    # as-is -- exactly the already-sorted single-window case. The invariance
-    # tests only fix that every permutation agrees with a self-reference, so a
-    # regression reversing the fast-branch reduce (e.g. reducing canonical[::-1]
-    # when ids arrive strictly ascending) stays permutation-invariant and
-    # survives them. This pins the order at ascending: a reversed fast-branch
-    # reduce differs by at least one ULP on this data.
+    # Strictly ascending ids skip the argsort and reduce rows as-is, so the
+    # reduce order on that branch needs its own bytewise check: permutation
+    # invariance cannot see a reversed reduce there.
     rng = np.random.default_rng(20260612)
     n = 257
     ids = np.arange(n)  # strictly ascending -> sorted_unique fast branch
-    assert bool(np.all(ids[1:] > ids[:-1]))  # guarantees the fast branch
+    assert bool(np.all(ids[1:] > ids[:-1]))
     span = int(ids.max()) - int(ids.min()) + 1
     assert span <= canonical_sum_window_rows(1)  # fast path, not windowed
     values = spread_values(rng, (n,))
 
-    # Self-check on the SAME rows the fast branch reduces (ids already
-    # ascending): ascending vs reversed accumulation genuinely disagree here,
-    # so the byte pin below has a meaningful signal (mirrors test_naive_summation_order).
+    # ascending and reversed accumulation disagree on this data
     ascending = np.add.reduce(values, axis=0)
     descending = np.add.reduce(values[::-1], axis=0)
     assert float_bytes(ascending) != float_bytes(descending)
 
     assert float_bytes(canonical_sum(values, ids)) == float_bytes(
-        ascending_reduce_oracle(values, ids)
+        ascending_reduce(values, ids)
     )
 
 
 def test_fast_path_ascending_order_matrix() -> None:
-    # Matrix analogue of the fast-path ascending pin: strictly ascending ids
-    # drive the sorted_unique fast branch, and each column's reduce must follow
-    # ascending id order, caught bytewise against the independent oracle.
+    # Matrix analogue: ascending reduce order per column.
     rng = np.random.default_rng(987)
     n, m = 300, 5
     ids = np.arange(n)  # strictly ascending -> sorted_unique fast branch
-    assert bool(np.all(ids[1:] > ids[:-1]))  # guarantees the fast branch
+    assert bool(np.all(ids[1:] > ids[:-1]))
     span = int(ids.max()) - int(ids.min()) + 1
     assert span <= canonical_sum_window_rows(m)  # fast path, not windowed
     values = spread_values(rng, (n, m))
 
     ascending = np.add.reduce(values, axis=0)
     descending = np.add.reduce(values[::-1], axis=0)
-    # Every column's accumulation order matters on this data, so a reversed
-    # fast-branch reduce shifts all columns, not just one.
+    # accumulation order matters in every column on this data
     assert bool(np.all(ascending != descending))
     assert float_bytes(ascending) != float_bytes(descending)
 
     result = canonical_sum(values, ids)
     assert result.shape == (m,)
     assert float_bytes(result) == float_bytes(
-        ascending_reduce_oracle(values, ids)
+        ascending_reduce(values, ids)
     )
 
 
@@ -218,11 +180,9 @@ def test_fast_path_ascending_order_matrix() -> None:
 def tiny_window(monkeypatch: pytest.MonkeyPatch):
     """Shrink the memory window so modest id spans take the windowed branch.
 
-    Returns a callable that pins ``window_rows`` to an exact value for a given
-    contribution width, so tests can force multi-row blocks (window_rows > 1)
-    and assert the loop steps through many blocks rather than one. The byte
-    budget inverts ``canonical_sum_window_rows`` exactly:
-    ``rows == bytes // (8 * (width + 1))``.
+    Returns a callable that sets ``window_rows`` to an exact value for a
+    given contribution width -- the byte budget inverts
+    ``canonical_sum_window_rows``: ``rows == bytes // (8 * (width + 1))``.
     """
 
     def _patch(window_rows: int, width: int = 1) -> None:
@@ -236,26 +196,23 @@ def tiny_window(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_windowed_path_matches_exact_sum_scalar(tiny_window) -> None:
-    # Force the memory-bounded windowing branch (src reductions.py lines 82-93)
-    # with many multi-row blocks, then pin the exact bytes against an
-    # independent block-loop oracle keyed to the same window_rows. Spread
-    # magnitudes make addition order matter, so the windowed block boundaries
-    # produce bytes distinct from a whole-array reduce or a shifted boundary.
+    # Many multi-row blocks through the windowed branch, compared bytewise
+    # against the plain-Python windowed sum at the same window_rows.
     tiny_window(4)
     rng = np.random.default_rng(0)
     n = 257
     ids = rng.permutation(n).astype(np.int64)
     span = int(ids.max()) - int(ids.min()) + 1
     window_rows = canonical_sum_window_rows(1)
-    assert window_rows > 1  # blocks span multiple rows, not one id per block
+    assert window_rows > 1  # multi-row blocks, not one id per block
     assert span > window_rows  # windowed branch, not the fast path
-    assert span // window_rows >= 8  # exercised across many blocks
+    assert span // window_rows >= 8  # many blocks
     assert (span - 1) % window_rows == 0  # last id lands on a block boundary
 
     values = block_material_values(rng, (n,))
     result = canonical_sum(values, ids)
     assert float_bytes(result) == float_bytes(
-        windowed_oracle(values, ids, window_rows)
+        expected_windowed_sum(values, ids, window_rows)
     )
 
     reference = float_bytes(result)
@@ -280,7 +237,7 @@ def test_windowed_path_matches_exact_sum_matrix(tiny_window) -> None:
     result = canonical_sum(values, ids)
     assert result.shape == (m,)
     assert float_bytes(result) == float_bytes(
-        windowed_oracle(values, ids, window_rows)
+        expected_windowed_sum(values, ids, window_rows)
     )
 
     reference = float_bytes(result)
@@ -290,25 +247,24 @@ def test_windowed_path_matches_exact_sum_matrix(tiny_window) -> None:
 
 
 def test_windowed_path_large_real_id_span_scalar() -> None:
-    # Trigger the windowed branch with the real default window (no monkeypatch).
-    # Two ids sit inside the first window and two inside a later window, so each
-    # block spans multiple rows and the cancellation is confined to a block.
+    # The real default window, no monkeypatch: two ids in the first window,
+    # two in a later one, so each block spans multiple rows and the
+    # cancellation is confined to a block.
     window_rows = canonical_sum_window_rows(1)
     ids = np.array([0, 1, 2 * window_rows + 50, 2 * window_rows + 51], dtype=np.int64)
     assert int(ids.max()) - int(ids.min()) + 1 > window_rows
 
     # Canonical (ascending-id) values are [1e16, 1.0, -1e16, 2.5]. The windowed
-    # branch groups {1e16, 1.0} then {-1e16, 2.5}. Hand-derived block totals in
-    # float64 (ULP at 1e16 is 2): (1e16 + 1.0) == 1e16 (the 1.0 is absorbed);
-    # (-1e16 + 2.5) == -9999999999999998.0 (2.5 rounds down by one ULP); their
-    # sum is 2.0. A whole-array reduce instead yields 2.5, so this value pins
-    # the windowed block boundaries, not merely any correct accumulation.
+    # branch groups {1e16, 1.0} then {-1e16, 2.5}. Block totals in float64
+    # (ULP at 1e16 is 2): (1e16 + 1.0) == 1e16 (the 1.0 is absorbed);
+    # (-1e16 + 2.5) == -9999999999999998.0 (2.5 rounds down by one ULP);
+    # their sum is 2.0. A whole-array reduce would yield 2.5.
     values = np.array([1e16, 1.0, -1e16, 2.5])
     expected = (1e16 + 1.0) + (-1e16 + 2.5)
     assert expected == 2.0
     assert float_bytes(canonical_sum(values, ids)) == float_bytes(expected)
 
-    # Permutation invariance must still hold across the windowed branch.
+    # permutation invariance still holds on the windowed branch
     reference = float_bytes(canonical_sum(values, ids))
     rng = np.random.default_rng(4)
     for _ in range(20):
@@ -317,12 +273,10 @@ def test_windowed_path_large_real_id_span_scalar() -> None:
 
 
 def test_windowed_origin_anchored_at_min_id_scalar(tiny_window) -> None:
-    # Same construction as the scalar windowed test, but the ids start at a
-    # strictly positive minimum that is NOT a multiple of window_rows. The
-    # window origin (src anchors the first block at min id, not absolute 0)
-    # then determines which ids share a block. Pinning against the oracle,
-    # which also anchors at the min id, kills a src bug that starts windows at
-    # absolute 0: that regroups every block and shifts the bytes.
+    # Same construction as the scalar windowed test, but the minimum id is
+    # strictly positive and not a multiple of window_rows: a first window
+    # anchored at the min id groups ids differently than one anchored at
+    # absolute 0.
     tiny_window(4)
     rng = np.random.default_rng(0)
     n = 257
@@ -331,14 +285,14 @@ def test_windowed_origin_anchored_at_min_id_scalar(tiny_window) -> None:
     ids = rng.permutation(n).astype(np.int64) + offset
     span = int(ids.max()) - int(ids.min()) + 1
     assert window_rows > 1
-    assert span > window_rows  # windowed branch, not the fast path
-    assert span // window_rows >= 8  # many blocks
+    assert span > window_rows
+    assert span // window_rows >= 8
     assert int(ids.min()) % window_rows != 0  # origin at 0 vs min id diverges
 
     values = block_material_values(rng, (n,))
     result = canonical_sum(values, ids)
     assert float_bytes(result) == float_bytes(
-        windowed_oracle(values, ids, window_rows)
+        expected_windowed_sum(values, ids, window_rows)
     )
 
     reference = float_bytes(result)
@@ -364,7 +318,7 @@ def test_windowed_origin_anchored_at_min_id_matrix(tiny_window) -> None:
     result = canonical_sum(values, ids)
     assert result.shape == (m,)
     assert float_bytes(result) == float_bytes(
-        windowed_oracle(values, ids, window_rows)
+        expected_windowed_sum(values, ids, window_rows)
     )
 
     reference = float_bytes(result)
@@ -374,15 +328,12 @@ def test_windowed_origin_anchored_at_min_id_matrix(tiny_window) -> None:
 
 
 def window_rows_ceiling(budget_bytes: int, width: int) -> int:
-    """Independent, layout-driven oracle for ``canonical_sum_window_rows``.
+    """Expected ``canonical_sum_window_rows``, derived from the memory layout.
 
-    Derives the per-row cost by measuring the byte size of a real window
-    buffer instead of reusing the kernel's ``8 * (width + 1)`` expression: a
-    window holds ``rows`` entries, each carrying ``width`` float64 value
-    columns plus one float64 id column. Building a one-row buffer and reading
-    ``numpy.nbytes`` gives the per-row cost from the memory layout itself, so
-    the largest number of rows fitting ``budget_bytes`` is a distinct
-    invariant, not the code under test spelled backwards.
+    A window row carries ``width`` float64 value columns plus one float64 id
+    column; the per-row cost is read off a one-row buffer via ``numpy.nbytes``
+    rather than the kernel's ``8 * (width + 1)`` expression, so this is not
+    the code under test spelled backwards.
     """
     value_cols = np.empty((1, max(1, int(width))), dtype=np.float64)
     id_col = np.empty((1,), dtype=np.float64)
@@ -390,20 +341,17 @@ def window_rows_ceiling(budget_bytes: int, width: int) -> int:
     return max(1, budget_bytes // per_row)
 
 
-def test_window_rows_width_scaling_layout_pinned(
+def test_window_rows_width_scaling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Pin the width->window_rows scaling directly. The windowed tests read
-    # window_rows from canonical_sum_window_rows and hand the SAME value to the
-    # oracle, so a wrong width scaling cancels out of the byte comparison. Here
-    # the expected window_rows is derived independently from the memory layout
-    # (value columns + one id column, measured via numpy.nbytes), so shrinking
-    # the (width+1) term to (2*width) -- a no-op at width 1 but wrong for
-    # width>1 -- is caught.
+    # The windowed tests hand canonical_sum_window_rows's own value to the
+    # reference sum, so a wrong width scaling would cancel out of those byte
+    # comparisons. Here the expected value comes from the measured memory
+    # layout instead, which distinguishes (width + 1) from e.g. (2 * width)
+    # -- identical at width 1, wrong above it.
     for width, rows in ((3, 100), (7, 250), (5, 137)):
-        # Exact-fit budget so the floor is unambiguous, sized from the layout
-        # oracle's per-row cost (value columns + one id column) rather than the
-        # kernel's own expression.
+        # Exact-fit budget sized from the measured per-row cost, so the
+        # floor is unambiguous.
         one_row_bytes = (
             np.empty((1, width), dtype=np.float64).nbytes
             + np.empty((1,), dtype=np.float64).nbytes
@@ -413,23 +361,20 @@ def test_window_rows_width_scaling_layout_pinned(
             reductions, "_CANONICAL_SUM_WINDOW_BYTES", budget
         )
         expected = window_rows_ceiling(budget, width)
-        # Self-check: the exact-fit construction recovers the chosen row count,
-        # and the oracle genuinely separates the correct scaling from the
-        # (2*width) regression -- otherwise this pin would have no meaningful signal.
+        # The exact fit recovers the chosen row count, and the wrong
+        # (2 * width) scaling gives a strictly smaller one.
         assert expected == rows
-        mutated = max(1, budget // (8 * (2 * width)))
-        assert mutated < expected
+        wrong_scaling = max(1, budget // (8 * (2 * width)))
+        assert wrong_scaling < expected
         assert canonical_sum_window_rows(width) == expected
 
 
 def test_window_rows_clamps_to_one_below_row_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The outer max(1, ...) guard on canonical_sum_window_rows keeps window_rows
-    # >= 1 when the byte budget is smaller than a single row's cost. Without it
-    # the floor is 0, and canonical_sum's windowed loop advances by hi = lo + 0,
-    # so lo never moves and the sum hangs. No other test drives the budget below
-    # one row, so this pins the degenerate boundary directly.
+    # Below one row's byte cost the unclamped floor is 0, and canonical_sum's
+    # windowed loop would advance by hi = lo + 0 and never terminate; the
+    # outer max(1, ...) keeps window_rows >= 1.
     for width in (1, 3, 7):
         one_row_bytes = 8 * (width + 1)
         # Budgets strictly below one row's cost: the unclamped floor is 0.
@@ -440,9 +385,8 @@ def test_window_rows_clamps_to_one_below_row_budget(
             assert budget // one_row_bytes == 0  # unclamped floor would be 0
             assert canonical_sum_window_rows(width) == 1
 
-    # canonical_sum must still terminate and return the whole-array reduce when
-    # window_rows == 1 but the id span exceeds it (windowed branch, blocks of
-    # one id). A dropped outer clamp would make this hang instead.
+    # window_rows == 1 with a larger span: blocks of one id, and the loop
+    # must still terminate with the whole-array reduce.
     monkeypatch.setattr(reductions, "_CANONICAL_SUM_WINDOW_BYTES", 1)
     assert canonical_sum_window_rows(1) == 1
     ids = np.arange(6, dtype=np.int64)  # span 6 > window_rows 1
@@ -453,24 +397,22 @@ def test_window_rows_clamps_to_one_below_row_budget(
 
 
 def test_window_rows_width_clamp_at_nonpositive_width() -> None:
-    # The inner w = max(1, int(width)) guard treats width <= 0 as width 1.
-    # Without it, width 0 would divide by (0 + 1) and width -1 by (-1 + 1) == 0
-    # (a ZeroDivisionError). Pin the clamp: non-positive widths match width 1.
+    # w = max(1, int(width)) treats width <= 0 as width 1; unclamped,
+    # width 0 would double the row budget and width -1 would divide by zero.
     baseline = canonical_sum_window_rows(1)
     assert canonical_sum_window_rows(0) == baseline
     assert canonical_sum_window_rows(-5) == baseline
 
 
 def test_windowed_origin_min_id_hand_derived(tiny_window) -> None:
-    # Sharp, oracle-free pin of the window origin. With window_rows == 4 and
-    # ids [2, 3, 5, 6] (min id 2, not a multiple of 4), src anchors the first
-    # window at 2: block [2, 6) holds ids {2, 3, 5}, block [6, 10) holds {6}.
-    # Canonical values are [1e16, 1.0, -1e16, 2.5]:
+    # Window origin, values worked by hand. window_rows == 4, ids [2, 3, 5, 6]
+    # (min id 2, not a multiple of 4): the first window starts at 2, so block
+    # [2, 6) holds {2, 3, 5} and block [6, 10) holds {6}. Canonical values
+    # [1e16, 1.0, -1e16, 2.5]:
     #   block1 = (1e16 + 1.0) + (-1e16) = 0.0  (the 1.0 is absorbed at 1e16)
     #   block2 = 2.5 ; total = 2.5.
-    # Anchoring windows at absolute 0 instead would group [0, 4) -> {2, 3} and
-    # [4, 8) -> {5, 6}, giving (1e16 + 1.0) + (-1e16 + 2.5) = 2.0. The value 2.5
-    # therefore pins the origin, not merely a correct accumulation.
+    # Windows anchored at absolute 0 would group {2, 3} and {5, 6} instead,
+    # giving (1e16 + 1.0) + (-1e16 + 2.5) = 2.0.
     tiny_window(4)
     window_rows = canonical_sum_window_rows(1)
     ids = np.array([2, 3, 5, 6], dtype=np.int64)
@@ -491,8 +433,8 @@ def test_windowed_origin_min_id_hand_derived(tiny_window) -> None:
 
 
 def test_naive_summation_order_disagrees() -> None:
-    # Naive order-dependent addition genuinely disagrees here (1.0 is absorbed
-    # into 1e16 in one ordering), so the invariance assertions above are exercised.
+    # Order-dependent addition disagrees on this data (1.0 is absorbed into
+    # 1e16 in one ordering); canonical_sum agrees regardless of row order.
     a = np.array([1e16, 1.0, -1e16])
     b = np.array([1e16, -1e16, 1.0])
     assert float(np.add.reduce(a)) != float(np.add.reduce(b))

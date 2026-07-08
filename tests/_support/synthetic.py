@@ -32,58 +32,30 @@ STRIP_HARD_THRESHOLD = 150
 
 _STRIP_N_ITEMS = 12
 
-#: Lower bound of the certification injection band. Kept well above float noise
-#: so an injected gap can never be mistaken for an exact (zero) gap. A single
-#: fixture draw cannot observe this floor; the module self-check below sweeps
-#: seeds so a regression that lowers it toward zero is caught at import.
+#: Lower bound of the certification injection band, kept well above float
+#: noise so an injected gap can never read as an exact (zero) gap.
 _CERT_GAP_FLOOR = 1e-4
 
-#: Independent smallest gap the certification fixtures are allowed to inject,
-#: fixed as a plain literal that the self-check owns. It must NOT be derived
-#: from ``_CERT_GAP_FLOOR`` (nor drawn from the same band): the whole point is
-#: that lowering ``_CERT_GAP_FLOOR`` toward zero -- or decoupling the draw's low
-#: end from it -- is measured against a bound that does not move with the edit.
+#: Band ends restated as literals the import-time self-check owns. Neither is
+#: derived from ``_CERT_GAP_FLOOR`` or the ``uniform`` draw: an edit to the
+#: band constants must be measured against bounds that stay put.
 _MIN_MEANINGFUL_GAP = 1e-4
-
-#: Independent largest gap the certification band is expected to span up to,
-#: fixed as a plain literal the self-check owns. Same discipline as
-#: ``_MIN_MEANINGFUL_GAP`` but for the *high* end: the fixture draws
-#: ``uniform(..., 1e-2)`` inline, and this literal (not read from that draw)
-#: is what the by-observation check measures the empirical max against, so a
-#: shrink of the draw's top -- e.g. ``1e-2 -> 2e-4`` -- is caught against a
-#: bound that does not move with the edit.
 _MAX_MEANINGFUL_GAP = 1e-2
 
-#: Fraction of ``_MAX_MEANINGFUL_GAP`` the empirical max injected gap must
-#: reach over the sweep. With ~4000 draws the true high sits at the band top
-#: and the sampled max hugs it to within ~0.04%, so a 0.5% shortfall floor
-#: clears the honest fixture yet trips on a top shrunk by >=1%.
-_CERT_HIGH_OBS_FLOOR = 0.995
-
-#: Multiplicative slack above ``_MAX_MEANINGFUL_GAP`` that the observed maximum
-#: may occupy -- the high-end mirror of ``_CERT_OBS_CEILING``. Over the sweep
-#: the sampled max hugs the true top from below at ~0.9996x, so a 0.5% ceiling
-#: clears the honest fixture yet trips on a top expanded *up* by >=1% (its
-#: sampled max lands at ~1.0096x, above this ceiling). Without it the high-end
-#: guard is one-sided: a band top doubled to ``2e-2`` raises the empirical max
-#: but nothing pins it from above, so the (1e-4, 1e-2] band could silently
-#: widen at the top.
-_CERT_HIGH_OBS_CEILING = 1.005
-
-#: Sweep budget for the by-observation self-check. 40 seeds x n_inexact=100 at
-#: n_agents=300 = 4000 injected draws, enough that the empirical minimum of the
-#: ``uniform(low, ...)`` draws hugs ``low`` to within ~0.3%. That tightness is
-#: what lets the check pin the draw's low end from *both* sides.
+#: Sweep budget: 40 seeds x n_inexact=100 at n_agents=300 = 4000 injected
+#: draws, enough that the empirical minimum hugs the band's low end to within
+#: ~0.3% and the empirical maximum hugs the top to within ~0.04%.
 _CERT_SWEEP_SEEDS = 40
 _CERT_SWEEP_N_AGENTS = 300
 
-#: Multiplicative slack above ``_MIN_MEANINGFUL_GAP`` that the observed minimum
-#: may occupy. Over the fixed ``range(_CERT_SWEEP_SEEDS)`` block the sampled
-#: minimum lands at ~1.003x the true low, so a 0.8% ceiling clears the honest
-#: fixture yet trips on a low decoupled *up* by >=1% (its sampled minimum lands
-#: at ~1.013x, above this ceiling). A looser 2% ceiling let a ~1.7% upward
-#: decoupling slip through, so the documented >=1% catch was not actually met.
+#: Two-sided windows for the sweep's empirical extremes, as fractions of the
+#: band ends. The honest fixture lands the sampled minimum at ~1.003x the low
+#: end and the sampled maximum at ~0.9996x the top, so these clear it while a
+#: band end moved by >=1% in either direction — a lowered or raised floor, a
+#: shrunken or widened top — pushes an extreme out of its window.
 _CERT_OBS_CEILING = 1.008
+_CERT_HIGH_OBS_FLOOR = 0.995
+_CERT_HIGH_OBS_CEILING = 1.005
 
 
 def _validated_count(name: str, value: object, minimum: int) -> int:
@@ -228,10 +200,8 @@ def large_m_generator(T: int, n_rows: int, seed: int) -> dict[str, object]:
     senders = grid_sender[off_diagonal].astype(np.int64)
     receivers = grid_receiver[off_diagonal].astype(np.int64)
     m_columns = T * (T - 1)
-    # Pin the documented contract: senders/receivers must be the row-major
-    # enumeration of the off-diagonal, in that exact order and alignment. A
-    # sender/receiver swap or a reordering leaves the *set* of pairs intact but
-    # breaks this ordered sequence, so guard the sequence, not just membership.
+    # Guard the ordered sequence, not just membership: a sender/receiver swap
+    # or reordering leaves the *set* of pairs intact.
     expected_pairs = [(i, j) for i in range(T) for j in range(T) if i != j]
     if list(zip(senders.tolist(), receivers.tolist())) != expected_pairs:
         raise AssertionError(
@@ -254,34 +224,15 @@ def large_m_generator(T: int, n_rows: int, seed: int) -> dict[str, object]:
 
 
 def _assert_cert_gap_floor_holds() -> None:
-    """Verify the injected band tracks independent meaningful bounds at BOTH ends.
+    """Import-time self-check: the injected band spans ``(1e-4, 1e-2]``.
 
-    All observation checks are measured against literals the fixture never
-    draws from (``_MIN_MEANINGFUL_GAP`` for the low end, ``_MAX_MEANINGFUL_GAP``
-    for the high end), so none moves with the band constants edited in the
-    ``uniform`` draw:
-
-    - By value: ``_CERT_GAP_FLOOR`` itself must sit at or above the meaningful
-      floor. Lowering the band constant toward zero trips this immediately,
-      even though every ``uniform(_CERT_GAP_FLOOR, ...)`` draw stays ``>=`` its
-      own (lowered) low end.
-    - By observation, low end: a heavy seed sweep (``_CERT_SWEEP_SEEDS`` seeds
-      at ``_CERT_SWEEP_N_AGENTS`` agents -> ~4000 injected draws) drives the
-      empirical minimum injected gap down to within ~0.3% of the band's true
-      low end. That minimum must land in the two-sided window
-      ``[_MIN_MEANINGFUL_GAP, _MIN_MEANINGFUL_GAP * _CERT_OBS_CEILING]``. The
-      floor side catches a low decoupled *below* ``_CERT_GAP_FLOOR`` (e.g.
-      hardcoding a smaller ``uniform`` low without touching the constant); the
-      ceiling side catches a low decoupled *above* it by >=1%.
-    - By observation, high end: over the same sweep the empirical MAXIMUM
-      injected gap hugs the band top to within ~0.04%. It must land in the
-      two-sided window ``[_MAX_MEANINGFUL_GAP * _CERT_HIGH_OBS_FLOOR,
-      _MAX_MEANINGFUL_GAP * _CERT_HIGH_OBS_CEILING]``. The floor side catches a
-      shrink of the draw's top (e.g. ``1e-2 -> 2e-4``, a 50x collapse of the
-      documented ``(1e-4, 1e-2]`` band) and trips even on a top shrunk by just
-      >=1%; the ceiling side catches a top expanded *up* (e.g. ``1e-2 ->
-      2e-2``, a doubling that widens the band) and trips even on a top expanded
-      by just >=1%. Runs once at import.
+    ``_CERT_GAP_FLOOR`` must sit at or above ``_MIN_MEANINGFUL_GAP`` by value,
+    and over the seed sweep the empirical minimum and maximum injected gaps
+    must land in the two-sided windows around the band ends. Every bound is a
+    literal the fixture never draws from, so any edit to the ``uniform``
+    constants — a lowered floor, a low end hardcoded away from the constant,
+    a shrunken or widened top — moves an extreme out of its window even
+    though the draws still respect their own (edited) band.
     """
     if _CERT_GAP_FLOOR < _MIN_MEANINGFUL_GAP:
         raise AssertionError(

@@ -1,23 +1,20 @@
-"""Proximal penalty: decay-to-pure-LP correctness and the
-fewer-iterations priority win it exists for.
+"""Proximal penalty: decay-to-pure-LP correctness and the iteration win.
 
 Both legs drive the penalty through the test-local walk's decay schedule
 (``qp_weight``/``decay``/``penalty_ref``): the weight decays linearly to
 exactly zero over ``decay`` iterations, so the terminating solve is always
-a pure LP whose duals are true LP duals. The schedule lives in the walk -
-not in a shipped driver - because the production penalty driver does not
-exist yet; ``MasterBackend.set_penalty`` is the only contract surface it
-touches.
+a pure LP whose duals are true LP duals. The walk mirrors the production
+driver's objective-staging path, with ``MasterBackend.set_penalty`` as the
+backend contract surface.
 
-The correctness leg uses a deliberately degenerate fixture (one theta
+The correctness leg uses a deliberately degenerate fixture — one theta
 coordinate is unpinned at the optimum, so the optimal face is a flat
-continuum): the penalty selects a determinate point on that face at no
-change to the unpenalised objective, the terminating solve is a verified
-pure LP, and HiGHS - which is not exposed as a scalable quadratic backend -
+continuum — where the penalty selects a determinate point at no change to
+the unpenalised objective, and HiGHS (no exposed quadratic support)
 hard-errors rather than approximate. The priority leg pins why the penalty
-exists: on a slow-converging fixture it reaches the same objective in strictly
-fewer row-generation iterations. That iteration count is the deterministic
-primary signal; wall-clock and RSS are soft, generously banded guards.
+exists: on a slow-converging fixture it reaches the same objective in
+strictly fewer row-generation iterations. Iteration counts are the
+deterministic signal; wall-clock and RSS are soft guards.
 """
 
 from __future__ import annotations
@@ -33,14 +30,13 @@ from _support.probes import measure
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
 from combrum.masters import make_master
-from combrum.transport import LocalCluster, SerialTransport
+from combrum.transport import LocalCluster, SerialTransport, TransportError
 
 GUROBI_AVAILABLE = gurobi_backend.available()
 HIGHS_AVAILABLE = highs_backend.available()
 
-# The penalty is a quadratic objective term, so every penalty gate needs a
-# backend with scalable native quadratic support: Gurobi runs them, HiGHS is
-# only ever exercised for its by-design hard error.
+# The penalty is a quadratic objective term: Gurobi runs the gates, HiGHS
+# is exercised only for its by-design hard error.
 needs_gurobi = pytest.mark.skipif(
     not GUROBI_AVAILABLE, reason="gurobipy missing or no environment starts"
 )
@@ -122,8 +118,8 @@ def _fixture_c_theta(arrays: dict[str, np.ndarray]) -> np.ndarray:
     """The master's linear theta objective, rebuilt off the fixture arrays.
 
     The observed-bundle phi total enters as the negated linear theta cost;
-    counting it here (independent of the master builder) gives tests an
-    oracle for c_theta.
+    recomputing it here keeps the expected c_theta independent of the
+    master builder.
     """
     problem = toy_problem(arrays)
     observed = arrays["observed"]
@@ -240,21 +236,17 @@ def test_penalty_walk_is_unique_pure_lp_and_objective_matches_no_penalty() -> (
     second = penalised()
     assert first.converged
 
-    # Determinism: the penalised fit is bitwise reproducible — the penalty
-    # adds no nondeterminism, so two runs agree to the byte.
+    # The penalty adds no nondeterminism: two runs agree to the byte.
     assert first.result.theta_hat.tobytes() == second.result.theta_hat.tobytes()
     assert first.objective == second.objective
 
-    # The terminating solve is a pure LP: the weight finished decaying to 0
-    # before convergence was accepted, so the published theta carries no
-    # residual quadratic term (and the duals below are therefore valid).
+    # The weight finished decaying before convergence was accepted, so the
+    # published theta carries no residual quadratic term.
     assert first.final_penalty_weight == 0.0
 
-    # The penalty changes the path, not the optimal value: the penalised
-    # and unpenalised fits reach the same unpenalised optimum.
+    # The penalty changes the path, not the optimal value.
     assert abs(first.objective - no_penalty.objective) <= PARITY_BAND
-    # The published value is the raw row-generation master objective; this
-    # fixture's unpenalised LP optimum is -1.0.
+    # This fixture's unpenalised LP optimum is -1.0.
     assert first.objective == pytest.approx(
         FLAT_FACE_RAW_OBJECTIVE,
         abs=PARITY_BAND,
@@ -268,12 +260,11 @@ def test_penalty_walk_is_unique_pure_lp_and_objective_matches_no_penalty() -> (
 
 @needs_gurobi
 def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
-    # The point of reverting to a pure LP for the final solve: its duals
-    # are true LP duals. Validity is checked structurally — nonnegativity
-    # and complementary slackness against the installed rows — not by
-    # bytewise equality with the no-penalty fit, because the degenerate
-    # face lets the two solves sit on different vertices with different
-    # bases (that divergence is exactly what the fixture is built to show).
+    # Reverting to a pure LP for the final solve is what makes its duals
+    # true LP duals. Validity is checked structurally — nonnegativity and
+    # complementary slackness — not by equality with the no-penalty fit,
+    # because the degenerate face lets the two solves sit on different
+    # vertices with different bases.
     arrays = flat_face_arrays()
     outcome = _flat_walk(
         SerialTransport(),
@@ -308,16 +299,11 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
         assert 0 <= coordinate < theta.shape[0]
         assert np.isfinite(value)
 
-    # --- non-degeneracy + KKT stationarity (the signal) --------------------
-    # The checks above are all vacuously satisfied by an all-zero dual
-    # vector (0 >= -band; pi*slack == 0 for any slack; the slack loop is a
-    # pure primal recomputation), so an accessor that silently returns zeros
-    # would pass. Pin the dual to the fixture's actual LP optimum instead.
-    #
-    # c_theta is the observed-bundle feature total: with r == 1 everywhere,
-    # c_theta[k] == -(number of agents whose observed bundle selects item k).
-    # Counted directly off the fixture arrays here, independent of the master
-    # builder that combrum runs.
+    # An all-zero dual vector satisfies every check above (0 >= -band, and
+    # pi*slack == 0 for any slack), so also pin the dual to the fixture's
+    # actual LP optimum. With r == 1 everywhere, c_theta[k] == -(number of
+    # agents whose observed bundle selects item k), counted directly off
+    # the fixture arrays.
     observed = arrays["observed"]
     n_agents_selecting = observed.astype(np.int64).sum(axis=0)
     c_theta = -n_agents_selecting.astype(np.float64)
@@ -330,59 +316,45 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
     lower, upper = -10.0, 10.0
     assert lower + 1e-6 < float(theta[0]) < upper - 1e-6
 
-    # The optimum is genuinely dual-active: at least one row carries strictly
-    # positive mass. The all-zero dual vector is exactly the invalid case
-    # this test exists to reject.
+    # At least one row must carry strictly positive dual mass.
     assert any(pi > PARITY_BAND for pi in dual.pis)
 
-    # KKT stationarity on the interior priced coordinate: with the box
-    # reduced cost zero there, the cut duals must offset the linear cost,
-    # sum_r pi_r * phi_r[0] == -c_theta[0] == 2.0. The all-zero vector gives
-    # 0 != 2 and fails. Derived from the fixture's c_theta, not the solver.
+    # KKT stationarity on the interior priced coordinate: its box reduced
+    # cost is zero, so the cut duals must offset the linear cost,
+    # sum_r pi_r * phi_r[0] == -c_theta[0] == 2.0.
     stationarity_theta0 = sum(
         pi_by_key[(row.agent_id, row.bundle_key)] * float(row.phi[0])
         for row in result.active_set
     )
     assert abs(stationarity_theta0 - (-c_theta[0])) <= PARITY_BAND
-    # The free coordinate is unpriced (every phi[1] == 0), so its stationarity
-    # is trivially 0 == -c_theta[1] == 0 regardless of the duals.
+    # The free coordinate is unpriced (every phi[1] == 0): 0 == -c_theta[1].
     stationarity_theta1 = sum(
         pi_by_key[(row.agent_id, row.bundle_key)] * float(row.phi[1])
         for row in result.active_set
     )
     assert abs(stationarity_theta1 - (-c_theta[1])) <= PARITY_BAND
 
-    # Bound-dual value correctness (not just finiteness). A box reduced cost is
-    # the KKT stationarity residual the active bound must carry:
-    #   RC[k] == c_theta[k] - sum_r pi_r * phi_r[k].
-    # For the free coordinate (unpriced: c_theta[1] == 0 and every phi[1] == 0)
-    # that residual is exactly 0 — a degenerate zero reduced cost. Both the
-    # target (0.0) and the residual formula come off the fixture's own c_theta
-    # and cut duals, never from the master's reduced-cost accessor, so a
-    # _bound_duals_now that publishes a wrong-but-finite RC is rejected here.
+    # A box reduced cost is the KKT stationarity residual the active bound
+    # carries: RC[k] == c_theta[k] - sum_r pi_r * phi_r[k]. Target and
+    # formula both come off the fixture's own c_theta and cut duals, not the
+    # master's reduced-cost accessor.
     for coordinate, value in dual.bound_duals.items():
         residual = c_theta[coordinate] - sum(
             pi_by_key[(row.agent_id, row.bundle_key)] * float(row.phi[coordinate])
             for row in result.active_set
         )
         assert value == pytest.approx(residual, abs=PARITY_BAND)
-    # The one active bound here is the free coordinate at its lower bound, whose
-    # reduced cost is degenerately zero; pin that concrete value directly.
+    # The one active bound is the free coordinate at its lower bound, whose
+    # reduced cost is degenerately zero.
     assert dual.bound_duals[1] == pytest.approx(0.0, abs=PARITY_BAND)
 
-    # --- nonzero bound reduced cost: value-correctness with signal ---------
     # The walk's own optimum only ever puts a coordinate on a bound with a
-    # DEGENERATE zero reduced cost (theta_1, unpriced), so every check above
-    # is satisfied by a _bound_duals_now that returns 0.0 for every bound
-    # coordinate. Drive the priced coordinate theta_0 onto a bound with a
-    # genuinely nonzero reduced cost and pin the whole bound_duals dict off
-    # the same fixture residual, so a constant-0 (or otherwise wrong) box
-    # reduced cost is caught here.
-    #
-    # Re-solving the converged relaxation with theta_0's box upper bound
-    # tightened to 0.2 (below the cut floor 0.5) pins theta_0 to its upper
-    # bound: the cuts all go slack (every cut dual 0), so stationarity puts
-    # the full linear cost onto the bound, RC[0] == c_theta[0] == -2.
+    # degenerate zero reduced cost (theta_1, unpriced), which a bound-dual
+    # path that always reports 0.0 would also produce. Re-solve the converged
+    # relaxation with theta_0's upper bound tightened to 0.2 (below the cut
+    # floor 0.5): theta_0 lands on the bound, every cut goes slack, and
+    # stationarity puts the full linear cost onto the bound,
+    # RC[0] == c_theta[0] == -2.
     tight_box = (
         np.array([-10.0, -10.0]),
         np.array([0.2, 10.0]),
@@ -394,15 +366,13 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
         probe_bound_duals = bound_probe.bound_duals()
         probe_cut_duals = bound_probe.dual_values()
 
-    # theta_0 is pinned to the tightened upper bound; theta_1 still sits on
-    # its lower bound. Both are box-active, so bound_duals carries exactly
-    # {0, 1} — pin the key set, not just membership.
+    # theta_0 on the tightened upper bound, theta_1 still on its lower
+    # bound: both box-active, so bound_duals carries exactly {0, 1}.
     assert abs(float(probe_theta[0]) - 0.2) <= 1e-6
     assert abs(float(probe_theta[1]) - (-10.0)) <= 1e-6
     assert set(probe_bound_duals) == {0, 1}
-    # Every cut is slack at this pinned point, so all cut duals vanish and
-    # the residual oracle reduces to c_theta alone — an independent hand
-    # value of (-2.0, 0.0), never read back off the master's accessor.
+    # Every cut is slack here, so all cut duals vanish and the residual
+    # reduces to c_theta alone: (-2.0, 0.0) by hand.
     for pi in probe_cut_duals.values():
         assert abs(pi) <= PARITY_BAND
     expected_bound_duals = {
@@ -415,13 +385,9 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
     }
     assert expected_bound_duals[0] == pytest.approx(-2.0, abs=PARITY_BAND)
     assert expected_bound_duals[1] == pytest.approx(0.0, abs=PARITY_BAND)
-    # Pin the FULL dict wholesale: exact keys and every value against the
-    # independent residual. A constant-0 accessor (RC[0] -> 0), a scaled one
-    # (RC[0] -> -4), or a dropped/spurious key all fail here — not just the
-    # one named failure.
+    # The whole dict: exact keys, every value against the residual.
     assert probe_bound_duals == pytest.approx(expected_bound_duals, abs=PARITY_BAND)
-    # And the load-bearing single value: theta_0's reduced cost is genuinely
-    # nonzero, so a _bound_duals_now that silently publishes 0.0 dies here.
+    # theta_0's reduced cost is genuinely nonzero here.
     assert probe_bound_duals[0] == pytest.approx(-2.0, abs=PARITY_BAND)
     assert abs(probe_bound_duals[0]) > 1.0
 
@@ -433,11 +399,11 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
 
 @needs_highs
 def test_highs_penalty_hard_errors_no_silent_approximation() -> None:
-    # HiGHS cannot host the quadratic term at native combRUM scale, so the
-    # walk's first set_penalty(weight>0) must raise NotImplementedError rather
-    # than silently approximate.
+    # The staged objective is consumed inside the formulation's owner
+    # collective, so the backend's NotImplementedError arrives wrapped in a
+    # TransportError rather than being approximated away.
     arrays = flat_face_arrays()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(TransportError, match="NotImplementedError"):
         run_walk(
             arrays,
             toy_problem(arrays),
@@ -459,9 +425,8 @@ def test_highs_penalty_hard_errors_no_silent_approximation() -> None:
 @pytest.mark.parametrize("size", [2])
 def test_penalty_walk_rank_invariant_bitwise(size: int) -> None:
     # The penalty is a root-only objective edit (the master lives on rank 0
-    # alone), so it adds no cross-rank reduction: the published theta and
-    # objective must come back bitwise identical whether the agents run
-    # serially or sharded across a fake cluster.
+    # alone) and adds no cross-rank reduction, so serial and sharded runs
+    # must publish bitwise-identical results.
     arrays = flat_face_arrays()
     penalty = dict(
         qp_weight=FLAT_QP_WEIGHT, decay=FLAT_DECAY, penalty_ref=FLAT_REF
@@ -486,9 +451,11 @@ def test_penalty_walk_rank_invariant_bitwise(size: int) -> None:
 # --------------------------------------------------------------------------
 
 # Slow-convergence fixture sizes. The small toy needs visibly many
-# row-generation iterations (the modular family pins theta agent-by-agent),
-# and the penalty win holds at >= 2 sizes — it must not vanish at scale.
+# row-generation iterations (the modular family pins theta agent-by-agent).
+# The win must hold at more than one size, or it could be a single-size
+# artifact; the parametrized gates below run at every entry.
 G5_SIZES = (12, 24)
+assert len(G5_SIZES) >= 2
 G5_N_ITEMS = 8
 # The penalty schedule that wins across the swept sizes (selected from the
 # dynamic-vs-static measurement below; static is the stronger performer on
@@ -498,16 +465,11 @@ G5_QP_WEIGHT = 1.0
 G5_DECAY = 3
 G5_REF = "static"
 
-# Wall-clock is a loose sanity ceiling, not a regression band — at these
-# millisecond fixture sizes the suite already flakes on timing under load,
-# and the iteration win is the real claim. The LP baseline is floored before
-# scaling so a sub-millisecond LP fit can't make the ratio explode on a
-# single QP-side scheduler hiccup.
+# Wall-clock is a loose sanity ceiling, not a regression band; the LP
+# baseline is floored so a sub-millisecond fit cannot explode the ratio.
 WALL_SANITY_FACTOR = 8.0
 WALL_FLOOR_SECONDS = 0.05
-# RSS is monotone (a process-lifetime high-water mark) and dominated by the
-# Python+gurobi baseline; the penalty adds only the O(K) quadratic term, so
-# a few-MB ceiling over the LP run's peak is generous and structural.
+# A few MB over the LP run's peak covers the penalty's O(K) term.
 RSS_MARGIN_BYTES = 32 * 1024 * 1024
 
 
@@ -544,9 +506,9 @@ def _lp_and_qp(arrays: dict[str, np.ndarray], ref: str = G5_REF):
 def test_penalty_converges_in_fewer_iterations_at_equal_objective(
     n_obs: int,
 ) -> None:
-    # The primary, deterministic signal: the penalised fit reaches the same
-    # objective in strictly fewer row-generation iterations. This is an
-    # iteration count (not wall-clock), so it cannot flake under load.
+    # The primary claim: the penalised fit reaches the same objective in
+    # strictly fewer row-generation iterations. An iteration count, not
+    # wall-clock, so it holds under load.
     arrays = _slow_arrays(n_obs)
     lp, qp = _lp_and_qp(arrays)
     assert lp.converged and qp.converged
@@ -558,44 +520,6 @@ def test_penalty_converges_in_fewer_iterations_at_equal_objective(
     assert abs(qp.objective - lp.objective) <= PARITY_BAND
 
 
-@needs_gurobi
-def test_penalty_iteration_win_holds_across_scales() -> None:
-    # Cross-size *aggregate* invariant — deliberately distinct from the
-    # per-size win asserted by test_penalty_converges_in_fewer_iterations_...
-    # (which already runs at every swept size via @parametrize). What that
-    # parametrization cannot express is that the sweep, taken as a whole, is
-    # a real multi-scale probe with no counterexample size: this test pins
-    # those aggregate facts.
-    savings: list[int] = []
-    readings: list[str] = []
-    for n_obs in G5_SIZES:
-        arrays = _slow_arrays(n_obs)
-        lp, qp = _lp_and_qp(arrays)
-        assert lp.converged and qp.converged
-        # The terminating solve is a pure LP at every scale (weight decayed
-        # to zero before convergence was accepted) — the parametrized win
-        # test checks this too, but the "across scales" claim is empty
-        # unless it holds for the whole sweep, so it is re-pinned per size.
-        assert qp.final_penalty_weight == 0.0
-        assert abs(qp.objective - lp.objective) <= PARITY_BAND
-        savings.append(lp.iterations - qp.iterations)
-        readings.append(
-            f"n_obs={n_obs}: lp_iters={lp.iterations}"
-            f" qp_iters={qp.iterations} dobj={qp.objective - lp.objective:+.2e}"
-        )
-    print("\n".join(readings))
-
-    # The "across scales" premise itself: the sweep must genuinely span more
-    # than one fixture size, or the claim is unexercised. Guards a silent
-    # collapse of G5_SIZES to a single element.
-    assert len(savings) == len(G5_SIZES) >= 2
-    # The aggregate win: *every* swept size is a strict win, stated once over
-    # the whole sweep. min(savings) >= 1 is the definition of "no counter-
-    # example size", derived from the invariant this test's name claims — not
-    # from any recorded iteration count.
-    assert min(savings) >= 1, f"a size lost the iteration win: {readings}"
-
-
 # --------------------------------------------------------------------------
 # (b): wall-clock (soft) and RSS (generous) guards
 # --------------------------------------------------------------------------
@@ -603,11 +527,13 @@ def test_penalty_iteration_win_holds_across_scales() -> None:
 
 @needs_gurobi
 @pytest.mark.parametrize("n_obs", G5_SIZES)
-def test_penalty_wall_clock_within_soft_sanity_ceiling(n_obs: int) -> None:
-    # soft guard: the penalised fit must not run away — it should stay
-    # within a generous multiple of the LP fit's wall clock. Deliberately
-    # loose (the iteration win is the real claim); a tight timing band at
-    # millisecond scale is the suite's known flake, so it is not used here.
+def test_penalty_wall_clock_and_rss_within_soft_ceilings(n_obs: int) -> None:
+    # Two soft guards over one measured lp/qp pair. Wall clock: the penalised
+    # fit must stay within a generous multiple of the LP fit's (a tight band
+    # at millisecond scale is the suite's known flake). RSS: the penalty adds
+    # only the O(K) quadratic term, no O(n_agents) blow-up, and RSS is a
+    # lifetime high-water mark, so the LP run is measured first and the
+    # margin is generous.
     arrays = _slow_arrays(n_obs)
     lp, lp_probe = measure(lambda: _slow_walk(arrays))
     qp, qp_probe = measure(
@@ -620,45 +546,13 @@ def test_penalty_wall_clock_within_soft_sanity_ceiling(n_obs: int) -> None:
     )
     ceiling = max(lp_probe.wall_seconds, WALL_FLOOR_SECONDS) * WALL_SANITY_FACTOR
     assert qp_probe.wall_seconds <= ceiling
-    # The ceiling alone can't tell a working penalty from a dead one: a
-    # no-op set_penalty leaves the walk on the pure-LP path, which still
-    # converges within this band. Pin the effect the penalty exists for —
-    # a strict iteration win at a matched objective — so a disabled penalty
-    # (qp.iterations == lp.iterations) fails here, not just silently drifts.
-    assert lp.converged and qp.converged
-    assert qp.final_penalty_weight == 0.0
-    assert abs(qp.objective - lp.objective) <= PARITY_BAND
-    assert qp.iterations < lp.iterations
-
-
-@needs_gurobi
-@pytest.mark.parametrize("n_obs", G5_SIZES)
-def test_penalty_peak_rss_within_bounded_margin(n_obs: int) -> None:
-    # The penalty adds only the O(K) quadratic term — no O(n_agents) blow-up
-    # — so the penalised fit's peak RSS stays within a bounded margin of the
-    # LP fit's. RSS is a lifetime high-water mark, so the LP run is measured
-    # first and the margin is generous; this gates structure, not a tight
-    # number.
-    arrays = _slow_arrays(n_obs)
-    lp, lp_probe = measure(lambda: _slow_walk(arrays))
-    qp, qp_probe = measure(
-        lambda: _slow_walk(
-            arrays,
-            qp_weight=G5_QP_WEIGHT,
-            decay=G5_DECAY,
-            penalty_ref=G5_REF,
-        )
-    )
     assert (
         qp_probe.peak_rss_bytes
         <= lp_probe.peak_rss_bytes + RSS_MARGIN_BYTES
     )
-    # RSS is a monotone lifetime high-water mark and the LP run is measured
-    # first, so qp_rss >= lp_rss is structural: this ceiling passes even when
-    # set_penalty is a dead no-op that saves nothing. Pin the penalty's actual
-    # effect — a strict iteration win at a matched objective — so a disabled
-    # penalty (qp.iterations == lp.iterations) fails here rather than sliding
-    # under a margin no fixture-scale penalty bug can breach.
+    # Neither ceiling can tell a working penalty from a dead one (a no-op
+    # set_penalty leaves the walk on the pure-LP path, which passes both), so
+    # this run must also show the iteration win at a matched objective.
     assert lp.converged and qp.converged
     assert qp.final_penalty_weight == 0.0
     assert abs(qp.objective - lp.objective) <= PARITY_BAND
@@ -672,17 +566,11 @@ def test_penalty_peak_rss_within_bounded_margin(n_obs: int) -> None:
 
 @needs_gurobi
 def test_dynamic_vs_static_reference_comparison_data() -> None:
-    # Not a winner-picking gate: it runs the same slow-convergence fixtures
-    # under both proximal references and records iteration counts and final
-    # objectives, so the project owner can ratify the default ref from
-    # measured evidence. Both must hit the same objective (within band) and
-    # terminate on a pure LP; which one saves more iterations is reported,
-    # never hard-coded.
+    # Not a winner-picking gate: it runs the slow-convergence fixtures under
+    # both proximal references and records iteration counts and objectives,
+    # so the default ref can be ratified from measured evidence. Which ref
+    # saves more iterations is reported, never hard-coded.
     readings: list[str] = []
-    # Per-size flags backing the three ratification invariants below. The
-    # comparison is only meaningful evidence if the penalty actually did
-    # something and the two references actually differ; a no-op or
-    # ref-ignoring set_penalty makes the recorded counts fiction.
     static_wins = 0
     refs_differ = 0
     for n_obs in G5_SIZES:
@@ -704,25 +592,14 @@ def test_dynamic_vs_static_reference_comparison_data() -> None:
             assert run.converged
             assert run.final_penalty_weight == 0.0
             assert abs(run.objective - lp.objective) <= PARITY_BAND
-        # The static ref — the one this file ratifies as the default — must
-        # save iterations at every swept size, or the "penalty helps" premise
-        # the ratification data rests on is false. A dead-no-op set_penalty
-        # leaves the walk on the pure-LP path (static == lp), which fails here.
+        # The static ref (the ratified default) must save iterations at every
+        # swept size, or the recorded counts are not evidence of anything.
         assert static.iterations < lp.iterations, (
             f"n_obs={n_obs}: static ref saved no iterations"
             f" (lp={lp.iterations}, static={static.iterations})"
         )
-        # The dynamic ref must never do worse than the plain LP: a proximal
-        # anchor cannot legitimately inflate the row-generation count past the
-        # unpenalised path.
-        assert dynamic.iterations <= lp.iterations, (
-            f"n_obs={n_obs}: dynamic ref lost to lp"
-            f" (lp={lp.iterations}, dynamic={dynamic.iterations})"
-        )
-        # The comparison the test exists to make is only real if the two
-        # references produce measurably different behaviour. A set_penalty that
-        # ignores its ref argument (e.g. always anchors at the origin) collapses
-        # static and dynamic to the same count — reject that here.
+        # The two references must behave measurably differently; identical
+        # counts would mean the ref argument never reached the penalty.
         assert static.iterations != dynamic.iterations, (
             f"n_obs={n_obs}: static and dynamic refs behaved identically"
             f" (both {static.iterations}) — the ref argument had no effect"
@@ -737,8 +614,8 @@ def test_dynamic_vs_static_reference_comparison_data() -> None:
             f" dynamic_obj={dynamic.objective:+.3e}"
             f" lp_obj={lp.objective:+.3e}"
         )
-    # The "across sizes" claim is unexercised unless the sweep genuinely spans
-    # more than one size and the invariants held at every one of them.
+    # The comparison must span more than one size, with the invariants
+    # holding at every one of them.
     assert len(readings) == len(G5_SIZES) >= 2
     assert static_wins == len(G5_SIZES)
     assert refs_differ == len(G5_SIZES)

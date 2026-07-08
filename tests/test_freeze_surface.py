@@ -66,24 +66,13 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "combrum._bundle_key": frozenset(),
     "combrum._version": frozenset(),
-    # The standalone activity-log value layer: typed events, bounded recorders,
-    # JSONL sidecars, and root-table formatting. It is intentionally a leaf
-    # module: no engine, result, or transport imports. The package root
-    # re-exports only the value-level config enum for scripts/notebooks.
+    # Activity-log value layer: typed events, bounded recorders, JSONL
+    # sidecars. Deliberately a leaf: no engine, result, or transport imports.
     "combrum.activity": frozenset(),
-    # The serial bootstrap: B cold weighted refits, one replication at a time.
-    # It composes the fit surface — build_fit_context + run_fit (engine,
-    # engine.driver) threading each rep's per-observation weights — and folds
-    # the per-rep theta/converged/dual into the frozen BootstrapResult (result),
-    # over the parameter layout result carries (parameters) and the oracle it
-    # refits (oracle). The native weight stream is drawn from the
-    # placement-invariant per-rep RNG (randomness); the opt-in per-rep dual is
-    # re-stamped onto its slot (dual) and streamed one-in-flight to the per-rep
-    # store (dualstore) — the writer side of the streaming dual store, consuming
-    # the frozen serializer, not widening it. It imports the transport contract
-    # (transport, transport.base) and never reaches engine internals or a
-    # solver: the fit runs through run_fit and the master lives behind the
-    # builder, matching the distributed bootstrap.
+    # Serial bootstrap: B cold weighted refits through build_fit_context +
+    # run_fit. Weights come from the placement-invariant RNG; per-rep results
+    # fold into BootstrapResult; opt-in duals stream one-in-flight to the
+    # per-rep store. No solver edge: the master lives behind the builder.
     "combrum.bootstrap": frozenset(
         {
             "combrum.dual",
@@ -100,17 +89,11 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The distributed-bootstrap scheduler drives bounded replica waves, streams
-    # opt-in dual payloads, resolves pricing, draws placement-invariant weights,
-    # and owns the batched reduce/exchange over the transport ABC. It reaches no
-    # solver, and distributed_context owns observed-feature preparation. The
-    # dual/dualstore edges are the
-    # writer side of the streaming dual store: the frozen serializer is
-    # consumed, not widened. The result/parameters edges are the
-    # published-result type and the theta layout it carries: the distributed
-    # bootstrap publishes the one frozen BootstrapResult (in result),
-    # constructing it over a parameter layout. engine.certify is the aggregate
-    # pricing-gap certificate, reduced once after all waves have priced.
+    # Distributed-bootstrap scheduler: bounded replica waves, streamed dual
+    # payloads, placement-invariant weights, and the batched reduce/exchange
+    # over the transport ABC. No solver edge; observed-feature preparation
+    # lives in distributed_context, and the pricing-gap certificate is reduced
+    # once after all waves have priced.
     "combrum.bootstrap_distributed": frozenset(
         {
             "combrum.context",
@@ -135,9 +118,8 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
         }
     ),
     "combrum.certification": frozenset(),
-    # Rank-agreement helper layer for public distributed controls, guarded
-    # rank-local hooks, and warm-start theta tokens. It depends only on the
-    # transport ABC inside the package graph it guards.
+    # Rank-agreement helpers for distributed controls, guarded rank-local
+    # hooks, and warm-start theta tokens. Depends only on the transport ABC.
     "combrum.engine.agreement": frozenset(
         {"combrum._version", "combrum.transport.base"}
     ),
@@ -149,14 +131,8 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The adaptive-timeout callback helpers: a core module
-    # that imports the schedule/settings vocabulary it drives — its own
-    # typed schedule lives in-module, so the edges are SolverSettings /
-    # SolverConfigurable from the neutral solver_settings module
-    # and the Oracle type the produced hook is typed against. It applies
-    # settings through the capability protocol alone, so it reaches no
-    # concrete solver or oracle, and the frozen Oracle ABC is consumed,
-    # never widened.
+    # Adaptive-timeout callbacks. Settings apply through the SolverConfigurable
+    # protocol, so no concrete solver edge; Oracle only types the hook.
     "combrum.callbacks": frozenset(
         {"combrum.oracle", "combrum.solver_settings"}
     ),
@@ -165,18 +141,12 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "combrum.demand": frozenset(),
     "combrum.dual": frozenset(),
-    # The either-one resolution guard: a core
-    # module that resolves a symmetric per-agent | batched surface once
-    # and dispatches it. It names only the transport contract (for the
-    # rank-agreement round) plus stdlib/numpy; no solver or engine edge.
-    # formulation — so the formulations and the oracle can consume the
-    # guard without growing a coupling to either.
+    # The either-one resolution guard. Only the transport contract (for the
+    # rank-agreement round), so formulations and the oracle can consume it
+    # without coupling to each other.
     "combrum.interface_resolution": frozenset({"combrum.transport.base"}),
-    # The production driver subpackage — the engine-owned phase path, single-replication core:
-    # the engine that owns the cross-rank reduce/exchange so the formulation
-    # stays transport-passive. Its package init re-exports the public
-    # estimate API plus the driver / fit-step / certification / persistent-master
-    # surface, so it reaches only its own submodules.
+    # The package init re-exports the estimate API and the driver / fit-step /
+    # persistent-master surface, so it reaches only its own submodules.
     "combrum.engine": frozenset(
         {
             "combrum.engine.context_builder",
@@ -185,20 +155,12 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.engine.persistent",
         }
     ),
-    # The shared fit-context builder: the one owner of the estimation context
-    # assembly both the point estimate and the bootstrap/sweep drive. It builds
-    # the FitContext from user inputs (context), delegates observed-bundle
-    # objective construction to engine.observed, reads the formulation set it
-    # dispatches u_coef on (formulations), builds the master (masters), takes the
-    # parameter layout (parameters), reads the warm-start result anchor (result),
-    # names the cut-policy contract (policies), and types the transport +
-    # warm-start CutRow contract
-    # (transport.base). It composes these contracts; it never reaches a solver
-    # or the master directly (only through make_master and the
-    # reinstall/extract_cuts primitive).
-    # Gate note: engine.observed intentionally owns the either-one edge needed
-    # to infer observed phi from priced features only when Model.observed_features
-    # is omitted; explicit observed_features remains the phi-only escape hatch.
+    # The one owner of fit-context assembly, for both the point estimate and
+    # the bootstrap/sweep. Builds the FitContext, delegates observed-bundle
+    # objective construction to engine.observed (which infers observed phi
+    # from priced features when Model.observed_features is omitted), and
+    # reaches the master only through make_master and the
+    # reinstall/extract_cuts primitive.
     "combrum.engine.context_builder": frozenset(
         {
             "combrum.context",
@@ -211,12 +173,9 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # Distributed context assembly for the split observation/pricing axes:
-    # consumes the same context/result envelope as the dense builder, but gets
-    # observed feature rows from the distributed observed-feature surface and
-    # builds only an owner-rank lazy NSlack master. It names model/parameters
-    # through Model, formulation support through formulations, and the transport
-    # ABC for observation-axis keyed reductions and owner-rank guarded setup.
+    # Context assembly for the split observation/pricing axes: same envelope
+    # as the dense builder, but observed feature rows come from the
+    # distributed surface and only an owner-rank lazy NSlack master is built.
     "combrum.engine.distributed_context": frozenset(
         {
             "combrum.context",
@@ -229,20 +188,14 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # Observed-bundle objective materialization: consumes the comm-free
-    # features either-one resolver to infer phi rows from the active feature map
-    # when no explicit observed_features surface is supplied, and reduces the
-    # resulting objective/moment over the transport contract. It imports no
-    # formulation, master, solver, or bootstrap module.
+    # Observed-bundle objective materialization: infers phi rows through the
+    # features either-one resolver when observed_features is omitted, and
+    # reduces the objective/moment over the transport contract.
     "combrum.engine.observed": frozenset(
         {"combrum.interface_resolution", "combrum.transport.base"}
     ),
-    # Per-call gap aggregation into the frozen Certification report: a core
-    # module that reads the gap off each Demand the price phase produced and
-    # reduces the counts/worst-gap across ranks. It names the frozen report
-    # type it fills (certification), the demand envelope it reads (demand),
-    # and the transport ABC it reduces over (transport.base). It has no solver,
-    # master, or formulation edge.
+    # Gap aggregation into the Certification report: reads the gap off each
+    # priced Demand and reduces counts/worst-gap across ranks.
     "combrum.engine.certify": frozenset(
         {
             "combrum.certification",
@@ -250,13 +203,9 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The public estimate APIs: serial estimate consumes the shared full-array
-    # context builder, while estimate_distributed consumes the split-axis
-    # distributed builder and ResultPublication.SUMMARY. The formulations edge
-    # is the early public guard that admits NSlack only. Both drive the loop
-    # (engine.driver), certify pricing gaps (engine.certify), publish the frozen
-    # result (result), and import the transport contract (transport,
-    # transport.base).
+    # The public estimate APIs: estimate uses the full-array builder,
+    # estimate_distributed the split-axis one. The formulations edge is the
+    # early public guard that admits NSlack only.
     "combrum.engine.estimate": frozenset(
         {
             "combrum.activity",
@@ -277,16 +226,13 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The driver loop composes the frozen contracts it drives: the geometry it
-    # is handed (context), the price method pair it resolves once and routes
-    # pricing through (interface_resolution), the engine-owned fit-step
-    # (engine.fitstep), the solve contract it publishes
-    # (formulation), the driver-owned dual-concentration schedule branch
-    # (informed_schedule) and the schedule ABC it reads (schedule), the
-    # optional typed activity event sink (activity), the oracle ABC whose price
-    # surface it resolves (oracle), and the phase-step protocol it drives
-    # (rowgen). No solver or master edge; it touches the master only
-    # through the formulation's apply_step.
+    # The driver loop composes the contracts it drives: the geometry
+    # (context), the price pair it resolves once (interface_resolution), the
+    # fit-step (engine.fitstep), the solve contract (formulation), the
+    # schedule ABC plus the dual-concentration branch (schedule,
+    # informed_schedule), the activity sink, the oracle ABC, and the
+    # phase-step protocol (rowgen). No solver or master edge; it touches the
+    # master only through the formulation's apply_step.
     "combrum.engine.driver": frozenset(
         {
             "combrum.activity",
@@ -301,14 +247,9 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.schedule",
         }
     ),
-    # The engine-owned one-iteration fit-step: the price/reduce+exchange/
-    # finalise/solve phases, transport-passive over the formulation. It
-    # names the demand envelope it prices into (demand), the either-one
-    # PRICE contract it routes through (interface_resolution), the phase contract +
-    # contribution/reduced union it dispatches on by type (rowgen), and the
-    # transport ABC it owns the reduce/exchange on (transport.base). No
-    # solver, no master, no formulation module; it composes the
-    # RowGenStep protocol, never a concrete method.
+    # One-iteration fit-step: price / reduce+exchange / finalise / solve,
+    # transport-passive over the formulation. It composes the RowGenStep
+    # protocol, never a concrete formulation, master, or solver.
     "combrum.engine.fitstep": frozenset(
         {
             "combrum.demand",
@@ -317,13 +258,10 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The persistent-master driver: holds one master
-    # across an outer ψ search, RHS-rewriting the carried cuts and warm-solving
-    # per ψ. It composes the shared builder's reuse hook + observed-objective
-    # helper (engine.context_builder), the loop entry with its suppress_close
-    # flag (engine.driver), and types its RHS map over the cut row
-    # (transport.base). It can lazily default to NSlack, but the NSlack-only
-    # guard still uses exact class identity rather than isinstance.
+    # Persistent-master driver: one master held across an outer ψ search,
+    # RHS-rewriting the carried cuts and warm-solving per ψ. Lazily defaults
+    # to NSlack; the NSlack-only guard uses exact class identity, not
+    # isinstance.
     "combrum.engine.persistent": frozenset(
         {
             "combrum.engine.context_builder",
@@ -336,11 +274,8 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
     "combrum.formulation": frozenset(
         {"combrum.context", "combrum.demand"}
     ),
-    # The row-generation methods consume frozen contracts only: the solve
-    # contract they implement, the geometry/demand/dual payload types,
-    # the backend-neutral master ABC, the cut-policy profile vocabulary, the
-    # sparse-routing adapter, and the cut envelope. Solver imports must stay out
-    # of this module.
+    # The row-generation methods consume frozen contracts only; solver
+    # imports must stay out.
     "combrum.formulations": frozenset(
         {
             "combrum.formulations.nslack",
@@ -376,10 +311,9 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "combrum.informed_schedule": frozenset({"combrum.schedule"}),
     "combrum.master": frozenset({"combrum.transport.base"}),
-    # The two domain nouns: a plain dataclass module that imports the oracle,
-    # parameter, feature-map, and formulation contracts it holds as typed fields.
-    # These edges are runtime so Model annotations stay introspectable. No engine
-    # edge: this is a value type, not a fit driver.
+    # Plain dataclass module; the edges are the contracts it holds as typed
+    # fields, runtime so Model annotations stay introspectable. No engine
+    # edge: a value type, not a fit driver.
     "combrum.model": frozenset(
         {
             "combrum.formulation",
@@ -423,10 +357,9 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The run-metadata surface carries the already-computed diagnostics,
-    # certification report, provenance, and node layout. These runtime imports
-    # keep public result annotations introspectable; the module still only
-    # surfaces data the run already produced, never re-derives it.
+    # Run-metadata surface: carries diagnostics the run already produced,
+    # never re-derives them; the runtime imports keep public result
+    # annotations introspectable.
     "combrum.runinfo": frozenset(
         {
             "combrum.certification",
@@ -434,27 +367,18 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
             "combrum.transport.base",
         }
     ),
-    # The composable row-generation phase contract: a core
-    # module the formulations implement so a future engine owns the
-    # cross-rank reduce/exchange. It names only the demand envelope and
-    # the cut row that envelope carries; the install phase touches the master
-    # through the formulation, not from here.
+    # The row-generation phase contract; the engine owns the cross-rank
+    # reduce/exchange, so only the demand envelope and cut row are named here.
     "combrum.rowgen": frozenset(
         {"combrum.demand", "combrum.transport.base"}
     ),
     "combrum.schedule": frozenset(),
-    # The wholesale-capture record: a core module
-    # the formulations emit into so the either-one gate can witness every
-    # filter-chain input over its full pre-filter domain. Like rowgen it
-    # names only the demand envelope; cut-row identities are stored as typed
-    # scalar fields, so it needs no transport import. It captures values the
-    # formulation already holds; it never reaches the master itself. The two
-    # formulations grow an edge to it (the emission), mirroring the rowgen
-    # precedent where a new core phase module is consumed by both.
+    # The capture record the formulations emit into, so the either-one gate
+    # sees every filter-chain input pre-filter. Cut-row identities are stored
+    # as typed scalars, so no transport import.
     "combrum.steprecord": frozenset({"combrum._bundle_key", "combrum.demand"}),
-    # The neutral runtime-settings contract: SolverSettings /
-    # SolverConfigurable, framework types with no concrete-solver edge, so
-    # the callback layer drives them without reaching the solver package.
+    # SolverSettings / SolverConfigurable: framework types with no
+    # concrete-solver edge.
     "combrum.solver_settings": frozenset(),
     "combrum.transport": frozenset(
         {
@@ -465,10 +389,8 @@ FROZEN_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "combrum.transport._common": frozenset(),
     "combrum.transport.base": frozenset({"combrum._bundle_key"}),
-    # The MPI implementation consumes exactly the contracts the references
-    # consume: the frozen contract and the shared reduction kernel.
-    # mpi4py itself is loaded lazily at instantiation (an optional
-    # extra), so it contributes no import edge anywhere.
+    # mpi4py is loaded lazily at instantiation (an optional extra), so it
+    # contributes no import edge.
     "combrum.transport.mpi": frozenset(
         {
             "combrum.reductions",
@@ -569,8 +491,8 @@ def _runtime_imports(
                 continue
             if isinstance(node, ast.Match):
                 # ast.Match keeps its arms in .cases (not a body/orelse field),
-                # so recurse explicitly or an import relocated into a case arm
-                # would vanish from the graph unseen.
+                # so recurse explicitly or an import inside a case arm would
+                # vanish from the graph.
                 for case in node.cases:
                     visit(case.body, type_checking)
                 continue
@@ -608,16 +530,14 @@ def test_runtime_import_graph_is_frozen() -> None:
     assert set(actual) == set(FROZEN_IMPORTS), (
         "module set changed: "
         f"new={sorted(set(actual) - set(FROZEN_IMPORTS))}, "
-        f"gone={sorted(set(FROZEN_IMPORTS) - set(actual))} — a contract "
-        "module appeared or vanished; amend FROZEN_IMPORTS explicitly"
+        f"gone={sorted(set(FROZEN_IMPORTS) - set(actual))}; "
+        "amend FROZEN_IMPORTS explicitly"
     )
     for module, expected in FROZEN_IMPORTS.items():
         got = actual[module]
         assert got == expected, (
-            f"{module}: runtime import surface changed — "
+            f"{module}: runtime imports changed — "
             f"added={sorted(got - expected)}, removed={sorted(expected - got)}"
-            " — a new intra-package coupling is an architecture change, not"
-            " an implementation detail"
         )
 
 
@@ -646,13 +566,11 @@ def test_from_package_import_reexported_name_adds_no_submodule_edge() -> None:
 
 
 def test_relative_from_edges_resolve_against_own_package() -> None:
-    # Current src uses only absolute imports, so the ``node.level > 0`` branch of
-    # _from_edges (and _resolve_relative behind it) is otherwise never exercised.
-    # Drive it directly with hand-resolved expecteds derived from Python's
-    # relative-import rules — strip ``level - 1`` trailing components of the
-    # importing package, then attach the module tail (or each bare name) — so a
-    # future src module that adopts ``from . import sibling`` is attributed to the
-    # right absolute edge. Expecteds are NOT read back from _resolve_relative.
+    # src uses only absolute imports, so the ``node.level > 0`` branch of
+    # _from_edges (and _resolve_relative behind it) is never hit by the
+    # frozen-graph test. Check it directly against Python's relative-import
+    # rules: strip ``level - 1`` trailing components of the importing package,
+    # then attach the module tail (or each bare name).
     #
     # ``from . import demand`` inside package ``combrum``: level 1 stays in the
     # package, each bare name is its own submodule edge.
@@ -672,9 +590,8 @@ def test_relative_from_edges_resolve_against_own_package() -> None:
     assert _from_edges(node, base_pkg="combrum", module_files=MODULE_FILES) == {
         "combrum.transport"
     }
-    # Multi-level: ``from ..`` inside combrum.engine strips one component back to
-    # combrum, so a bare name resolves to combrum.x — this pins the level-1
-    # stripping arithmetic that a level-0 file could never reach.
+    # Multi-level: ``from ..`` inside combrum.engine strips one component back
+    # to combrum, so a bare name resolves to combrum.x.
     node = _parse_from("from .. import x")
     assert _from_edges(
         node, base_pkg="combrum.engine", module_files=MODULE_FILES
@@ -721,17 +638,10 @@ def test_walker_sees_imports_inside_match_case_arms(tmp_path: Path) -> None:
 
 
 def test_walker_descends_every_compound_statement_field(tmp_path: Path) -> None:
-    # The generic descent loop recurses into the "body", "orelse", "finalbody",
-    # and "handlers" fields of each node, so an import buried in a ``try`` body,
-    # an ``except`` handler, a ``finally`` block, or a ``for``/``while`` ``else:``
-    # clause is still recorded. No real src module places a combrum import in
-    # those contexts today, so test_runtime_import_graph_is_frozen never crosses
-    # that boundary — yet the backend try/except guards in masters and transport
-    # are exactly where a future lazy intra-package edge would land. Pin the full
-    # edge set from a probe that seeds a distinct module into each field: any
-    # narrowing of the descent tuple (or dropping the except-handler recursion)
-    # loses at least one edge and fails the equality. Expecteds are the modules
-    # the probe hand-places, not read back from the walker.
+    # An import buried in a ``try`` body, an ``except`` handler, a ``finally``
+    # block, or a ``for``/``while`` ``else:`` clause must still be recorded —
+    # the backend try/except guards in masters and transport are where a lazy
+    # intra-package edge would land.
     source = (
         "def f(x):\n"
         "    try:\n"
@@ -764,15 +674,8 @@ def test_walker_descends_every_compound_statement_field(tmp_path: Path) -> None:
 
 
 def test_walker_excludes_type_checking_guarded_imports(tmp_path: Path) -> None:
-    # The docstring makes typing-only imports (under ``if TYPE_CHECKING:``) a
-    # load-bearing exclusion, but no real src module places a combrum import
-    # under a TYPE_CHECKING guard, so test_runtime_import_graph_is_frozen is
-    # identical whether or not the exclusion fires. Pin both directions of the
-    # boundary with a probe: the guarded arm must drop out, while the runtime
-    # ``else:`` sibling and a top-level import must survive. This fails if the
-    # walker stops recognizing the TYPE_CHECKING guard (the excluded edge leaks
-    # back into the graph and silently omits nothing — or, worse, a genuine
-    # runtime edge is misclassified as typing-only and vanishes).
+    # The ``if TYPE_CHECKING:`` arm must drop out, while the runtime ``else:``
+    # sibling and a top-level import stay.
     source = (
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"
@@ -784,18 +687,14 @@ def test_walker_excludes_type_checking_guarded_imports(tmp_path: Path) -> None:
     probe = tmp_path / "typecheck_probe.py"
     probe.write_text(source)
     edges = _runtime_imports(probe, base_pkg="combrum._probe")
-    # The typing-only arm is excluded...
     assert "combrum.master" not in edges
-    # ...while the runtime ``else:`` sibling and the top-level import survive.
     assert "combrum.oracle" in edges
     assert "combrum.demand" in edges
 
 
 def test_walker_excludes_attribute_form_type_checking_guard(tmp_path: Path) -> None:
-    # _is_type_checking_test also matches the attribute form ``typing.TYPE_CHECKING``
-    # (ast.Attribute arm), which no src module and no other test exercises. Pin it:
-    # a combrum import guarded by ``if typing.TYPE_CHECKING:`` must be excluded,
-    # while a sibling top-level import survives.
+    # _is_type_checking_test also matches the attribute form
+    # ``typing.TYPE_CHECKING``.
     source = (
         "import typing\n"
         "if typing.TYPE_CHECKING:\n"
@@ -809,23 +708,19 @@ def test_walker_excludes_attribute_form_type_checking_guard(tmp_path: Path) -> N
     assert "combrum.demand" in edges
 
 
-# Dynamic-import callees that can couple to a combrum module by string at
-# runtime while the AST import walker above sees nothing: it inspects only
-# ast.Import / ast.ImportFrom, so ``importlib.import_module("combrum.result")``
-# or ``__import__("combrum.result")`` never enters the frozen graph.
-# find_spec is here too: ``importlib.util.find_spec("combrum.x")`` imports the
-# parent package to locate the submodule, so it is a real runtime coupling.
+# Callees that import a combrum module by string, invisible to the AST import
+# walker above (it inspects only ast.Import / ast.ImportFrom). find_spec
+# counts: ``importlib.util.find_spec("combrum.x")`` imports the parent package
+# to locate the submodule.
 _DYNAMIC_IMPORT_CALLEES = frozenset(
     {"import_module", "reload", "__import__", "find_spec"}
 )
 
 
 def _importlib_alias_bindings(tree: ast.AST) -> set[str]:
-    # Local names bound to one of the dynamic-import callees via importlib, e.g.
-    # ``from importlib import import_module as im`` binds ``im`` and
-    # ``from importlib.util import find_spec`` binds ``find_spec``. A later
-    # ``im("combrum.result")`` is the same coupling as ``import_module(...)``;
-    # matching only the bare callee name would let the alias smuggle it past.
+    # Local names bound to one of the dynamic-import callees via importlib,
+    # e.g. ``from importlib import import_module as im`` binds ``im``. A later
+    # ``im("combrum.result")`` is the same coupling as ``import_module(...)``.
     aliases: set[str] = set()
     for node in ast.walk(tree):
         if (
@@ -840,11 +735,10 @@ def _importlib_alias_bindings(tree: ast.AST) -> set[str]:
 
 
 def _combrum_string_target(arg: ast.expr) -> str | None:
-    # The combrum module a dynamic-import argument names, or None. A bare literal
-    # ``"combrum.result"`` yields that string; a computed argument whose leftmost
-    # piece is a ``"combrum..."`` literal — ``"combrum." + tail`` or an f-string
-    # ``f"combrum.{tail}"`` — yields the sentinel ``"<computed>"`` so the class of
-    # runtime-assembled combrum names is not silently exempt from the gate.
+    # The combrum module a dynamic-import argument names, or None. A computed
+    # argument whose leftmost piece is a ``"combrum..."`` literal —
+    # ``"combrum." + tail`` or ``f"combrum.{tail}"`` — yields the sentinel
+    # ``"<computed>"`` so runtime-assembled names still register.
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return arg.value if arg.value.split(".")[0] == "combrum" else None
     if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
@@ -862,13 +756,10 @@ def _combrum_string_target(arg: ast.expr) -> str | None:
 
 def _dynamic_combrum_couplings(path: Path) -> set[tuple[str, str]]:
     # Every dynamic-import call in ``path`` whose argument names a combrum
-    # module: (callee, target). Independent of _runtime_imports — it walks Call
-    # nodes, not import statements — so it witnesses exactly the couplings the
-    # frozen-graph walker is blind to. Matches the callee both by bare name and
-    # by any importlib alias bound in the same file, and matches the target both
-    # as a literal and as a runtime-assembled ``combrum...`` string. First
-    # positional or keyword argument is enough: every dynamic-import callee takes
-    # the module name there.
+    # module, as (callee, target) pairs. Matches the callee by bare name or
+    # importlib alias, and the target as a literal or runtime-assembled
+    # ``combrum...`` string. Checking every positional or keyword argument is
+    # enough: each dynamic-import callee takes the module name there.
     tree = ast.parse(path.read_text())
     aliases = _importlib_alias_bindings(tree)
     out: set[tuple[str, str]] = set()
@@ -893,12 +784,9 @@ def _dynamic_combrum_couplings(path: Path) -> set[tuple[str, str]]:
 
 
 def test_no_dynamic_combrum_import_bypasses_frozen_graph() -> None:
-    # The frozen-graph walker gates only statically-expressed imports. A coupling
-    # introduced through importlib.import_module / importlib.reload / __import__ /
-    # find_spec with a "combrum..." target evades it entirely, so the graph would
-    # under-approximate true runtime coupling. Keep the set of such dynamic
-    # couplings empty across the package: any source module that adds one must
-    # be reviewed exactly like a static edge.
+    # The frozen graph gates only static imports; keep the package free of
+    # dynamic combrum imports so the graph stays a complete picture of runtime
+    # coupling.
     found = {
         _module_name(py): couplings
         for py in SRC.rglob("*.py")
@@ -906,25 +794,15 @@ def test_no_dynamic_combrum_import_bypasses_frozen_graph() -> None:
     }
     assert found == {}, (
         "dynamic intra-package coupling(s) bypass the frozen import graph: "
-        f"{found} — a combrum module reached by importlib.import_module / "
-        "importlib.reload / __import__ / find_spec is a runtime coupling the "
-        "AST walker cannot see; express it as a static import (so the frozen "
-        "graph gates it) or amend the contract explicitly"
+        f"{found}; express as a static import so the graph gates it"
     )
 
 
-def test_dynamic_coupling_oracle_catches_aliased_and_computed_forms(
+def test_dynamic_coupling_scan_catches_aliased_and_computed_forms(
     tmp_path: Path,
 ) -> None:
-    # The whole-package oracle above is only worth its docstring if it actually
-    # sees the evasions a real regression would use. The finding: append to a frozen
-    # leaf module ``def _late(): from importlib import import_module as _imp;
-    # return _imp("combrum.result")`` — a real combrum.demand -> combrum.result
-    # coupling that a bare-name callee match misses because the alias hides it.
-    # Drive the detector directly over a probe holding every bypass form and pin
-    # the exact witnessed set, so reverting any lens (alias resolution, find_spec,
-    # or computed-string detection) fails here. Expecteds are hand-listed from the
-    # probe, not read back from the detector.
+    # One probe per bypass form: importlib alias, find_spec (bare and
+    # attribute), string concatenation, f-string, and the plain attribute call.
     source = (
         "from importlib import import_module as _imp\n"
         "from importlib.util import find_spec\n"
@@ -954,13 +832,10 @@ def test_dynamic_coupling_oracle_catches_aliased_and_computed_forms(
     }
 
 
-def test_dynamic_coupling_oracle_ignores_non_combrum_and_static(
+def test_dynamic_coupling_scan_ignores_non_combrum_and_static(
     tmp_path: Path,
 ) -> None:
-    # The oracle must not fire on the ordinary case, or the whole-package gate
-    # would be a false alarm on any file that uses importlib for a stdlib/3p name
-    # or that just imports combrum statically. Pin the negative: a probe with a
-    # non-combrum dynamic import and a static combrum import yields no couplings.
+    # Non-combrum dynamic imports and static combrum imports must not register.
     source = (
         "from importlib import import_module as _imp\n"
         "from combrum.demand import Demand\n"

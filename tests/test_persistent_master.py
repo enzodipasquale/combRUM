@@ -1,24 +1,19 @@
-"""Gate: the persistent-master driver + the suppress_close flag.
+"""PersistentMasterFit and the run_fit suppress_close flag.
 
 A ``PersistentMasterFit`` holds one master across an outer ψ search: it
-fail-closed-guards reuse validity, RHS-rewrites the carried cuts, and
-warm-solves. This file pins:
+guards reuse validity fail-closed, RHS-rewrites the carried cuts, and
+warm-solves. Covered here:
 
-* ``run_fit(suppress_close=True)`` retains the master (a spy master records
-  close() — default closes, suppress_close does not).
-* ``PersistentMasterFit`` is importable from ``combrum.engine``.
-* cold ``fit`` + ``reevaluate`` over a valid shocks-only ψ runs end-to-end
-  and publishes a result on the estimate criterion scale.
-* the fail-closed perturbation tests: (b1) a ψ that changes observed-bundle
-  φ/c_theta → G1, with and without the optional geometry signature; (b2) a
-  geometry_signature drift → G2 when supplied; (b3) a ψ that changes a
-  not-yet-installed agent's weight → G1's full-vector compare; and θ-box drift
-  → G3 when the geometry signature is omitted.
-* NSlack-only: a non-"NSlack"-named formulation → TypeError at first use.
+* ``run_fit(suppress_close=True)`` retains the master; the default closes it.
+* construction state and the ``PersistentFitResult`` surface.
+* cold ``fit`` + ``reevaluate`` over a valid shocks-only ψ, end to end.
+* the reuse guards: observed-bundle φ/c_theta drift → G1 (b1),
+  geometry-signature drift → G2 (b2), weight drift → G1 (b3), and θ-box
+  drift → G3 when the geometry signature is omitted.
+* NSlack-only: any other formulation → TypeError at first use.
 
-The persistent driver receives the oracle as an argument and lazily defaults
-to NSlack only when the caller omits a formulation. These tests mostly pass
-the formulation explicitly so the guard behavior stays pinned.
+Most tests pass the formulation explicitly rather than relying on the
+driver's lazy NSlack default.
 """
 
 from __future__ import annotations
@@ -41,17 +36,13 @@ from combrum.engine import (
 )
 from combrum.formulations import NSlack, OneSlack
 from _support.constants import MAX_ITERATIONS, THETA_BOUND, TOLERANCE
-from _support.families import load_family
+from _support.families import FAMILY_DIR, load_family
 from combrum.master import MasterBackend
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
 from combrum.parameters import Parameters
 from combrum.transport import LocalCluster, SerialTransport, Transport, TransportError
 from combrum.transport.base import CutRow
-
-from pathlib import Path
-
-FAMILY_DIR = Path(__file__).resolve().parent / "fixtures" / "families"
 
 HIGHS_AVAILABLE = highs_backend.available()
 needs_highs = pytest.mark.skipif(
@@ -118,12 +109,10 @@ def _rhs_transform(row: CutRow, psi: float) -> float:
 
 
 class _CloseSpyMaster(MasterBackend):
-    """A real MasterBackend that wraps a backend and records close().
+    """Wraps a real MasterBackend and counts close() calls.
 
-    Subclasses the ABC (NSlack.setup ``isinstance``-checks the master), so the
-    toy fit runs through a real highs solve while this counts close() calls —
-    default run_fit closes once, suppress_close=True closes zero times. Every
-    contract method forwards verbatim to the wrapped backend.
+    Subclasses the ABC because NSlack.setup ``isinstance``-checks the master.
+    Every contract method forwards verbatim to the wrapped backend.
     """
 
     def __init__(self, inner: MasterBackend) -> None:
@@ -160,9 +149,8 @@ class _CloseSpyMaster(MasterBackend):
 
     @property
     def n_active_cuts(self) -> int:
-        # Forward to the inner backend's own property (HighsMaster tracks its
-        # installed set independently of extract_cuts()), so a degraded
-        # extract_cuts() does not silently corrupt this count too.
+        # HighsMaster tracks its installed set independently of
+        # extract_cuts(); forward to the property, not a derived count.
         return self._inner.n_active_cuts
 
     def reinstall(self, rows) -> None:
@@ -196,13 +184,11 @@ def _built_with_spy(formulation):
 
 
 def _spy_on_live_master(driver: PersistentMasterFit) -> _CloseSpyMaster:
-    """Swap the driver's live master for a _CloseSpyMaster that records close().
+    """Swap the driver's live master for a _CloseSpyMaster.
 
-    Wraps the real backend built by ``fit`` so that any later ``master.close()``
-    (guard hard-error teardown or context-manager exit) is counted. Every
-    contract method forwards verbatim, so the driver's own guard/rewrite path is
-    unchanged. This gives the fail-closed lifecycle claim a meaningful signal: a leaky
-    ``close`` that only nils ``self._master`` leaves ``close_calls == 0``.
+    Any later ``master.close()`` — guard teardown or context-manager exit —
+    is counted; a teardown that only nils ``self._master`` without releasing
+    the backend leaves ``close_calls == 0``.
     """
     spy = _CloseSpyMaster(driver._master)
     driver._master = spy
@@ -218,13 +204,13 @@ def _problem_observed_features():
 
 
 def _hand_empirical_moment() -> np.ndarray:
-    """The published empirical_moment, hand-derived from the fixture.
+    """empirical_moment recomputed from the fixture arrays.
 
-    empirical_moment is the row-observed feature mean:
-    (1/N)·Σ_i observed_features(i, observed_i). For the toy family
-    observed_features(i, b) = b·r_i (φ = b·r), so it is (1/N)·Σ_i observed_i·r_i
-    — computed straight off the fixture arrays, independent of any combrum fit
-    or accessor. φ is ψ-invariant, so this is the value at every ψ.
+    empirical_moment is the row-observed feature mean
+    (1/N)·Σ_i observed_features(i, observed_i); the toy family has
+    observed_features(i, b) = b·r_i, so the mean comes straight off the
+    fixture arrays with no combrum accessor. φ is ψ-invariant, so this is the
+    value at every ψ.
     """
     arrays = load_family("toy", FAMILY_DIR)
     observed = np.asarray(arrays["observed"], dtype=np.float64)
@@ -246,11 +232,11 @@ def test_run_fit_default_closes_master() -> None:
 
 
 def _cold_rebuild_objective(formulation_factory) -> float:
-    """An independent cold-rebuild row-generation objective on the toy fit.
+    """The toy row-generation objective from a fresh master built from scratch.
 
-    A fresh master built and solved from scratch — a distinct path from the
-    retained master, so it is a valid oracle for the retained master's
-    re-solve objective (not the code-under-test's own carried value).
+    A distinct build/solve path from the retained master, so the retained
+    master's re-solve is checked against it rather than against its own
+    carried value.
     """
     params, observables, observed, shocks, _problem = _toy_inputs()
     built = build_fit_context(
@@ -282,19 +268,14 @@ def test_run_fit_suppress_close_retains_master() -> None:
     )
     assert spy.close_calls == 0
 
-    # The retained master is genuinely reusable, not merely non-closed: a fresh
-    # re-solve reproduces the converged row-generation objective. The oracle is
-    # a cold rebuild (a distinct master/path), so a suppress_close path that
-    # retains a torn-down/degraded master is caught rather than passing on a
-    # unexercised `is not None`.
+    # Retained must mean reusable: a fresh re-solve reproduces the objective
+    # of a cold rebuild, so a torn-down or degraded master fails here.
     ref_objective = _cold_rebuild_objective(lambda: NSlack(problem.features))
     spy.solve()
     assert abs(spy.objective() - ref_objective) <= 1e-9
 
-    # The carried cut set survived intact. spy.n_active_cuts forwards to the
-    # backend's installed-set count (independent of extract_cuts()), so a
-    # degraded extract_cuts() that drops rows is caught by the mismatch — the
-    # old `extract_cuts() is not None` (always a tuple) never tripped.
+    # The carried cut set is intact: extract_cuts() returns every row the
+    # backend's own installed-set count reports.
     installed = spy.n_active_cuts
     assert installed > 0
     assert len(spy.extract_cuts()) == installed
@@ -305,16 +286,8 @@ def test_run_fit_suppress_close_retains_master() -> None:
 
 
 def test_persistent_master_fit_importable_from_engine() -> None:
-    """PersistentMasterFit constructs to a clean pre-fit state and publishes the
-    documented result surface.
-
-    The plain ``is`` identity checks are collection-time tautologies (both names
-    resolve to the already-imported module attribute), so they add no meaningful signal over
-    the file-level import. Give the test real signal by constructing a driver and
-    pinning its post-``__init__`` invariants (a broken/raising constructor is
-    then caught) plus the PersistentFitResult field set (a dropped/renamed
-    published field is caught).
-    """
+    """PersistentMasterFit constructs to a clean pre-fit state and
+    PersistentFitResult carries the documented field set."""
     from combrum.engine import PersistentFitResult as R
     from combrum.engine import PersistentMasterFit as D
 
@@ -332,9 +305,7 @@ def test_persistent_master_fit_importable_from_engine() -> None:
         master_backend="auto",
         tolerance=TOLERANCE,
     )
-    # Pre-fit state: no master built yet, backend unresolved, no psi0 signature
-    # stashed. A constructor that eagerly built/resolved or corrupted these
-    # would break the fail-closed reuse contract.
+    # Pre-fit: no master built, backend unresolved, no ψ0 signature stashed.
     assert driver._master is None
     assert driver._resolved_master_backend is None
     assert driver._c_theta0 is None
@@ -424,10 +395,8 @@ def test_persistent_fit_resolves_backend_once(monkeypatch) -> None:
             observed_features=problem.observed_features,
             shocks=shocks0,
         )
-        # A second cold fit: resolve_master_backend must NOT run again — the
-        # is-None caching guard holds the psi0-resolved backend. Without a
-        # second fit the guard is never exercised (one call looks the same
-        # whether or not it caches).
+        # Second cold fit: resolve_master_backend must not run again — the
+        # cached ψ0-resolved backend is reused.
         driver.fit(
             2.0,
             oracle=problem.oracle,
@@ -447,21 +416,20 @@ def test_persistent_fit_resolves_backend_once(monkeypatch) -> None:
     finally:
         driver.close()
 
-    # One resolve across two fits: the backend is resolved once and cached.
+    # One resolve across two fits; every build (both fits + the reevaluate)
+    # threads the cached backend through.
     assert resolved_calls == ["auto"]
-    # Every build (both fits + the reevaluate) threads the cached resolved
-    # backend into build_fit_context.
     assert build_resolved == ["highs", "highs", "highs"]
 
 
 def _config_with_penalty(qp_weight: float, decay: int) -> LoopConfig:
-    """A LoopConfig whose (qp_weight, decay) may be an otherwise-rejected pair.
+    """A LoopConfig with a (qp_weight, decay) pair its validator may reject.
 
-    ``LoopConfig`` validates qp_weight>0 needs decay>=1 at construction, but the
-    require_quadratic guard is a runtime read of the two attributes. To separate
-    the ``and`` clauses we need the qp_weight>0 / decay=0 corner, which the
-    validator forbids — so build a valid frozen config, then override the two
-    fields directly. Nothing else in fit() reads these before resolve.
+    ``LoopConfig`` requires decay>=1 whenever qp_weight>0, but the
+    require_quadratic guard reads the two attributes at runtime, and
+    separating its ``and`` clauses needs the qp_weight>0 / decay=0 corner. So
+    build a valid frozen config and override the two fields directly; nothing
+    else in fit() reads them before resolve.
     """
     cfg = LoopConfig(max_iterations=1, qp_weight=1.0, decay=1)
     object.__setattr__(cfg, "qp_weight", qp_weight)
@@ -482,14 +450,10 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
         persistent_mod, "build_fit_context", fail_build_fit_context
     )
 
-    # Drive three configs that make the two sub-conditions of
+    # Three configs vary the two clauses of
     #   require_quadratic = (qp_weight > 0.0 and decay > 0)
-    # vary independently, and pin the EXACT captured vector against a
-    # hand-derived truth table. A one-clause regression (drop the decay clause,
-    # drop the qp clause) or `and`->`or` changes at least one entry:
-    #   (qp>0, decay>0):  and=T  or=T  qp-only=T  decay-only=T
-    #   (qp>0, decay=0):  and=F  or=T  qp-only=T  decay-only=F
-    #   (qp=0, decay>0):  and=F  or=T  qp-only=F  decay-only=T
+    # independently. The captured vector must match this truth table exactly:
+    # neither clause may be dropped and the `and` may not become an `or`.
     cases = [
         (_config_with_penalty(1.0, 1), True),
         (_config_with_penalty(1.0, 0), False),
@@ -501,8 +465,7 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
 
     def fake_resolve(requested, **kwargs):  # type: ignore[no-untyped-def]
         captured.append(bool(kwargs["require_quadratic"]))
-        # Raise only on the live-penalty branch so this test can prove the
-        # driver passes the exact require_quadratic truth table into resolution.
+        # Raise only on the quadratic branch so both outcomes are observable.
         if kwargs["require_quadratic"]:
             raise RuntimeError("quadratic backend required")
         return "highs"
@@ -531,10 +494,9 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
                     shocks=shocks0,
                 )
         else:
-            # No quadratic demanded: resolve returns "highs" and build is next.
-            # build_fit_context is stubbed to fail, so a raise here proves we
-            # got past resolve without a quadratic RuntimeError (i.e. the guard
-            # did NOT spuriously demand a quadratic backend).
+            # build_fit_context is stubbed to fail, so this AssertionError
+            # proves fit() got past resolve without demanding a quadratic
+            # backend.
             with pytest.raises(AssertionError, match="build_fit_context"):
                 driver.fit(
                     1.0,
@@ -545,17 +507,15 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
                     shocks=shocks0,
                 )
 
-    # The exact captured truth table pins that BOTH clauses are load-bearing.
     assert captured == expected
 
 
 def test_persistent_reevaluate_before_fit_raises_on_all_ranks_under_multirank() -> None:
     params, observables, observed, shocks0, problem = _toy_inputs()
 
-    # Record each rank's own outcome. LocalCluster.run re-raises only the first
-    # rank's error, so asserting on that alone cannot tell "all ranks agreed on
-    # the raise" from "rank 0 raised, a worker stranded/returned" — the exact
-    # desync the collective() guard prevents. We assert on the per-rank vector.
+    # LocalCluster.run re-raises only the first rank's error, which cannot
+    # distinguish "all ranks raised" from "rank 0 raised, a worker returned or
+    # stranded" — so record and assert each rank's own outcome.
     outcomes: dict[int, object] = {}
     lock = threading.Lock()
 
@@ -590,12 +550,9 @@ def test_persistent_reevaluate_before_fit_raises_on_all_ranks_under_multirank() 
     with pytest.raises(TransportError, match="no live master"):
         LocalCluster(2).run(per_rank)
 
-    # Every rank raised the SAME agreed TransportError (origin rank 0, the same
-    # message) — the collective() guard propagated the "no live master" failure
-    # to the worker rank rather than leaving it to return or strand at a
-    # half-run collective. A rank-0-only raise leaves rank 1 either
-    # "returned-normally" or raising a "rendezvous broken" TransportError from
-    # a different origin; both fail these assertions.
+    # Both ranks raised the same agreed TransportError (origin rank 0, same
+    # message): collective() propagates the failure to the worker rank rather
+    # than leaving it to return or strand at a half-run collective.
     assert set(outcomes) == {0, 1}
     for rank, observed_outcome in outcomes.items():
         assert isinstance(observed_outcome, TransportError), (rank, observed_outcome)
@@ -656,10 +613,8 @@ def test_persistent_set_rhs_failure_raises_on_all_ranks_under_multirank(
     monkeypatch.setattr(persistent_mod, "build_fit_context", fake_build_fit_context)
     monkeypatch.setattr(persistent_mod, "run_fit", fake_run_fit)
 
-    # Per-rank outcome vector: LocalCluster.run re-raises only the owner's
-    # error, so it cannot tell "both ranks agreed on the set_rhs failure" from
-    # "owner raised, worker returned success" — the desync the collective()
-    # wrapper around the RHS rewrite exists to prevent.
+    # As above: assert on each rank's own outcome, not just the error
+    # LocalCluster.run re-raises for the owner.
     outcomes: dict[int, object] = {}
     lock = threading.Lock()
 
@@ -702,11 +657,8 @@ def test_persistent_set_rhs_failure_raises_on_all_ranks_under_multirank(
     with pytest.raises(TransportError, match="bad rhs"):
         LocalCluster(2).run(per_rank)
 
-    # Both ranks raised the SAME agreed TransportError (origin rank 0, "bad
-    # rhs"): the collective() around the RHS rewrite turned the owner's
-    # set_rhs failure into an agreed verdict every rank raises. If only the
-    # owner raised, the worker rank returns normally (or strands), which these
-    # per-rank assertions catch.
+    # The collective() around the RHS rewrite turns the owner's set_rhs
+    # failure into an agreed verdict every rank raises.
     assert set(outcomes) == {0, 1}
     for rank, observed_outcome in outcomes.items():
         assert isinstance(observed_outcome, TransportError), (rank, observed_outcome)
@@ -753,10 +705,8 @@ def test_cold_fit_then_reevaluate_runs_end_to_end() -> None:
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
 
-    # Independent cold rebuild (a distinct master/path from the driver's own
-    # _publish): the oracle for cold.theta_hat and cold.iterations below. The
-    # toy row-generation LP is deterministic, so a fresh build converges to the
-    # byte-identical theta_hat.
+    # Cold-rebuild reference for theta_hat and iterations: the toy LP is
+    # deterministic, so a fresh build converges to the byte-identical theta_hat.
     cold_rebuild = build_fit_context(
         params,
         observables=observables,
@@ -790,21 +740,16 @@ def test_cold_fit_then_reevaluate_runs_end_to_end() -> None:
         assert cold.dual is not None
         n_cold_cuts = cold.n_active_cuts
 
-        # theta_hat is published from result.theta_hat, the converged master
-        # estimate. Pin the FULL (K,) vector byte-for-byte against the
-        # independent cold rebuild: a _publish that ships the scalar objective
-        # (or any wrong source/index) as theta_hat is caught wholesale, not just
-        # its distinctness from empirical_moment.
+        # theta_hat is the converged master estimate: the full (K,) vector
+        # matches the cold rebuild byte for byte.
         np.testing.assert_array_equal(cold.theta_hat, ref_theta_hat)
 
-        # empirical_moment is published from built.empirical_moment (the observed
-        # feature mean), NOT theta_hat. Pin it to the hand-derived fixture value
-        # so a swapped/wrong-source _publish mapping is caught, and pin that the
-        # two published vectors are genuinely distinct.
+        # empirical_moment is the observed feature mean, not theta_hat: it
+        # matches the fixture-derived value and differs from theta_hat.
         np.testing.assert_allclose(cold.empirical_moment, hand_moment, atol=1e-9)
         assert not np.allclose(cold.theta_hat, cold.empirical_moment)
 
-        # iterations is published from the diagnostics, matching a cold rebuild.
+        # iterations comes from the diagnostics, matching a cold rebuild.
         assert cold.iterations == ref_iterations
 
         # A second valid ψ: a ψ-coherent oracle/features over shocks_ψ = ψ·shocks0,
@@ -821,14 +766,11 @@ def test_cold_fit_then_reevaluate_runs_end_to_end() -> None:
         assert isinstance(re, PersistentFitResult)
         assert re.converged
         assert re.dual is not None
-        # The carried cut set is a superset of the cold fit's (warm reuse only
-        # grows the installed set), so the count is monotone non-decreasing.
+        # Warm reuse only grows the installed set.
         assert re.n_active_cuts >= n_cold_cuts
-        # φ is ψ-invariant, so the warm eval's empirical_moment is the same
-        # hand-derived vector — a wrong-ψ recompute or swapped source is caught.
+        # φ is ψ-invariant, so the warm eval publishes the same moment.
         np.testing.assert_allclose(re.empirical_moment, hand_moment, atol=1e-9)
-        # Warm reuse does no more row-generation than the cold fit paid for:
-        # the warm eval takes strictly fewer iterations than the cold fit.
+        # Warm reuse does strictly less row-generation than the cold fit.
         assert re.iterations < cold.iterations
     finally:
         driver.close()
@@ -923,9 +865,9 @@ def test_persistent_criterion_matches_cold_rebuild_within_band() -> None:
     """The warm ψ-eval's Q matches a cold rebuild-per-eval within PARITY_BAND.
 
     The RHS-rewritten ψ0 cuts stay valid lower bounds at ψ, so warm row-gen
-    converges to the same row-generation objective as a cold rebuild (the
-    warm-start property — Q banded, the vertex/active set may differ). This
-    pins the property on a single ψ.
+    converges to the same objective as a cold rebuild — Q banded, though the
+    vertex/active set may differ. Single-ψ case; the ψ-panel version lives in
+    test_persistent_master_rhs.py.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     psi = 1.5
@@ -951,9 +893,7 @@ def test_persistent_criterion_matches_cold_rebuild_within_band() -> None:
     finally:
         driver.close()
 
-    # A cold rebuild at the same ψ (fresh master, warm_cuts=None): the
-    # rebuild-per-eval reference the persistent path must band against. Same
-    # ψ-coherent oracle/features/shocks — only the master is cold-built.
+    # Cold rebuild at the same ψ: same oracle/features/shocks, fresh master.
     built = build_fit_context(
         params,
         observables=observables,
@@ -1050,13 +990,12 @@ def test_perturbation_b1_observed_phi_drift_hard_errors_at_g1() -> None:
 
     reevaluate is handed a different features map (φ perturbed), so c_theta@ψ
     no longer matches ψ0's — the objective is not ψ-invariant, out of the
-    RHS-only class. The guard hard-errors at G1 (and closes the master).
+    RHS-only class. The guard hard-errors at G1 and closes the master.
 
-    Single case, geometry_signature supplied: the φ drift trips the c_theta
-    sub-guard of G1, which short-circuits before G2 is ever consulted (the
-    geometry callable is called 0 times on the perturbed reevaluate). A
-    check_geometry parametrization here would run byte-identical code twice —
-    the G2 tuple/bytes checks live in the b2 tests instead.
+    Single case: the φ drift trips G1's c_theta sub-guard, which
+    short-circuits before G2 is consulted, so parametrizing over
+    check_geometry would run identical code twice. The G2 checks live in the
+    b2 tests.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     driver = _make_driver(observables, observed, params)
@@ -1092,8 +1031,7 @@ def test_perturbation_b1_observed_phi_drift_hard_errors_at_g1() -> None:
             observed_features=perturbed_observed_features,
             shocks=1.5 * shocks0,
         )
-    # The guard closed the master on the hard-error (fail-closed lifecycle): the
-    # backend was released (close_calls == 1), not merely dereferenced.
+    # Fail-closed: the hard-error released the backend, not just the reference.
     assert spy.close_calls == 1
     assert driver._master is None
 
@@ -1112,10 +1050,8 @@ def test_no_geometry_signature_theta_bounds_drift_hard_errors_at_g3(
 ) -> None:
     """Omitting geometry_signature does not disable the automatic θ-box guard.
 
-    Each half of the G3 OR must carry independent signal: a drift on ONLY the
-    upper bound, or ONLY the lower bound, must still hard-error. A one-sided
-    guard (compares only lower, or only upper) admits the opposite-side drift
-    silently.
+    A drift on only the upper bound, or only the lower, must still hard-error;
+    a one-sided compare would admit the opposite drift silently.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     n_items = observed.shape[1]
@@ -1144,7 +1080,6 @@ def test_no_geometry_signature_theta_bounds_drift_hard_errors_at_g3(
             observed_features=psi_problem.observed_features,
             shocks=psi * shocks0,
         )
-    # Fail-closed: the G3 hard-error released the backend, not just the ref.
     assert spy.close_calls == 1
     assert driver._master is None
 
@@ -1159,13 +1094,10 @@ def test_perturbation_b2_geometry_signature_drift_hard_errors_at_g2() -> None:
     G2 (covers the all-bundle φ the observed-only c_theta cannot reach).
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
-    # A geometry_signature that flips fingerprint once ψ != ψ0 (the ψ0 cold-fit
-    # value is stashed; this returns a different one at the reevaluate ψ). The
-    # two fingerprints are SAME-LENGTH, different-content bytes — the real
-    # geometry signature is array.tobytes() over a fixed-shape geometry, so a
-    # genuine drift keeps the length and changes only the content. This forces
-    # _signature_equal's content comparison (not a length shortcut) to carry the
-    # Content-comparison signal.
+    # The fingerprint flips once ψ != ψ0. Both values are same-length bytes: a
+    # real drift (array.tobytes() over a fixed-shape geometry) keeps the
+    # length and changes only the content, so the compare must read content,
+    # not length.
     def drifting_signature(psi: object) -> bytes:
         return b"psi0" if float(psi) == 1.0 else b"psi1"
 
@@ -1198,7 +1130,6 @@ def test_perturbation_b2_geometry_signature_drift_hard_errors_at_g2() -> None:
             observed_features=problem.observed_features,
             shocks=1.5 * shocks0,
         )
-    # Fail-closed: the G2 hard-error released the backend, not just the ref.
     assert spy.close_calls == 1
     assert driver._master is None
 
@@ -1215,19 +1146,16 @@ def test_perturbation_b2_geometry_signature_drift_hard_errors_at_g2() -> None:
 def test_perturbation_b2_tuple_geometry_signature_branch(outcome: str) -> None:
     """G2 over a tuple[np.ndarray, ...] geometry signature (the array branch).
 
-    b2 above only exercises the bytes branch of ``_signature_equal``; the
-    documented tuple contract (length shortcut, then per-element shape/dtype/
-    tobytes compare) is otherwise untested — it could be replaced by a constant
-    True with no failure. This drives the three tuple outcomes directly:
+    b2 above exercises only the bytes branch of ``_signature_equal``. The
+    documented tuple contract — length shortcut, then per-element
+    shape/dtype/tobytes compare — has three outcomes:
 
-    * equal tuples at ψ0 and ψ → reuse admitted (no G2 raise; the reevaluate is
-      allowed to proceed and warm-solve, may or may not converge — only the
-      absence of a G2 verdict is asserted).
-    * a same-length tuple with ONE drifted element → G2 (content compare).
-    * a length mismatch (drop one element) → G2 (the len shortcut).
+    * equal tuples at ψ0 and ψ → reuse admitted (only the absence of a G2
+      verdict is asserted; the warm solve may or may not converge).
+    * a same-length tuple with one drifted element → G2 (content compare).
+    * a length mismatch (drop one element) → G2 (the length shortcut).
 
-    The stashed ψ0 tuple and the ψ tuple are built by hand from the fixture
-    geometry, independent of any combrum accessor.
+    Both tuples are built by hand from the fixture geometry.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     base = np.asarray(load_family("toy", FAMILY_DIR)["observables"], dtype=np.float64)
@@ -1269,10 +1197,7 @@ def test_perturbation_b2_tuple_geometry_signature_branch(outcome: str) -> None:
     try:
         if outcome == "equal_admits_reuse":
             spy = _spy_on_live_master(driver)
-            # Equal tuple fingerprints: the G2 guard must NOT raise. The warm
-            # reevaluate proceeds (a raise here would be a G2 false-positive, or
-            # would tear down the master). A tuple branch mutated to `return
-            # False` would raise G2 on this equal case.
+            # Equal fingerprints: G2 must not raise, and the master stays live.
             re = driver.reevaluate(
                 1.5,
                 oracle=problem.oracle,
@@ -1305,16 +1230,13 @@ def test_perturbation_b2_tuple_geometry_signature_branch(outcome: str) -> None:
 def test_perturbation_b3_weight_drift_hard_errors_at_g1_end_to_end() -> None:
     """(b3) a ψ that drifts agent_weights alone (c_theta held) → G1 hard-error.
 
-    The full end-to-end reevaluate path: c_theta is held byte-identical to the
-    stashed ψ0 vector (so the c_theta sub-guard passes untripped) while a single
-    agent's weight is drifted, and the reevaluate must hard-error at the
-    agent_weights branch of G1 and close the master. This pins that the weight
-    sub-guard fires *on a real master reevaluate*, separately from c_theta.
+    End-to-end reevaluate: c_theta is held byte-identical to the stashed ψ0
+    vector while one agent's weight drifts, so the raise comes from G1's
+    agent_weights branch, not from c_theta.
 
-    It does NOT isolate the full-vector-vs-subset distinction: in the toy fit
-    every agent (id 0..N*S-1) receives at least one installed cut, so a
-    subset-over-installed-cuts compare covers the whole vector too. That
-    distinction is pinned unit-level in
+    In the toy fit every agent receives at least one installed cut, so this
+    path cannot separate a full-vector compare from a subset-over-installed-
+    cuts one; that distinction is covered unit-level in
     ``test_reuse_guard_needs_full_weight_vector_over_uninstalled_agent``.
     """
     persistent_mod = importlib.import_module("combrum.engine.persistent")
@@ -1343,19 +1265,16 @@ def test_perturbation_b3_weight_drift_hard_errors_at_g1_end_to_end() -> None:
         shocks=shocks0,
     )
 
-    # Independently record the installed cut set from the live master. In the
-    # toy fit this covers every agent, so the drifted index -1 is installed —
-    # documenting why this end-to-end path cannot isolate full-vs-subset.
+    # In the toy fit every agent has an installed cut, so the drifted index is
+    # installed (see docstring).
     installed = {int(row.agent_id) for row in driver._master.extract_cuts()}
     drift_index = n_agents - 1
     assert drift_index in installed
 
-    # Count the fail-closed teardown: the G1 hard-error must release the backend.
     spy = _spy_on_live_master(driver)
 
-    # Wrap build_fit_context so the reevaluate built holds a c_theta that is
-    # byte-identical to the stashed ψ0 vector (so the c_theta sub-guard passes
-    # untripped) while agent_weights is drifted only at drift_index.
+    # The reevaluate build holds c_theta byte-identical to ψ0 and drifts
+    # agent_weights only at drift_index.
     real_build = persistent_mod.build_fit_context
 
     def wrapped_build(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -1378,8 +1297,6 @@ def test_perturbation_b3_weight_drift_hard_errors_at_g1_end_to_end() -> None:
                     observed_features=problem.observed_features,
                     shocks=1.5 * shocks0,
                 )
-        # Fail-closed: the G1 weight hard-error released the backend, not just
-        # the reference.
         assert spy.close_calls == 1
         assert driver._master is None
     finally:
@@ -1387,19 +1304,16 @@ def test_perturbation_b3_weight_drift_hard_errors_at_g1_end_to_end() -> None:
 
 
 def test_reuse_guard_needs_full_weight_vector_over_uninstalled_agent() -> None:
-    """G1's weight guard must compare the FULL vector, not just installed cuts.
+    """G1's weight guard must compare the full vector, not just installed cuts.
 
-    The src comment (persistent.py:325-327) warns that the master's u_coef
-    closure is frozen at ψ0 and serves ψ0's weight to any *newly-priced-agent*
-    cut — an agent with no cut at ψ0 that warm row-gen prices for the first time
-    at ψ. So a weight drift on an uninstalled agent must still hard-error, which
-    a subset-over-installed-cuts compare would miss.
+    The master's u_coef closure is frozen at ψ0 (persistent.py:325-327) and
+    serves ψ0's weight to any cut warm row-gen prices for the first time at ψ,
+    so a weight drift on an agent with no installed cut must still hard-error.
 
-    Driven at the guard directly (the toy fit installs every agent, so no
-    end-to-end reevaluate can present an uninstalled-agent drift): a fake master
-    whose ``extract_cuts()`` covers only a strict subset of agents, and a built
-    whose agent_weights drifts on an agent *outside* that subset. The installed
-    set is read from the fake master itself, independent of the guard.
+    Driven at the guard directly — the toy fit installs every agent, so no
+    end-to-end reevaluate can present an uninstalled-agent drift. A fake
+    master's ``extract_cuts()`` covers a strict subset of agents, and the
+    built's agent_weights drifts outside that subset.
     """
     params, observables, observed, shocks0, _problem = _toy_inputs()
     n_agents = observed.shape[0]
@@ -1449,8 +1363,8 @@ def test_reuse_guard_needs_full_weight_vector_over_uninstalled_agent() -> None:
     with pytest.raises(ValueError, match=r"G1: agent_weights at psi"):
         driver._assert_reuse_valid(1.5, built)
 
-    # Control: the same guard admits an *undrifted* weight vector (so the raise
-    # above is the drift, not a mis-set fixture).
+    # Control: the same guard admits an undrifted vector, so the raise above
+    # is the drift.
     clean = SimpleNamespace(
         c_theta=c_theta0.copy(),
         ctx=SimpleNamespace(
@@ -1490,12 +1404,10 @@ def test_nslack_only_reject_at_cold_fit() -> None:
 
 @needs_highs
 def test_nslack_only_rejects_same_name_fake() -> None:
-    """A non-NSlack class merely named "NSlack" is rejected (not spoofable).
+    """A foreign class merely named "NSlack" is rejected.
 
-    The guard pins the exact defining identity (module + qualname), so a class
-    whose name is "NSlack" but whose module is not
-    combrum.formulations.nslack is fail-closed rejected — a bare class-name
-    check would have admitted this spoof.
+    The guard checks the defining identity (module + qualname), not the bare
+    class name.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     driver = _make_driver(observables, observed, params)
@@ -1512,7 +1424,6 @@ def test_nslack_only_rejects_same_name_fake() -> None:
             observed_features=problem.observed_features,
             shocks=shocks0,
         )
-    # No master was ever built (reject preceded the build).
     assert driver._master is None
 
 
@@ -1564,11 +1475,7 @@ def test_context_manager_closes_master() -> None:
             shocks=shocks0,
         )
         assert driver._master is not None
-        # Wrap the live backend so __exit__ has to actually call master.close(),
-        # not merely drop the reference. spy.close_calls pins the backend was
-        # released (a solver/environment leak otherwise sails through `is None`).
+        # __exit__ must call master.close(), not merely drop the reference.
         spy = _spy_on_live_master(driver)
-    # __exit__ closed it via close(): the backend was released exactly once, and
-    # the reference was cleared.
     assert spy.close_calls == 1
     assert driver._master is None

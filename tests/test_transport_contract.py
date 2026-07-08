@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import combrum.transport.reference as reference
-from _support.commprobe import CountingTransport
+from _support.commprobe import CountingTransport, spread_values
 from combrum.reductions import canonical_sum
 from combrum.transport import (
     CutRow,
@@ -29,16 +29,6 @@ from combrum.transport.reference import LocalMultirankTransport
 
 def bits(x: object) -> bytes:
     return np.asarray(x, dtype=np.float64).tobytes()
-
-
-def spread_values(
-    rng: np.random.Generator, shape: tuple[int, ...]
-) -> np.ndarray:
-    # Magnitudes spread over many orders: the regime where addition order
-    # moves the result, so the bitwise assertions below have a meaningful signal.
-    magnitude = rng.uniform(-10.0, 10.0, size=shape)
-    sign = rng.choice([-1.0, 1.0], size=shape)
-    return sign * 10.0**magnitude
 
 
 def row_sig(row: CutRow) -> tuple[int, int, bytes, bytes, bytes]:
@@ -77,11 +67,9 @@ def local_agent_axis_ids(
 def run_counting_exchange_tags(
     cluster: LocalCluster, fn
 ) -> tuple[list, Counter]:
-    """Run ``fn`` across the cluster, tallying every internal rendezvous
-    round by tag. Unlike the CountingTransport wrapper (which records one
-    tally per outer call), this observes the transport's own
-    ``_Rendezvous.exchange`` super-steps, so extra internal handshakes are
-    visible."""
+    """Run ``fn`` across the cluster, tallying the transport's own
+    ``_Rendezvous.exchange`` super-steps by tag. Unlike the CountingTransport
+    wrapper (one tally per outer call), this sees internal handshakes."""
     tally: Counter = Counter()
     lock = threading.Lock()
     real_exchange = reference._Rendezvous.exchange
@@ -110,14 +98,12 @@ def run_route_alloc_guarded(
     n_agents: int,
 ) -> list[dict[int, float]]:
     """Route ``values`` across ``cluster`` with numpy's bulk allocators
-    (``zeros``/``empty``/``full``/``ones``) intercepted: any single allocation
-    whose element count reaches the flattened agent count aborts the
-    run with :class:`_DenseAllocation` instead of materializing it. The guard
-    raises *before* delegating, so a dense regression is caught without ever
-    reserving the memory. Enforces the base.py contract that the primitive
-    'must not materialize or scan a dense n_agents vector'. local_ids is a
-    single-element array so nothing dense can leak in through the caller's
-    pricing axis."""
+    (``zeros``/``empty``/``full``/``ones``) intercepted: any single
+    allocation of >= n_agents elements raises :class:`_DenseAllocation`
+    before delegating, so the memory is never reserved. Enforces the base.py
+    contract that the primitive 'must not materialize or scan a dense
+    n_agents vector'. local_ids is a single-element array so nothing dense
+    can leak in through the caller's pricing axis."""
     dense_threshold = int(n_agents)
     real = {name: getattr(np, name) for name in ("zeros", "empty", "full", "ones")}
 
@@ -291,17 +277,12 @@ def test_cutrow_preserves_bundle_key_bytes() -> None:
     np.testing.assert_array_equal(row.bundle, bundle)
 
 
-def _independent_canonical_order(
+def _reference_cut_order(
     rows: list[CutRow],
 ) -> tuple[CutRow, ...]:
-    """Reorder ``rows`` into (rep_id, agent_id, bundle_key) canonical order
-    without touching combrum's sort or the ``canonical_key`` accessor.
-
-    Structurally distinct from ``canonical_cut_order``: decorate-sort-undecorate
-    with the input index appended so ties resolve to input order (stable), and
-    the sort key is built from the individual fields, so a bundle_key-blind or
-    bundle_key-reversed regression in combrum cannot be mirrored here.
-    """
+    """Sort ``rows`` by (rep_id, agent_id, bundle_key) without combrum's sort
+    or the ``canonical_key`` accessor: decorate-sort-undecorate over the raw
+    fields, input index appended so ties keep input order."""
     decorated = [
         ((row.rep_id, row.agent_id, row.bundle_key, i), row)
         for i, row in enumerate(rows)
@@ -311,10 +292,9 @@ def _independent_canonical_order(
 
 
 def test_canonical_cut_order_sorts_and_is_stable() -> None:
-    # rep-major, then agent, then bundle_key, with stable ties. The agent-5
-    # cluster shares rep_id AND agent_id, so bundle_key is the SOLE deciding
-    # factor across p/q/r/s; p and q additionally share bundle_key (b"m") so
-    # their order is fixed by input stability alone (eq=False identity).
+    # rep-major, then agent, then bundle_key, stable ties. The agent-5 rows
+    # share rep_id and agent_id, so bundle_key alone decides p/q/r/s; p and q
+    # also share bundle_key b"m", so only input stability fixes their order.
     u = CutRow(
         rep_id=0, agent_id=2, phi=np.ones(1), epsilon=0.0, bundle_key=b"z"
     )
@@ -333,20 +313,15 @@ def test_canonical_cut_order_sorts_and_is_stable() -> None:
     a = CutRow(
         rep_id=1, agent_id=0, phi=np.ones(1), epsilon=0.0, bundle_key=b"z"
     )
-    # Scrambled input, bundle-key-reversed where the (rep, agent) tie exists:
-    # a bundle_key-blind stable sort would preserve this input order within the
-    # agent-5 cluster (s, p, q, r) and a bundle_key-reversed sort would emit
-    # (s, p, q, r) too, both differing from the canonical (r, p, q, s).
+    # Input is scrambled and bundle-key-reversed within the agent-5 tie: a
+    # bundle_key-blind or key-reversed sort would both emit (s, p, q, r)
+    # there, not the canonical (r, p, q, s).
     rows_in = [a, s, p, q, r, u]
     ordered = canonical_cut_order(rows_in)
 
-    # Independent oracle: hand-written expected tuple, cross-checked against a
-    # structurally different sort that never reads canonical_key.
     expected = (u, r, p, q, s, a)
     assert ordered == expected
-    assert ordered == _independent_canonical_order(rows_in)
-    # Pin the exact key sequence too, so a corruption of any field's rank
-    # (not just bundle_key) is caught wholesale rather than one element.
+    assert ordered == _reference_cut_order(rows_in)
     assert [
         (row.rep_id, row.agent_id, row.bundle_key) for row in ordered
     ] == [
@@ -393,8 +368,8 @@ def test_local_cluster_topology_ragged_last_node() -> None:
 
 def test_local_cluster_topology_default_single_node() -> None:
     outs = LocalCluster(3).run(lambda t: t.node)
-    # Pin every field per rank: on the default (ranks_per_node=size) path each
-    # rank keeps its own node_rank, which selects the node_shared publisher.
+    # On the default (ranks_per_node=size) path each rank keeps its own
+    # node_rank, which selects the node_shared publisher.
     assert outs == [
         NodeTopology(node_id=0, node_rank=r, node_size=3, n_nodes=1)
         for r in range(3)
@@ -436,8 +411,7 @@ def test_allreduce_max_across_ranks_and_serial() -> None:
     assert SerialTransport().allreduce_max(7.25) == 7.25
 
     # A NaN on any single rank must propagate to every rank (base.py
-    # contract). A NaN-swallowing regression (np.max -> np.nanmax) would
-    # return the finite 3.5 here and slip past.
+    # contract); a nanmax would return the finite 3.5 here.
     nan_outs = LocalCluster(3).run(
         lambda t: t.allreduce_max([np.nan, 3.5, 2.0][t.rank])
     )
@@ -653,10 +627,8 @@ def test_scatter_by_agent_payload_contract_enforced_everywhere() -> None:
 
     assert LocalCluster(2).run(out_of_range_ids) == [True, True]
 
-    # Pin the exact upper boundary: id == n_global (4) must be rejected with
-    # the [0, 4) ValueError, and id == n_global - 1 (3) must be accepted. A
-    # `> n_global` off-by-one would let id == 4 reach full[ids] and raise a
-    # raw IndexError (or misroute) instead of the contracted ValueError.
+    # id == n_global must hit the [0, 4) ValueError, not fall through to a
+    # raw IndexError from full[ids]; id == n_global - 1 is valid.
     def id_equals_n_global(t):
         arrays = full if t.rank == 0 else None
         ids = np.array([0]) if t.rank == 0 else np.array([4])
@@ -690,18 +662,14 @@ def test_send_to_root_delivers_only_to_root() -> None:
 
 
 def test_send_to_root_source_equals_root_returns_own_object() -> None:
-    # source == root exercises the identity-return branch (never hit by the
-    # source != root case above). base.py mirrors bcast: the root gets its own
-    # object back (identity, no deepcopy), peers get None. Pin both value and
-    # identity so an "always deepcopy" or "drop the payload" regression on this
-    # branch is caught, not just the aliasing.
+    # source == root takes the identity-return branch: base.py mirrors bcast,
+    # so the root gets its own object back (no deepcopy) and peers get None.
     sentinels = [np.array([float(r), float(r) + 0.5]) for r in range(4)]
 
     def fn(t):
         payload = {"rank": t.rank, "x": sentinels[t.rank]}
         got = t.send_to_root(payload if t.rank == 0 else None, source=0, root=0)
-        # Report identity against this rank's own sentinel so the root's
-        # is-own-object contract is checked in-thread, where the object lives.
+        # Check identity in-thread, where this rank's object lives.
         own = got is not None and got["x"] is sentinels[t.rank]
         return got, own
 
@@ -714,11 +682,10 @@ def test_send_to_root_source_equals_root_returns_own_object() -> None:
 
 
 def test_gather_agent_values_root_only_dense_vector() -> None:
-    # Values are laid out NON-monotonically against their global ids (rank 0
-    # puts the largest value 40 at the lowest id 0 and the smallest value 10
-    # at id 4), so the correct positional scatter differs from any sort-and-
-    # pack of the contributed values. n_global=7 leaves ids 5,6 uncontributed
-    # to pin the documented zero-fill for absent slots.
+    # Values sit non-monotonically against their ids (rank 0 puts 40.0 at
+    # id 0 and 10.0 at id 4), so a sort-and-pack of the values would differ
+    # from the correct positional scatter. ids 5, 6 stay uncontributed to
+    # check the documented zero-fill.
     n_global = 7
     ids = [
         np.array([0, 4], dtype=np.int64),
@@ -730,8 +697,6 @@ def test_gather_agent_values_root_only_dense_vector() -> None:
         np.array([20.0, 30.0]),
         np.array([25.0]),
     ]
-    # Independent oracle: scatter each rank's values into a hand-built zero
-    # vector at the exact ids, computed here without touching combrum output.
     expected = np.zeros(n_global, dtype=np.float64)
     for rank_ids, rank_vals in zip(ids, vals):
         expected[rank_ids] = rank_vals
@@ -790,9 +755,8 @@ def test_route_agent_values_emits_keys_in_increasing_order() -> None:
         5: 5.0,
         2: 2.0,
     }
-    # Hand-derived from the global-agent block partition, not from
-    # combrum: both ranks land non-empty buckets so the ordering check runs
-    # against real output rather than the unexercised [] == [].
+    # Derived from the block partition by hand; both ranks land non-empty
+    # buckets, so the ordering check below has real input to order.
     expected_buckets = [{}, {}]  # type: list[dict[int, float]]
     for gid, value in source_values.items():
         owner = agent_owner(gid, n_agents, size)
@@ -810,9 +774,6 @@ def test_route_agent_values_emits_keys_in_increasing_order() -> None:
         )
 
     outs = LocalCluster(size).run(fn)
-    # A router that drops all deliveries (empty buckets) trivially satisfies
-    # list(got) == sorted(got); pin exact per-rank contents so the ordering
-    # assertion has non-empty input to order.
     for rank, got in enumerate(outs):
         assert dict(got) == expected_buckets[rank]
         assert list(got) == sorted(got)
@@ -898,9 +859,7 @@ def test_route_agent_values_validation_errors_agree_across_ranks() -> None:
 def test_route_agent_values_sparse_delivery_one_round_and_partition() -> None:
     n_observations, n_simulations, size, source = 13, 20, 4, 3
     values = {0: 1.0, 27: 2.0, 259: 3.0}
-    # Per-rank expectation derived by hand from the flattened global-agent
-    # partition: divmod(260, 4) = (65, 0), so ids 0 and 27 land on rank 0
-    # while id 259 lands on rank 3.
+    # divmod(260, 4) = (65, 0): ids 0 and 27 land on rank 0, id 259 on rank 3.
     expected_buckets = [
         {0: 1.0, 27: 2.0},
         {},
@@ -921,27 +880,23 @@ def test_route_agent_values_sparse_delivery_one_round_and_partition() -> None:
     outs, exchange_tags = run_counting_exchange_tags(LocalCluster(size), fn)
     delivered = [got for got, _counts, _bytes in outs]
 
-    # Exact partition: every source pair reaches its global-agent owner rank
-    # once, carrying its own value, with keys emitted in increasing order.
     for rank, got in enumerate(delivered):
         assert got == expected_buckets[rank]
         assert list(got) == sorted(got)
         for gid, value in got.items():
             assert bits(got[gid]) == bits(value)
-    # Sparse: exactly the source pairs are delivered, no phantom entries.
     assert sum(len(got) for got in delivered) == len(values)
     assert {gid for got in delivered for gid in got} == set(values)
 
-    # One round per rank, counted at the transport's own rendezvous rather
-    # than the wrapper: the reference does a single counts+payload
-    # super-step, so exactly `size` exchanges carry this tag. Wrapper-call
-    # tallies cannot see extra internal handshakes; this can.
+    # The reference does a single counts+payload super-step, so exactly
+    # `size` rendezvous exchanges carry this tag. Counting at the rendezvous
+    # (not the wrapper) exposes any extra internal handshake.
     assert exchange_tags["route_agent_values"] == size
     assert [counts for _got, counts, _bytes in outs] == [
         {"route_agent_values": 1}
     ] * size
-    # Wire-size accounting stays sparse (one id + one value per delivered
-    # pair), and is far below a dense n_obs*n_sims float64 vector.
+    # Sparse wire size: one id + one value (16 B) per delivered pair, far
+    # below a dense n_obs*n_sims float64 vector.
     assert sum(
         bytes_["route_agent_values"] for _got, _counts, bytes_ in outs
     ) == 16 * len(values)
@@ -989,19 +944,14 @@ def test_route_agent_values_batched_routes_many_sparse_maps_once() -> None:
 
 
 def test_route_agent_values_never_scans_a_dense_pricing_axis() -> None:
-    # Cross the scale boundary the contract actually cares about: make
-    # n_observations * n_simulations enormous (1e9 elements = 8 GB dense)
-    # while only three source pairs are routed. run_route_alloc_guarded
-    # aborts the run the instant any numpy bulk allocator is asked for an
-    # array of >= n_obs*n_sims elements, so a "materialize the dense axis
-    # then read the sparse pairs back out" regression blows up here instead
-    # of silently O(n_obs*n_sims)-scanning. On unpatched combrum nothing that
-    # large is allocated, so the sparse pairs come back intact.
+    # 1e9 agents (8 GB dense) with three routed pairs: run_route_alloc_guarded
+    # aborts the run if any bulk allocator is asked for >= n_agents elements,
+    # so a "materialize the dense axis, then read the pairs back out" path
+    # blows up here rather than silently scanning.
     n_observations, n_simulations, size, source = 1_000_000, 1000, 4, 3
     values = {0: 1.0, 27: 2.0, 500_012: 3.0}
-    # Hand-derived owners under the global-agent block partition of 1e9 agents
-    # over 4 ranks. The first block has 250M agents, so all three ids land on
-    # rank 0 without allocating or scanning that dense axis.
+    # Block partition of 1e9 agents over 4 ranks: the first block holds 250M
+    # agents, so all three ids belong to rank 0.
     expected_buckets = [{0: 1.0, 27: 2.0, 500_012: 3.0}, {}, {}, {}]
 
     outs = run_route_alloc_guarded(
@@ -1070,10 +1020,10 @@ def test_node_shared_publish_error_agrees_across_ranks() -> None:
 # --- batched_max -----------------------------------------------------------
 
 
-def test_batched_max_matches_pooled_oracle() -> None:
+def test_batched_max_matches_np_max_across_ranks() -> None:
     rng = np.random.default_rng(77)
     vals = [spread_values(rng, (6,)) for _ in range(3)]
-    oracle = np.max(np.stack(vals), axis=0)
+    expected = np.max(np.stack(vals), axis=0)
 
     def fn(t):
         return t.batched_max(vals[t.rank])
@@ -1081,7 +1031,7 @@ def test_batched_max_matches_pooled_oracle() -> None:
     first = LocalCluster(3).run(fn)
     second = LocalCluster(3).run(fn)
     for a, b in zip(first, second):
-        assert bits(a) == bits(oracle)
+        assert bits(a) == bits(expected)
         assert bits(a) == bits(b)
     serial = SerialTransport().batched_max(np.array([1.0, -2.0]))
     assert serial.dtype == np.float64
@@ -1248,12 +1198,10 @@ def test_exchange_cuts_duplicate_keys_both_delivered_in_rank_order() -> None:
 
 
 def test_exchange_cuts_bundle_key_breaks_ties_across_ranks() -> None:
-    # Same (rep_id, agent_id) on every delivered row, so bundle_key is the
-    # sole canonical tiebreak. Each rank contributes its rows in bundle-key-
-    # DESCENDING local order; a bundle_key-blind (or reversed) sort would keep
-    # them descending, the canonical order sorts them ascending. With three
-    # ranks each contributing two rows, the delivered bundle_key sequence pins
-    # the full ascending order across the pooled batch.
+    # Every delivered row shares (rep_id, agent_id), so bundle_key is the
+    # sole canonical tiebreak. Each rank contributes its two rows bundle-key-
+    # descending; the canonical order returns the pooled six ascending, which
+    # neither a key-blind nor a key-reversed sort reproduces.
     owners = np.array([0])
 
     def fn(t):
@@ -1279,16 +1227,14 @@ def test_exchange_cuts_bundle_key_breaks_ties_across_ranks() -> None:
 
     got = LocalCluster(3).run(fn)[0]
     delivered = [row.bundle_key for row in got]
-    # Independent oracle: the multiset of contributed keys, sorted ascending.
     pooled_keys = [bytes([90 - r]) for r in range(3)] + [
         bytes([65 + r]) for r in range(3)
     ]
     assert delivered == sorted(pooled_keys)
     assert delivered == [b"A", b"B", b"C", b"X", b"Y", b"Z"]
 
-    # Serial path: two rows sharing (rep, agent), fed bundle-key-descending,
-    # must come back ascending. A bundle_key-blind stable sort returns input
-    # order [b'zzz', b'aaa'] instead.
+    # Serial path: two rows sharing (rep, agent) fed descending must come
+    # back ascending; a key-blind stable sort would return [b"zzz", b"aaa"].
     r_zzz = CutRow(
         rep_id=0, agent_id=5, phi=[1.0], epsilon=0.0, bundle_key=b"zzz"
     )
@@ -1310,10 +1256,9 @@ def test_exchange_cuts_rep_id_range_enforced() -> None:
     with pytest.raises(ValueError, match="out of range"):
         SerialTransport().exchange_cuts([row], np.zeros(2, dtype=np.int64))
 
-    # Pin the exact boundary: rep_id == B (2 against a length-2 owners array)
-    # must raise the 'out of range' ValueError. A `> B` off-by-one would let
-    # rep_id == B slip past the guard, then owners[row.rep_id] indexes out of
-    # the length-B array and raises a raw IndexError instead.
+    # rep_id == B (2, against length-2 owners) must raise the contracted
+    # 'out of range' ValueError, not fall through to a raw IndexError from
+    # owners[row.rep_id].
     boundary = CutRow(
         rep_id=2,
         agent_id=0,

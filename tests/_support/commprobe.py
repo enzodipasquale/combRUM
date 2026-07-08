@@ -29,6 +29,16 @@ def _nbytes(value: object) -> int:
     return int(np.asarray(value).nbytes)
 
 
+def spread_values(
+    rng: np.random.Generator, shape: tuple[int, ...]
+) -> np.ndarray:
+    # Magnitudes spanning many orders, where summation order changes the
+    # float result.
+    magnitude = rng.uniform(-10.0, 10.0, size=shape)
+    sign = rng.choice([-1.0, 1.0], size=shape)
+    return sign * 10.0**magnitude
+
+
 @dataclass(frozen=True)
 class CommSnapshot:
     """Immutable copy of a :class:`CountingTransport`'s tallies."""
@@ -254,13 +264,11 @@ class CountingTransport(Transport):
 
 
 def _check_tally_readers_return_copies() -> None:
-    """Pin the documented 'a copy' contract of counts()/bytes_moved().
+    """counts() and bytes_moved() must hand back fresh dicts.
 
-    Both readers promise a fresh dict, so a caller can mutate what it gets
-    back — or take before/after deltas — without corrupting the live tally.
-    Nothing else in the suite mutates a returned dict and re-reads, so this
-    guard is what keeps the copy from silently degrading to a live handle.
-    Runs at import, breaking every commprobe-using test file if it regresses.
+    A caller may mutate what it gets back — or take before/after deltas —
+    without corrupting the live tally. Runs at import, so every
+    commprobe-using test file fails if the copy degrades to a live handle.
     """
     probe = CountingTransport(SerialTransport())
     probe.batched_max(np.zeros(2))  # float64 x 2 = 16 payload bytes

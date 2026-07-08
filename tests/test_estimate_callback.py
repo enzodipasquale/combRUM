@@ -112,19 +112,16 @@ def _convergence_floor(callback, *, base_floor, iteration=3, oracle=None):
 
 
 def test_callback_convergence_floor_takes_max_of_base_and_callback() -> None:
-    # A callback that asks for a lower floor cannot pull the convergence
-    # floor below the base (decay/min-derived) floor.
+    # The callback can raise the floor above the base (decay/min-derived)
+    # value but never lower it.
     assert _convergence_floor(lambda it, oracle: 2, base_floor=5) == 5
-    # A callback that asks for a higher floor wins over the base.
     assert _convergence_floor(lambda it, oracle: 9, base_floor=5) == 9
-    # Equality resolves to that shared value.
     assert _convergence_floor(lambda it, oracle: 6, base_floor=6) == 6
 
 
 def test_callback_convergence_floor_none_falls_back_to_base() -> None:
-    # A callback returning None opts out of raising the floor this iteration.
+    # Returning None opts out of raising the floor this iteration.
     assert _convergence_floor(lambda it, oracle: None, base_floor=4) == 4
-    # No callback at all also yields exactly the base floor.
     assert _convergence_floor(None, base_floor=6) == 6
 
 
@@ -239,12 +236,9 @@ def test_run_fit_propagates_rank_local_oracle_setup_failure() -> None:
     )
 
 
-# The exact set of (qp_weight, decay) inputs that _validate_loop_controls
-# accepts *and* that vary the two factors of the AND independently. The
-# off-diagonal (0.0, 1) is the load-bearing case: it is a legal config
-# (penalty weight off, decay set) that separates AND from OR and from a
-# `qp_weight >= 0.0` boundary drift, since only under AND does it stay False.
-# (0.0, 0) and both True cases keep the diagonal pinned.
+# (qp_weight, decay) pairs accepted by _validate_loop_controls. (0.0, 1) is
+# the legal config -- penalty weight off, decay set -- where the two factors
+# of the AND disagree.
 _REQUIRE_QUADRATIC_CASES = [
     (0.0, 0),
     (0.0, 1),
@@ -254,10 +248,8 @@ _REQUIRE_QUADRATIC_CASES = [
 
 
 def _expected_require_quadratic(qp_weight: float, decay: int) -> bool:
-    # Independent oracle: an explicit truth table, not a re-spelling of the
-    # source's `qp_weight > 0.0 and decay > 0`. A quadratic-capable backend is
-    # demanded exactly when the proximal penalty is actually live -- a positive
-    # weight that also decays over at least one iteration.
+    # A quadratic-capable backend is needed exactly when the proximal penalty
+    # is live: a positive weight that decays over at least one iteration.
     penalty_live = {
         (0.0, 0): False,
         (0.0, 1): False,
@@ -274,8 +266,8 @@ def test_estimate_require_quadratic_tracks_penalty_regime(
     estimate_mod = importlib.import_module("combrum.engine.estimate")
     captured_require_quadratic: list[bool] = []
 
-    # A unique sentinel so estimate halts at the same point on both the
-    # penalty-on and penalty-off paths, letting us inspect the flag either way.
+    # Sentinel so estimate halts right after backend resolution on both the
+    # penalty-on and penalty-off paths.
     class _StopAfterResolve(Exception):
         pass
 
@@ -301,18 +293,13 @@ def test_estimate_require_quadratic_tracks_penalty_regime(
             decay=decay,
         )
 
-    # Pin the flag against the independent truth table. The off-diagonal
-    # (0.0, 1) case forces both factors of the AND to be evaluated: OR,
-    # `qp_weight >= 0.0`, and an unconditional-True all diverge here.
     assert captured_require_quadratic == [
         _expected_require_quadratic(qp_weight, decay)
     ]
 
 
 def test_estimate_require_quadratic_truth_table_matches_and_semantics() -> None:
-    # Sanity-check the independent oracle against the AND truth table so a typo
-    # in _expected_require_quadratic cannot silently weaken the parametrized
-    # test above. Recomputed here from first principles, not from the source.
+    # The penalty_live table must encode exactly `qp_weight > 0 and decay > 0`.
     for qp_weight, decay in _REQUIRE_QUADRATIC_CASES:
         both_factors_hold = qp_weight > 0.0 and decay > 0
         assert _expected_require_quadratic(qp_weight, decay) is both_factors_hold

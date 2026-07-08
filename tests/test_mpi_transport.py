@@ -5,8 +5,8 @@ Each parametrized launch shells out ``mpirun -n N`` on the rank program
 rank; replaying the identical battery on the in-process references must
 reproduce those records exactly. All payloads are digests or bit-hex
 strings, so record equality is bitwise equality of results. The launch
-carries a hard timeout so a guard regression that hangs fails loudly instead of
-wedging the suite.
+carries a hard timeout so a hang fails loudly instead of wedging the
+suite.
 
 The single-host launch puts every rank in one shared-memory domain,
 which is exactly the references' default topology (one node holding all
@@ -47,7 +47,7 @@ needs_highs = pytest.mark.skipif(
 
 
 def _expected_counts(rank: int, size: int) -> dict[str, dict[str, int]]:
-    """The pinned round shape of every counted scenario, per rank."""
+    """Expected round shape of every counted scenario, per rank."""
     expected: dict[str, dict[str, int]] = {
         # Windowed gather-to-root + bcast: one small typed allgather agrees the
         # per-rank layout/id span (O(size)); each bounded id window gathers row
@@ -176,6 +176,7 @@ def launch(
     return n, _launch_records(mpirun_path, n)
 
 
+@pytest.mark.mpi_smoke
 @pytest.mark.requires_mpi
 def test_every_rank_matches_the_reference_battery(
     launch: tuple[int, list[dict[str, Any]]],
@@ -193,11 +194,8 @@ def test_rank_invariant_results_identical_on_every_rank(
     launch: tuple[int, list[dict[str, Any]]],
 ) -> None:
     n, records = launch
-    # A one-element set is length-1 for any value the single rank produces,
-    # so "identical across ranks" is unverifiable below two ranks. The n1
-    # launch's invariant paths are pinned by the reference battery instead
-    # (test_every_rank_matches_the_reference_battery[n1]); skip here rather
-    # than pass vacuously.
+    # Cross-rank identity means nothing with a single rank; the n1 launch
+    # is covered by test_every_rank_matches_the_reference_battery.
     if n < 2:
         pytest.skip("cross-rank identity needs at least two ranks")
     for key in _core.INVARIANT_KEYS:
@@ -220,6 +218,7 @@ def test_pooled_sums_match_the_serial_reference(
             assert rec["results"][key] == serial[key], key
 
 
+@pytest.mark.mpi_smoke
 @pytest.mark.requires_mpi
 def test_internal_counters_pin_the_round_shape(
     launch: tuple[int, list[dict[str, Any]]],
@@ -346,11 +345,10 @@ def test_sum_and_gather_reject_bad_shapes_before_collectives(
 def test_skeleton_end_to_end_matches_serial_bitwise(
     family: str, n: int, mpirun_path: str
 ) -> None:
-    # The skeleton solved over MpiTransport at N ranks must reach exactly
-    # the theta_hat a single serial rank reaches — the distributed walk
-    # (chunked scatter + canonical reductions + one-super-step exchange +
-    # guard agreement) composing to the same bytes is the end-to-end
-    # determinism claim the skeleton exists to make over real MPI.
+    # The skeleton solved over MpiTransport at N ranks must reach the
+    # serial theta_hat exactly: chunked scatter, canonical reductions,
+    # the one-super-step exchange, and guard agreement compose to the
+    # same bytes.
     fixtures = _TESTS_DIR / "fixtures" / "families"
     serial = run_skeleton(
         load_family(family, fixtures),
@@ -368,18 +366,17 @@ def test_skeleton_end_to_end_matches_serial_bitwise(
         assert rec["best_total_regret"] == repr(0.0)
 
 
-# --- the split-axis smoke's independent fixture-arithmetic oracle -----------
+# --- split-axis smoke: expected bytes from the fixture arithmetic ------------
 
-# The smoke fixture, restated here so the expected bytes derive from the
-# fixture math rather than from any combrum reduction. Observed table row
-# i is [i+1, 10+3i, 100+5i] over N observations; per-obs weights are the
-# linspace the smoke passes to distributed_c_theta; S multiplies the c_theta
-# rows; the bootstrap wave draws replications 2 and 3 at base seed 77.
+# The smoke fixture: observed table row i is [i+1, 10+3i, 100+5i] over N
+# observations; per-obs weights are the linspace the smoke passes to
+# distributed_c_theta; S multiplies the c_theta rows; the bootstrap wave
+# draws replications 2 and 3 at base seed 77.
 _SPLIT_N, _SPLIT_S, _SPLIT_K = 11, 4, 3
 _SPLIT_REP_IDS = (2, 3)
 _SPLIT_BASE_SEED = 77
-# splitmix64 constants of the counter-based multiplier RNG, reimplemented so
-# the bootstrap oracle owes nothing to combrum.randomness.
+# splitmix64 constants of the counter-based multiplier RNG (deliberately
+# not imported from combrum.randomness).
 _MASK64 = 0xFFFFFFFFFFFFFFFF
 _BOOTSTRAP_NAMESPACE = 0xC0B2202606250001
 
@@ -393,7 +390,7 @@ def _splitmix64(x: int) -> int:
 
 
 def _multiplier(base_seed: int, rep_id: int, obs_id: int) -> float:
-    """Independent redraw of one bootstrap multiplier from the RNG spec."""
+    """Redraw one bootstrap multiplier from the RNG spec."""
     x = _BOOTSTRAP_NAMESPACE
     for field in (base_seed, rep_id, obs_id):
         x ^= field & _MASK64
@@ -402,17 +399,12 @@ def _multiplier(base_seed: int, rep_id: int, obs_id: int) -> float:
     return -math.log1p(-u)
 
 
-def _split_axis_oracles() -> dict[str, str]:
-    """Byte-exact expectations for every pooled key of split_axis_smoke.
+def _split_axis_expected_hex() -> dict[str, str]:
+    """Byte-exact expectations for every pooled key of split_axis_smoke,
+    recomputed from the fixture arithmetic.
 
-    Each value is recomputed from the fixture arithmetic and (for the
-    bootstrap) an independent reimplementation of the multiplier draw, then
-    reduced in canonical ascending-observation-id order. The smoke's shards
-    are contiguous and cover obs 0..N-1, so the pooled reduction is the
-    plain ``add.reduce`` over rows in id order — no combrum reduction kernel
-    or accessor is consulted, so a shared scaling regression on either
-    MpiTransport or the LocalCluster reference is caught here even though it
-    would leave the record equality and cross-rank identity intact.
+    The smoke's shards are contiguous and cover obs 0..N-1, so the pooled
+    reduction is the plain ``add.reduce`` over rows in ascending id order.
     """
     obs = np.arange(_SPLIT_N)
     table = np.column_stack(
@@ -468,37 +460,29 @@ def test_split_axis_observed_and_bootstrap_smoke_matches_localcluster(
     assert observed_ids == list(range(11))
     assert local_ids == list(range(44))
 
-    # Independent byte oracle for every pooled derived key. Each expected
-    # hex is recomputed from the fixture arithmetic (and, for the bootstrap,
-    # a from-spec redraw of the multiplier), reduced in canonical id order —
-    # never from a combrum reduction or accessor. This pins the bytes to the
-    # fixture, so a scaling regression that both MpiTransport and the
-    # LocalCluster reference share — which leaves the record equality above
-    # and cross-rank identity below both satisfied — is still caught. The
-    # empirical column means are the sanity anchors: mean(1..11)=6,
+    # Sanity anchor: the empirical column means are mean(1..11)=6,
     # mean(10+3i)=25, mean(100+5i)=125.
-    oracles = _split_axis_oracles()
-    assert oracles["empirical_hex"] == np.array(
+    expected_hex = _split_axis_expected_hex()
+    assert expected_hex["empirical_hex"] == np.array(
         [6.0, 25.0, 125.0], dtype=np.float64
     ).tobytes().hex()
-    for key, expected_hex in oracles.items():
-        assert records[0]["results"][key] == expected_hex, key
+    for key, value_hex in expected_hex.items():
+        assert records[0]["results"][key] == value_hex, key
 
-    # Cross-rank identity for the derived hex keys corroborates the record
-    # equality above; the oracle already pins each one against the fixture.
-    for key in oracles:
+    for key in expected_hex:
         assert {rec["results"][key] for rec in records} == {
             records[0]["results"][key]
         }
 
 
+@pytest.mark.mpi_smoke
 @pytest.mark.requires_mpi
 @needs_highs
 @pytest.mark.parametrize("n", (2, 3), ids=lambda n: f"n{n}")
 def test_nslack_bootstrap_distributed_matches_serial_bitwise(
     n: int, mpirun_path: str
 ) -> None:
-    expected = _core.nslack_bootstrap_serial_oracle()
+    expected = _core.nslack_bootstrap_serial_reference()
     records = _launch_records(mpirun_path, n, "nslack-bootstrap")
     for rec in records:
         assert rec["theta_hex"] == expected["theta_hex"], rec["rank"]
@@ -533,12 +517,7 @@ def _expected_scatter_counters(
     The scatter is one ids gather, one verdict broadcast, then one
     point-to-point window per (destination, key). The root sends every
     non-self destination's windows and receives none; each peer receives
-    exactly its own windows and sends none. Both keys and values are
-    derived here from the row partition and row widths — no combrum
-    reduction or accessor is consulted — so the returned dict is an
-    independent oracle for the whole counter shape, not just the p2p tally.
-    Both the root-0 and nonzero-root scatter tests share it, differing
-    only in which rank is root.
+    exactly its own windows and sends none.
     """
     row_nbytes = _core._CHUNK_ROW_NBYTES
     expected: dict[int, dict[str, int]] = {}
@@ -565,15 +544,7 @@ def _expected_scatter_counters(
 def _assert_scatter_send_recv_counts(
     records: list[dict[str, Any]], rows: list[int], n: int, root: int
 ) -> None:
-    """Pin every rank's whole counter dict against the fixture-derived shape.
-
-    The comparison is the entire ``rec["counters"]`` mapping against
-    ``_expected_scatter_counters`` — exact keys and exact values — so it
-    rejects not only an over- or under-fragmented p2p tally but any
-    counter-shape drift: a peer that erroneously sends, a root that
-    self-receives, a dropped ids gather or verdict broadcast, or a
-    spurious extra collective.
-    """
+    """Compare each rank's full counter dict against the fixture-derived shape."""
     expected = _expected_scatter_counters(rows, n, root)
     for rec in records:
         assert rec["counters"] == expected[rec["rank"]], rec["rank"]
@@ -595,8 +566,8 @@ def test_chunked_scatter_spans_windows_bitwise_with_bounded_sends(
         # The mapping survives chunking bit for bit, read-only included.
         assert rec["bitwise"] == {"m": True, "v": True}
         assert rec["read_only"] == [True, True]
-        # The fixture genuinely crosses chunks: every shard's wide key
-        # needs at least four windows (~3.5 chunks of selected bytes).
+        # The fixture crosses chunks: every shard's wide key needs at
+        # least four windows (~3.5 chunks of selected bytes).
         assert _n_windows(rows[r], row_nbytes["m"], _CHUNK_TEST_BYTES) >= 4
 
 
@@ -688,13 +659,11 @@ def test_per_rank_peak_rss_tracks_shard_not_total_including_root(
         assert all(rec["sample_ok"] for rec in records)
         ladder[n_rows] = records
     bottom, top = _LADDER_ROWS[0], _LADDER_ROWS[-1]
-    # Receivers: peak growth across a ×64 total growth tracks ONE shard,
-    # not two. Measured growth-minus-shard is ~5-6 MiB (interpreter, numpy
+    # Receivers: peak growth across the ×64 ladder tracks one shard, not
+    # two. Measured growth-minus-shard is ~5-6 MiB (interpreter, numpy
     # and MPI pools jitter by single-digit MiB), so the band is one shard
-    # plus a 12 MiB fixed slack. A receiver that kept a redundant second
-    # copy of its shard would add ~d_shard again (measured growth-minus-
-    # shard ~21 MiB at the top rung), overshooting this band — a 2.0×
-    # coefficient could never separate one held shard from two.
+    # plus a 12 MiB fixed slack — tight enough that a second held copy of
+    # the shard (~21 MiB over at the top rung) lands outside it.
     for r in range(1, 4):
         d_shard = (
             ladder[top][r]["shard_nbytes"] - ladder[bottom][r]["shard_nbytes"]
@@ -713,9 +682,7 @@ def test_per_rank_peak_rss_tracks_shard_not_total_including_root(
     # the memmap keeps generation out of the peak, not the read pass) and
     # the root's own contract-held shard. What remains is the scatter's
     # anonymous transient, which the chunk bound caps: it must stay flat
-    # while the total grows ×64. A root that materialized every
-    # destination's rows at once would add ~2× total here and blow this
-    # band by an order of magnitude.
+    # while the total grows ×64.
     def root_excess(n_rows: int) -> int:
         rec = ladder[n_rows][0]
         return (
@@ -730,26 +697,20 @@ def test_per_rank_peak_rss_tracks_shard_not_total_including_root(
         f"root anonymous excess grew {excess_growth / _MIB:.1f} MiB across"
         f" the ladder — the chunked stream must keep it near-flat"
     )
-    # The headline claim at the heaviest rung: root's peak stays within
-    # a documented factor of the non-root peaks once the source's
-    # resident pages are credited (measured ~150-158 vs ~64+64 MiB, with
-    # occasional ~1.7x page-fault spikes). This whole-process ratio is
-    # loose corroboration only — RSS is noisy enough that the tight signal
-    # live in the in-flight bound below; the 2.0 factor stops noise from
-    # false-failing while still rejecting any total-scaled root transient.
+    # Heaviest rung: root's peak stays within a factor of the non-root
+    # peaks once the source's resident pages are credited (measured
+    # ~150-158 vs ~64+64 MiB, with occasional ~1.7x page-fault spikes).
+    # RSS is noisy, so the 2.0 factor is deliberately loose; the sharp
+    # check is the in-flight bound below.
     top_root = ladder[top][0]["peak_rss_bytes"]
     top_nonroot = max(ladder[top][r]["peak_rss_bytes"] for r in (1, 2, 3))
     assert top_root <= 2.0 * top_nonroot + ladder[top][0]["source_nbytes"]
 
-    # The sharp structural bound behind the loose RSS bands: the meter in
-    # the rank program records the root's peak concurrently-outstanding
+    # The rank program meters the root's peak concurrently-outstanding
     # scatter-chunk bytes. The one-chunk-per-destination window cap holds
     # it at chunk_bytes * (size - 1) no matter how many windows the shards
-    # span, so it must stay flat across the ×64 ladder while the total
-    # grows. A last window is often partial, so the peak may sit below the
-    # cap; it can never sit above it. A root that let its in-flight buffer
-    # grow past one window per destination (e.g. a Waitall lifted out of
-    # the window loop) breaks this at once, independent of the RSS noise.
+    # span, so it must stay flat across the ×64 ladder. A last window is
+    # often partial, so the peak may sit below the cap, never above it.
     n_ranks = 4
     in_flight_cap = _LADDER_CHUNK_BYTES * (n_ranks - 1)
     for n_rows in _LADDER_ROWS:
@@ -778,13 +739,12 @@ def test_node_shared_rss_accounting_one_copy_per_node(
     assert all(rec["content_ok"] for rec in records)
     pub, peers = records[0], records[1:]
     assert pub["node_rank"] == 0
-    # The sharp structural check: the publisher's window segment is the
-    # whole payload, every peer's is zero bytes.
+    # The publisher's window segment is the whole payload, every peer's
+    # is zero bytes.
     assert pub["own_segment_bytes"] == payload
     assert all(rec["own_segment_bytes"] == 0 for rec in peers)
-    # The corroborating measurement, with generous bands (RSS is noisy):
-    # publishing costs the publisher about one copy — the single
-    # contract-mandated copy into the window — while a peer's resident
+    # RSS bands are generous (RSS is noisy): publishing costs the
+    # publisher about one copy into the window, while a peer's resident
     # set barely moves because it maps pages instead of copying them
     # (measured ~16.2 MiB vs ~0.2 MiB for a 16 MiB payload).
     assert 0.6 * payload <= pub["publish_delta_bytes"] <= 1.8 * payload

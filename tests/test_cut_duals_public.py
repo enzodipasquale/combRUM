@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,7 +8,7 @@ import pytest
 import combrum
 from _family_oracles import toy_problem
 from _support.constants import MAX_ITERATIONS, THETA_BOUND, TOLERANCE
-from _support.families import load_family
+from _support.families import FAMILY_DIR, load_family
 from combrum.dual import DualSolution
 from combrum.engine import estimate
 from combrum.formulations import NSlack, OneSlack
@@ -18,9 +17,6 @@ from combrum.model import Data, Model
 from combrum.parameters import Parameters
 from combrum.transport import LocalCluster, SerialTransport
 from combrum.transport.base import Transport
-
-
-FAMILY_DIR = Path(__file__).resolve().parent / "fixtures" / "families"
 
 needs_highs = pytest.mark.skipif(
     not highs_backend.available(), reason="highspy missing or broken"

@@ -10,9 +10,8 @@ from pathlib import Path
 
 import combrum
 
-# Count of importable modules under the combrum.* namespace, derived
-# independently from the source tree (every .py file, with packages counted by
-# their __init__.py). walk_packages must discover and import exactly these.
+# Modules under combrum.*, counted from the source tree (packages by their
+# __init__.py). walk_packages must discover and import exactly this many.
 _EXPECTED_SUBMODULES = 50
 
 
@@ -41,36 +40,29 @@ def test_version() -> None:
 
 
 def test_package_walk_imports_clean() -> None:
-    # Walk (not just import the root) so every subpackage is imported; any
-    # import-time error in any module raises here.
+    # Walk the whole tree so an import-time error in any submodule raises.
     walked = [
         info.name
         for info in pkgutil.walk_packages(combrum.__path__, prefix="combrum.")
     ]
     for name in walked:
         importlib.import_module(name)
-    # The walk must discover exactly the modules present in the source tree.
-    # Pinning the count catches a module that silently fails to import (and is
-    # skipped) as well as accidental additions/removals; the expected value is
-    # cross-checked against the source files rather than against the walk.
+    # Both counts must match the pin: a module the walk skips, or an unnoticed
+    # addition/removal, moves one of them.
     assert _count_source_submodules() == _EXPECTED_SUBMODULES
     assert len(walked) == _EXPECTED_SUBMODULES
-    # The lazy-solver-import property (importing combrum.masters.gurobi must not
-    # force-load gurobipy) cannot be checked here: this shared pytest process may
-    # already have gurobipy loaded by an earlier solver test. It is asserted
-    # hermetically in a fresh subprocess by test_core_import_pulls_no_solver.
+    # Solver-import laziness is checked in test_core_import_pulls_no_solver;
+    # this shared process may already have gurobipy loaded by an earlier test.
 
 
 def test_core_import_pulls_no_solver(tmp_path: Path) -> None:
-    # A bare `import combrum` must not eagerly pull in either optional solver
-    # backend: gurobipy is imported lazily inside combrum.masters.gurobi and
-    # highspy inside combrum.masters.highs, so the package stays importable
-    # without a Gurobi or HiGHS install/license. A fresh subprocess is the only
-    # reliable probe (this pytest process may already have those modules
-    # loaded); a neutral cwd keeps import resolution off the repo root. The
-    # probe also walk-imports every submodule -- which forces both master
-    # modules to load -- and re-checks that neither solver library leaks into
-    # sys.modules, so the laziness lives inside functions, not the module body.
+    # `import combrum` must not pull in gurobipy or highspy: the master modules
+    # import them lazily so the package works without a solver install/license.
+    # Only a fresh subprocess can show this (this process may already have them
+    # loaded); the neutral cwd keeps import resolution off the repo root. The
+    # probe then walk-imports every submodule -- loading both master modules --
+    # and re-checks sys.modules, so the laziness must live inside functions,
+    # not the module body.
     src = Path(__file__).resolve().parents[1] / "src"
     probe = (
         "import sys, importlib, pkgutil\n"
@@ -102,6 +94,4 @@ def test_core_import_pulls_no_solver(tmp_path: Path) -> None:
         cwd=tmp_path,
         env=env,
     )
-    # Guard against the probe silently doing nothing (e.g. combrum failing to
-    # import in the child would surface here, not as an unexercised pass).
     assert result.returncode == 0

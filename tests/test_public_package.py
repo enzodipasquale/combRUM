@@ -155,8 +155,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
     boot_params = inspect.signature(combrum.bootstrap_distributed).parameters
     est_params = inspect.signature(combrum.estimate_distributed).parameters
 
-    # Single-process-only params the distributed entry points must NOT accept.
-    # Guard the lowercase parameter names directly for both public entry points.
+    # single-process-only params the distributed entry points must not accept
     for removed in (
         "data",
         "observed_bundles",
@@ -188,7 +187,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         assert est_params[name].default is inspect.Parameter.empty
     assert all(p.kind is not inspect.Parameter.VAR_KEYWORD for p in est_params.values())
 
-    # Pin distributed defaults separately from names/kinds/type hints.
+    # distributed entry point defaults
     RIL = combrum.RunInfoLevel
     expected_boot_defaults = {
         "max_live_reps": 64,
@@ -231,9 +230,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
                 default_failures.append(f"{name}: {got!r} != {want!r}")
     assert default_failures == [], default_failures
 
-    # Exhaustiveness: every optional param (default is not empty) of each entry
-    # point must be pinned above, so a newly added optional param with an
-    # unvetted default cannot slip past the explicit registries.
+    # every optional param must appear in the expected-defaults dicts above
     boot_optional = {
         n for n, p in boot_params.items() if p.default is not inspect.Parameter.empty
     }
@@ -247,7 +244,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         est_optional ^ set(expected_est_defaults)
     )
 
-    # Pin single-process defaults too; annotation checks do not catch default drift.
+    # single-process defaults; annotation checks do not catch default drift
     sp_est_params = inspect.signature(combrum.estimate).parameters
     sp_boot_params = inspect.signature(combrum.bootstrap).parameters
 
@@ -290,15 +287,13 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
     ):
         for name, want in expected.items():
             got = params[name].default
-            # bool is an int subclass, so `1 == True`; the type() check below
-            # keeps return_slack False->1 or True from slipping through, and
-            # keeps tolerance 1e-6->1 (int) distinct from 1.0.
+            # bool is an int subclass (1 == True), so compare types too:
+            # False vs 1 and 1e-6 vs 1 must both fail
             if got != want or type(got) is not type(want):
                 sp_default_failures.append(f"{name}: {got!r} != {want!r}")
     assert sp_default_failures == [], sp_default_failures
 
-    # Every pinned optional param is keyword-only (they live after the ``*``),
-    # so a param silently made positional-or-keyword is caught.
+    # all optional params live after the ``*`` -- keyword-only
     sp_kind_failures: list[str] = []
     for params, expected in (
         (sp_est_params, expected_estimate_defaults),
@@ -309,9 +304,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
                 sp_kind_failures.append(f"{name}: {params[name].kind.name}")
     assert sp_kind_failures == [], sp_kind_failures
 
-    # Exhaustiveness: every optional param of estimate()/bootstrap() must be
-    # pinned above, so a newly added optional param with an unvetted default
-    # cannot slip past the explicit registries.
+    # same exhaustiveness check for estimate()/bootstrap()
     sp_est_optional = {
         n for n, p in sp_est_params.items() if p.default is not inspect.Parameter.empty
     }
@@ -352,10 +345,8 @@ def test_public_type_hints_resolve() -> None:
             failures.append(f"{label}: {type(exc).__name__}: {exc}")
     assert failures == []
 
-    # Resolution not raising is not enough: get_type_hints returns {} for a
-    # target that has silently lost all annotations. Pin the resolved hints of
-    # a few anchors against expectations read from the source signatures so a
-    # dropped return annotation or emptied parameter list is caught.
+    # get_type_hints returns {} for a target with no annotations at all, so
+    # also check the resolved hints of a few anchors
     import numpy as np
 
     estimate_hints = typing.get_type_hints(combrum.estimate)
@@ -367,7 +358,7 @@ def test_public_type_hints_resolve() -> None:
     assert estimate_distributed_hints["return"] is combrum.FitResult
     assert estimate_distributed_hints["n_observations"] is int
     assert estimate_distributed_hints["n_simulations"] is int
-    # estimate_distributed drops the single-process ``data`` parameter.
+    # estimate_distributed drops the single-process ``data`` parameter
     assert "data" not in estimate_distributed_hints
 
     assert typing.get_type_hints(combrum.bootstrap)["return"] is combrum.BootstrapResult
@@ -376,10 +367,8 @@ def test_public_type_hints_resolve() -> None:
         is combrum.BootstrapResult
     )
 
-    # The two public timeout-callback factories are in __all__ but were not
-    # pinned by the __all__ loop (which only catches get_type_hints raising).
-    # Both take a Schedule and return the engine's per-iteration hook shape;
-    # the expected types are read from callbacks.py, not from get_type_hints.
+    # both timeout-callback factories take a Schedule and return the engine's
+    # per-iteration hook shape
     from collections.abc import Callable
 
     hook_return = Callable[[int, combrum.Oracle], int | None]
@@ -388,8 +377,8 @@ def test_public_type_hints_resolve() -> None:
         assert callback_hints["schedule"] is combrum.Schedule
         assert callback_hints["return"] == hook_return
 
-    # Every concrete RepricingSchedule.select overrides the ABC contract:
-    # (iteration: int, n_agents: int, dual, last_resolved) -> np.ndarray.
+    # every concrete RepricingSchedule.select keeps the ABC contract:
+    # (iteration: int, n_agents: int, dual, last_resolved) -> np.ndarray
     for select in (
         combrum.RepricingSchedule.select,
         combrum.ResolveAll.select,
@@ -400,20 +389,15 @@ def test_public_type_hints_resolve() -> None:
         assert select_hints["iteration"] is int
         assert select_hints["n_agents"] is int
         assert select_hints["return"] is np.ndarray
-        # The informed-schedule signal params carry the schedule contract;
-        # widening/dropping them on the ABC or an override must be caught.
         assert select_hints["dual"] == (object | None)
         assert select_hints["last_resolved"] == (np.ndarray | None)
 
-    # Pin every annotated constructor param on the public class surface.
+    # expected hints for every annotated constructor param on the public classes
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from pathlib import Path
     from typing import Any
 
-    # Internal types named in public constructor annotations. Importing the real
-    # implementation classes gives an independent oracle: the expected hint is
-    # assembled from these objects, never read back out of the code-under-test's
-    # resolved annotation dict.
+    # internal types named in public constructor annotations
     from combrum.activity import ActivityLevel, ActivityRun
     from combrum.dual import DualSolution
     from combrum.formulation import Formulation
@@ -536,10 +520,7 @@ def test_public_type_hints_resolve() -> None:
         },
     }
 
-    # Assert every pinned param resolves to its expected type. A dropped
-    # annotation removes the key (KeyError); a retyped annotation changes the
-    # resolved value (equality fails). Both close the per-param corruption gap
-    # on classes that were previously only partially pinned.
+    # a dropped annotation removes the key; a retyped one changes the value
     hint_failures: list[str] = []
     for cls_name, params in expected_ctor_hints.items():
         resolved = typing.get_type_hints(getattr(combrum, cls_name).__init__)
@@ -552,12 +533,8 @@ def test_public_type_hints_resolve() -> None:
                 )
     assert hint_failures == [], hint_failures
 
-    # Exhaustiveness driven by (class, param) coverage, not class-name
-    # membership: any annotated constructor param of any public class that the
-    # registry does not pin trips this check. This catches a class that is
-    # "pinned" only through its methods (e.g. RoundRobin/DualInformed, whose
-    # .select hints are pinned above but whose ctor params live only here), and
-    # a future public class or a newly added ctor param escaping the pins.
+    # every annotated ctor param of every public class must appear in the
+    # registry above (per-param, so a new class or new param cannot be missed)
     _no_annotated_ctor = {"Oracle", "AddAll", "Transport", "SerialTransport"}
     unpinned_ctor_params: list[str] = []
     for name in combrum.__all__:
@@ -573,8 +550,7 @@ def test_public_type_hints_resolve() -> None:
         missing = annotated_params - pinned
         if missing and name not in _no_annotated_ctor:
             unpinned_ctor_params.extend(f"{name}.{p}" for p in sorted(missing))
-        # A class listed as having no annotated ctor must actually have none,
-        # otherwise it silently escapes both branches.
+        # a class listed as having no annotated ctor must actually have none
         if name in _no_annotated_ctor and annotated_params:
             unpinned_ctor_params.extend(
                 f"{name}.{p}" for p in sorted(annotated_params)
@@ -583,14 +559,8 @@ def test_public_type_hints_resolve() -> None:
         "public constructor params with no hint pin: " f"{unpinned_ctor_params}"
     )
 
-    # The anchors near the top of this test pin only a handful of function
-    # params (estimate: return/model/data; bootstrap*: return only; the two
-    # callbacks). Every other annotated param of the public functions resolves
-    # to a shrunk/wrong dict without get_type_hints raising, so a retyped
-    # ``tolerance: str`` or ``transport: int`` ships green. Mirror the
-    # constructor treatment: pin EVERY annotated function param against an
-    # expected type assembled here from the source signatures (and the internal
-    # classes those signatures name), then guard exhaustiveness param-by-param.
+    # same treatment for the public functions: expected hints for every
+    # annotated param
     from combrum.policies import CutPolicy
 
     expected_func_hints: dict[str, dict[str, object]] = {
@@ -698,9 +668,7 @@ def test_public_type_hints_resolve() -> None:
                 )
     assert func_hint_failures == [], func_hint_failures
 
-    # Exhaustiveness: any annotated param (including ``return``) of any public
-    # function that the registry does not pin trips this, so a newly added or
-    # renamed function param cannot slip past the pins above.
+    # every annotated param (including ``return``) must appear in the registry
     unpinned_func_params: list[str] = []
     for name in combrum.__all__:
         obj = getattr(combrum, name)

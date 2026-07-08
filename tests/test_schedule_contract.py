@@ -29,9 +29,7 @@ def test_round_robin_mask_form() -> None:
     assert isinstance(mask, np.ndarray)
     assert mask.dtype == bool
     assert mask.shape == (8,)
-    # Pin substance, not just shape: chunk 0 of 8 agents over 3 slices is the
-    # first ceil(8/3)=3 agents. An all-False (or otherwise wrong) mask has the
-    # right form but the wrong selection.
+    # Chunk 0 of 8 agents over 3 slices is the first ceil(8/3)=3 agents.
     assert np.flatnonzero(mask).tolist() == [0, 1, 2]
 
 
@@ -89,16 +87,13 @@ class _RecordingTransport:
 
 
 def test_round_robin_rank_local_zero_communication() -> None:
-    # Each rank builds its full schedule from (iteration, n_agents) alone. If
-    # the schedule ever consulted the transport (a collective/broadcast per
-    # iteration), the recording proxy would catch it; touched must stay empty.
+    # Each rank builds its schedule from (iteration, n_agents) alone; any
+    # transport access would show up in the proxy's `touched`.
     def per_rank(transport: Transport) -> tuple[list[bytes], list[str]]:
         spy = _RecordingTransport(transport)
         schedule = RoundRobin(3)
-        # Hand the spy through the informed-signal channel select accepts;
-        # RoundRobin must ignore it entirely. The informed-signal arguments
-        # must not change the mask, so each spy-passing mask must equal the
-        # bare (dual=None) mask byte-for-byte.
+        # RoundRobin must ignore the informed-signal arguments entirely: a
+        # spy-passing mask equals the bare (dual=None) mask byte-for-byte.
         masks = []
         for i in range(6):
             informed = schedule.select(
@@ -138,11 +133,9 @@ def test_oneslack_accepts_only_full_schedules() -> None:
 
 
 def test_oneslack_guard_pins_defining_module_not_just_name() -> None:
-    # The OneSlack restriction keys on the exact defining identity (module AND
-    # qualname). A user's own unrelated class merely named "OneSlack" lives in
-    # a different module and must keep full access to partial schedules; a guard
-    # that checked only the class name would wrongly forbid it. Mirror the
-    # NSlack same-name-fake test in test_persistent_master.py.
+    # The restriction keys on the defining module AND qualname: a user's own
+    # class that happens to be named "OneSlack" keeps full access to partial
+    # schedules. Same-name-fake setup as in test_persistent_master.py.
     fake = type("OneSlack", (), {})()
     assert type(fake).__qualname__ == "OneSlack"
     assert type(fake).__module__ != "combrum.formulations.oneslack"
@@ -151,11 +144,8 @@ def test_oneslack_guard_pins_defining_module_not_just_name() -> None:
 
 
 def test_partial_schedules_accepted_for_non_oneslack() -> None:
-    # The whole point of the OneSlack guard is that ONLY OneSlack forbids a
-    # partial schedule. Every other formulation must accept RoundRobin and
-    # DualInformed with no raise. Cover both a bare non-formulation object and
-    # a real NSlack instance so a faulty implementation that over-fires the OneSlack rule onto
-    # all formulations is rejected here regardless of the formulation type.
+    # Only OneSlack forbids a partial schedule. Cover a bare object and a real
+    # NSlack instance so the guard cannot over-fire on other formulations.
     nslack = NSlack(lambda agent_id, bundle: (np.zeros(1), 0.0))
     for formulation in (object(), nslack):
         for schedule in (None, ResolveAll(), RoundRobin(2), DualInformed()):

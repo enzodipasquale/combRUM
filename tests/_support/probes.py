@@ -83,15 +83,14 @@ def measure(fn: Callable[[], _T]) -> tuple[_T, ProbeReport]:
 
 
 # ---------------------------------------------------------------------------
-# Tests for this support module.
+# Tests for this support module. Collected only when this file is named
+# explicitly on the pytest command line (the default ``python_files =
+# test_*.py`` glob skips it).
 #
-# Collected only when this file is named explicitly on the pytest command line
-# (the default ``python_files = test_*.py`` glob skips it), which is how the
-# probe re-audit exercises them. They pin ``measure``'s two readings against
-# oracles that do not route through ``measure``'s own arithmetic:
-#   * the wall reading is pinned to an exact hand-chosen perf_counter delta,
-#   * the peak reading is pinned to an independently sampled ru_maxrss taken in
-#     a fresh subprocess, so it does not depend on suite run order.
+# Expected values never route through ``measure``'s own arithmetic: the wall
+# reading is checked against an exact hand-chosen perf_counter delta, the
+# peak reading against an independently sampled ru_maxrss from a fresh
+# subprocess (so suite run order cannot affect it).
 # ---------------------------------------------------------------------------
 
 # A 256 MiB buffer dwarfs a fresh interpreter's resident set, so touching every
@@ -107,14 +106,14 @@ def _probe_touch_pages(buf: "bytearray") -> None:
         buf[offset] = 1
 
 
-def _probe_peak_child(conn: object, mutate: str) -> None:
+def _probe_peak_child(conn: object, variant: str) -> None:
     """Run ``measure`` on a page-touching buffer inside a fresh interpreter.
 
-    Executed as a ``multiprocessing`` (spawn) target so its ru_maxrss high-water
-    mark starts from a clean baseline, unaffected by whatever the parent test
-    process already allocated. ``mutate`` selects an in-child corruption of the
-    peak reading used by the bidirectional regression proof; "" runs the real
-    ``measure`` unchanged.
+    Executed as a ``multiprocessing`` (spawn) target so its ru_maxrss
+    high-water mark starts from a clean baseline, unaffected by what the
+    parent test process already allocated. ``variant`` swaps in a broken
+    ``measure`` ("prefn" samples the peak before fn, "overscale" hardcodes
+    the linux unit); "" runs the real one.
     """
     import resource as _resource
     import sys as _sys
@@ -131,7 +130,7 @@ def _probe_peak_child(conn: object, mutate: str) -> None:
         keep["buf"] = buf  # hold the buffer so the mark still reflects it
         return sum(range(1000))
 
-    if mutate == "prefn":
+    if variant == "prefn":
         # measure samples the peak before running fn -> the buffer never lands.
         def _measure_prefn(
             fn: Callable[[], _T],
@@ -146,7 +145,7 @@ def _probe_peak_child(conn: object, mutate: str) -> None:
             return res, ProbeReport(wall_seconds=wall, peak_rss_bytes=peak)
 
         result, report = _measure_prefn(work)
-    elif mutate == "overscale":
+    elif variant == "overscale":
         # measure hardcodes the linux (kib) unit -> 1024x over-report on darwin.
         def _measure_overscale(
             fn: Callable[[], _T],
@@ -162,8 +161,8 @@ def _probe_peak_child(conn: object, mutate: str) -> None:
     else:
         result, report = measure(work)
 
-    # Independent post reading: re-sample the mark ourselves (buffer still held)
-    # and normalize by hand. Nothing here is copied from measure's own output.
+    # Re-sample the mark (buffer still held) and normalize by hand,
+    # independently of measure's output.
     post_bytes = normalize_maxrss(
         _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss, _sys.platform
     )
@@ -173,12 +172,12 @@ def _probe_peak_child(conn: object, mutate: str) -> None:
     conn.close()
 
 
-def _run_probe_peak_child(mutate: str = "") -> tuple[object, int, int, int]:
+def _run_probe_peak_child(variant: str = "") -> tuple[object, int, int, int]:
     import multiprocessing as _mp
 
     ctx = _mp.get_context("spawn")
     parent_conn, child_conn = ctx.Pipe()
-    proc = ctx.Process(target=_probe_peak_child, args=(child_conn, mutate))
+    proc = ctx.Process(target=_probe_peak_child, args=(child_conn, variant))
     proc.start()
     payload = parent_conn.recv()
     proc.join(timeout=60)
@@ -201,12 +200,9 @@ class _StepClock:
 
 
 def test_measure_wall_equals_exact_perf_counter_delta(monkeypatch) -> None:
-    # Control perf_counter so the elapsed interval is exactly known, then pin
-    # measure's wall to that interval by equality. The endpoints are hand
-    # chosen so their difference is float-exact (1.5 - 1.25 == 0.25); the
-    # expected wall is that subtraction (definition of elapsed time), not a
-    # value read back from measure. Exact equality rejects every additive and
-    # multiplicative distortion at once, not just one factor.
+    # Endpoints hand-chosen so the difference is float-exact
+    # (1.5 - 1.25 == 0.25); exact equality rejects any additive or
+    # multiplicative distortion of the reading.
     start_tick = 1.25
     end_tick = 1.5
     expected_wall = end_tick - start_tick  # 0.25, exactly representable
@@ -218,11 +214,10 @@ def test_measure_wall_equals_exact_perf_counter_delta(monkeypatch) -> None:
     assert report.wall_seconds == expected_wall
 
 
-def test_measure_wall_oracle_catches_over_report(monkeypatch) -> None:
-    # Bidirectional proof for the wall pin: a timer that over-reports the
-    # interval by 25% (end = start + 1.25 * true_delta) drives measure's
-    # subtraction to 0.3125, and the exact-delta equality rejects it. The same
-    # equality would reject any additive or multiplicative distortion.
+def test_measure_wall_tracks_a_distorted_clock(monkeypatch) -> None:
+    # A clock that inflates the interval by 25% (end = start + 1.25 * delta)
+    # moves measure's reading to 0.3125, away from the true 0.25 — the
+    # exact-delta comparison above is not satisfiable by accident.
     start_tick = 1.25
     true_delta = 0.25
     inflated_end = start_tick + 1.25 * true_delta  # 1.5625, exact
@@ -234,13 +229,10 @@ def test_measure_wall_oracle_catches_over_report(monkeypatch) -> None:
 
 
 def test_measure_peak_uses_real_platform_unit_in_process() -> None:
-    # In-process pin on the platform the tests actually run on. fn allocates
-    # nothing, so the mark is stable across the call: measure's reported peak
-    # must equal the raw ru_maxrss normalized by the real platform, bracketed
-    # by independent samples taken immediately before and after. The oracle
-    # normalizes with a captured pristine reference, never measure's output, so
-    # a measure that hardcodes the linux unit (1024x on darwin) lands far above
-    # the upper bracket.
+    # fn allocates nothing, so the mark is stable across the call: measure's
+    # peak must land between independent samples taken immediately before and
+    # after, both normalized by hand. Hardcoding the linux unit (1024x on
+    # darwin) would land far above the upper bracket.
     pristine_normalize = normalize_maxrss
     before = pristine_normalize(
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, sys.platform
@@ -252,11 +244,11 @@ def test_measure_peak_uses_real_platform_unit_in_process() -> None:
     assert before <= report.peak_rss_bytes <= after
 
 
-def test_measure_peak_in_process_oracle_catches_unit_overscale(
+def test_measure_peak_overscale_falls_outside_bracket(
     monkeypatch,
 ) -> None:
-    # Bidirectional proof for the in-process pin: force measure to over-scale by
-    # patching the name it resolves, while the oracle keeps a pristine reference.
+    # Patch the name measure resolves so it over-scales, while the bracket
+    # keeps a pristine reference: the reading must leave the bracket.
     pristine_normalize = normalize_maxrss
 
     def _linux_unit(ru_maxrss: int, platform: str) -> int:
@@ -274,48 +266,36 @@ def test_measure_peak_in_process_oracle_catches_unit_overscale(
 
 
 def test_measure_peak_equals_independent_maxrss_reading() -> None:
-    # Pin measure's peak to an independently sampled ru_maxrss taken in a fresh
-    # subprocess. The child re-reads the mark itself (buffer held alive) and
-    # normalizes by hand, so the expected value never routes through measure.
-    # Run in a subprocess so the oracle does not depend on the parent process's
-    # lifetime high-water mark (suite run order): a prior memory-heavy test can
-    # no longer flip this assertion.
+    # A fresh subprocess re-reads its own ru_maxrss (buffer held alive) and
+    # normalizes by hand, so the expected value never routes through measure
+    # and a prior memory-heavy test in the parent cannot skew it.
     result, peak, post_bytes, baseline = _run_probe_peak_child()
     assert result == 499500
-    # Full-output check: the reported peak equals the independent post reading
-    # exactly, so unit errors, pre-call sampling, child-process usage, and
-    # fabricated constants all fail the same assertion.
+    # Exact equality: unit errors, pre-call sampling, and fabricated
+    # constants all fail the same comparison.
     assert peak == post_bytes
-    # The buffer must have raised the fresh child's mark well past its baseline;
-    # a peak that ignores the allocation cannot clear this floor.
+    # The buffer must have raised the fresh child's mark well past baseline.
     assert peak >= baseline + _PROBE_RISE_FLOOR
 
 
-def test_measure_peak_oracle_catches_prefn_sampling() -> None:
-    # Bidirectional proof, under-report direction: a measure that samples the
-    # peak before fn leaves the child's rise at zero, so the independent floor
-    # rejects it.
-    _, peak, _post, baseline = _run_probe_peak_child(mutate="prefn")
+def test_measure_peak_sampled_before_fn_misses_the_rise() -> None:
+    # Under-report direction: sampling the peak before fn leaves the child's
+    # rise at zero, below the floor.
+    _, peak, _post, baseline = _run_probe_peak_child(variant="prefn")
     assert peak < baseline + _PROBE_RISE_FLOOR
 
 
-def test_measure_peak_oracle_catches_unit_overscale() -> None:
-    # Bidirectional proof, over-report direction: a measure that hardcodes the
-    # linux kib unit reports 1024x the real darwin bytes, so the exact-equality
-    # pin against the independent reading rejects it.
-    _, peak, post_bytes, _baseline = _run_probe_peak_child(mutate="overscale")
+def test_measure_peak_overscaled_unit_diverges_from_reread() -> None:
+    # Over-report direction: hardcoding the linux kib unit reports 1024x the
+    # real darwin bytes, so the reading no longer matches the re-read mark.
+    _, peak, post_bytes, _baseline = _run_probe_peak_child(variant="overscale")
     assert peak != post_bytes
 
 
 # ---------------------------------------------------------------------------
-# normalize_maxrss branch pins, independent of the run platform.
-#
-# Every test above reaches only the darwin identity branch, leaving the linux
-# scaling, the linux-prefix family, and the unknown-platform guard untested here.
-# These call normalize_maxrss with explicit platform strings so the embedded
-# suite exercises each branch regardless of the host it runs on. Oracles are the
-# stated unit convention applied by hand (darwin bytes pass through; linux kib
-# scaled by 1024), never a value read back from normalize_maxrss.
+# normalize_maxrss branches, with explicit platform strings so each branch
+# runs regardless of the host. Expected values apply the stated unit
+# convention by hand: darwin bytes pass through, linux kib scale by 1024.
 # ---------------------------------------------------------------------------
 
 
@@ -324,20 +304,18 @@ def test_normalize_maxrss_darwin_identity() -> None:
 
 
 def test_normalize_maxrss_linux_scales_by_1024() -> None:
-    # Pins the exact linux scale constant: a factor of 512 or 2048 fails here.
     assert normalize_maxrss(123456, "linux") == 123456 * 1024
     assert normalize_maxrss(1, "linux") == 1024
 
 
 def test_normalize_maxrss_linux_prefix_family_scaled() -> None:
-    # The kib->byte contract keys on the "linux" prefix, not the exact literal.
-    # A narrowing to `== "linux"` would raise for "linux2" instead of scaling.
+    # The kib->byte contract keys on the "linux" prefix, not the exact
+    # literal, so "linux2" scales rather than raising.
     assert normalize_maxrss(7, "linux2") == 7 * 1024
 
 
 def test_normalize_maxrss_unknown_platform_rejected() -> None:
-    # The guard turning a silent wrong-unit reading into a hard error: dropping
-    # it (e.g. returning int(ru_maxrss) for any platform) fails here.
+    # Unknown platforms raise instead of guessing a unit.
     import pytest
 
     with pytest.raises(ValueError, match="win32"):
@@ -345,12 +323,8 @@ def test_normalize_maxrss_unknown_platform_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ProbeReport.__post_init__ validation and coercion.
-#
-# measure() only ever constructs ProbeReport from valid positive readings, so no
-# test above crosses a validation boundary. These construct it directly at each
-# rejected boundary and pin the wall_seconds float coercion, giving a meaningful signal to the
-# "both fields must be strictly positive; a broken probe raises" contract.
+# ProbeReport.__post_init__. measure() only constructs valid reports, so the
+# rejected boundaries need direct construction.
 # ---------------------------------------------------------------------------
 
 

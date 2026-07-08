@@ -277,8 +277,8 @@ class _DivergentBatchedFeatureMap(_BatchedFeatureMap):
     """A both-supplied FeatureMap whose batch disagrees with its per-agent.
 
     The batch perturbs eps by an above-tolerance delta on one row, so the
-    both-supplied conformance gate must fail (coverage for the
-    features surface; the per-agent member is the documented fallback).
+    both-supplied conformance gate must fail; the per-agent member is the
+    documented fallback.
     """
 
     def features_batch(
@@ -326,36 +326,28 @@ def divergent_feature_map(
     return _DivergentBatchedFeatureMap(toy_problem(arrays).features)
 
 
-# --- POISON FeatureMaps (the coverage probes) -----------------------------
+# --- divergent FeatureMaps for the wholesale-capture gate -------------------
 #
-# Each perturbation is an optimized-only (``features_batch``-only) FeatureMap: it
-# resolves to Mode.OPTIMIZED, so the divergent batch return flows straight
-# through ``feature_rows`` into the formulation with no both-supplied
-# conformance gate in the way (that gate fires in Mode.BOTH only). The
-# divergence then reaches the ``StepRecord`` capture, where the
-# wholesale-capture comparator (``test_wholesale_capture._assert_records_
-# equivalent`` / ``_assert_schedule_equivalent``) must fail — proving the
-# wholesale-capture gate is exercised, one perturbation per filter stage.
+# Each perturbation below is an optimized-only (``features_batch``-only)
+# FeatureMap. It resolves to Mode.OPTIMIZED, so the divergent batch return
+# flows straight through ``feature_rows`` into the formulation (the
+# both-supplied conformance gate fires in Mode.BOTH only) and on into the
+# ``StepRecord`` capture, where the wholesale comparator
+# (``test_wholesale_capture``) must fail — one perturbation per filter stage.
+# Each test first runs the unperturbed ``*_batch_only`` map through the same
+# comparator, so a raise is attributable to the perturbation alone.
 #
-# The coverage-of-the-perturbation guard lives in the tests: each test first runs
-# the unperturbed ``*_batch_only`` map through the same comparator and asserts
-# it passes, so a raise is attributable to the perturbation, not an unrelated drift.
-#
-# Tolerance discipline: a below-tolerance ``±1e-14`` is not a valid probe.
-# Every continuous perturbation here is above tolerance (``1e-6``, ``1e-9``,
-# or ``1e-11``); the support perturbation turns an exact zero into a tiny nonzero,
-# and the OneSlack perturbations straddle the aggregate identity or the install gate.
+# Sizing: every continuous perturbation sits above the 1e-13 comparison
+# tolerance (1e-6, 1e-9, or 1e-11); the support perturbation flips an exact
+# zero, and the OneSlack ones straddle the aggregate identity or install gate.
 
 
 class _PhiValuePerturbationMap(_BatchOnlyFeatureMap):
-    """Above-tolerance perturbation of a nonzero phi coefficient (continuous).
+    """Lifts the first nonzero phi entry of every featurised row by ``1e-6``.
 
-    Lifts the first nonzero entry of every featurised row by ``1e-6``
-    (``>> 1e-13``). The perturbation rides into the master objective and the
-    installed cuts, so it moves the priced bundle keys and the admit-side
-    violation, which the wholesale comparator catches.
-    A nonzero target keeps it a pure value drift, distinct from the support
-    perturbation below (which flips an exact zero).
+    The drift rides into the master objective and the installed cuts, moving
+    the priced bundle keys and the admit-side violation. A nonzero target
+    keeps it a pure value drift, distinct from the support flip below.
     """
 
     def features_batch(
@@ -366,18 +358,17 @@ class _PhiValuePerturbationMap(_BatchOnlyFeatureMap):
         for r in range(phi.shape[0]):
             nz = np.flatnonzero(phi[r])
             if nz.size:
-                phi[r, nz[0]] += 1e-6  # above the 1e-13 comparison tolerance
+                phi[r, nz[0]] += 1e-6
         return phi, eps
 
 
 class _PhiSupportPerturbationMap(_BatchOnlyFeatureMap):
-    """Discrete support change: an exact-zero phi entry becomes a tiny nonzero.
+    """Turns the first exact-zero phi entry of the first row into ``1e-12``.
 
-    Turns the first exact ``0.0`` of the first featurised row into ``1e-12``,
-    flipping the zero-mask ``highs.py``'s ``np.flatnonzero(row.phi)`` keys the
-    installed column set on. This is a discrete identity flip, not a
-    ``<=1e-13`` nudge — the phi bytes differ even though the magnitude is tiny,
-    and on the gurobi master it also drifts the priced reduced costs.
+    A discrete identity flip, however tiny the magnitude: it changes the
+    zero mask that ``highs.py``'s ``np.flatnonzero(row.phi)`` keys the
+    installed column set on, and on the gurobi master it also drifts the
+    priced reduced costs.
     """
 
     def features_batch(
@@ -388,19 +379,17 @@ class _PhiSupportPerturbationMap(_BatchOnlyFeatureMap):
         for r in range(phi.shape[0]):
             z = np.flatnonzero(phi[r] == 0.0)
             if z.size:
-                # exact 0.0 -> 1e-12 flips the zero-mask bit regardless of
-                # magnitude.
                 phi[r, z[0]] = 1e-12
                 break
         return phi, eps
 
 
 class _EpsPerturbationMap(_BatchOnlyFeatureMap):
-    """Above-tolerance perturbation of one row's eps (continuous).
+    """Lifts the first featurised row's eps by ``1e-6``.
 
-    Lifts the first featurised row's eps by ``1e-6`` (``>> 1e-13``). eps enters
-    the cut row and the admit-side violation ``phi.theta + eps - u``, so the
-    drift surfaces in the captured admit violations / reduced costs.
+    eps enters the cut row and the admit-side violation
+    ``phi.theta + eps - u``, so the drift surfaces in the captured admit
+    violations and reduced costs.
     """
 
     def features_batch(
@@ -409,20 +398,18 @@ class _EpsPerturbationMap(_BatchOnlyFeatureMap):
         phi, eps = super().features_batch(ids, bundles)
         eps = eps.copy()
         if eps.size:
-            eps[0] += 1e-6  # above the 1e-13 comparison tolerance
+            eps[0] += 1e-6
         return phi, eps
 
 
 class _AggregateBytesPerturbationMap(_BatchOnlyFeatureMap):
-    """Above-tolerance phi perturbation sized to flip aggregate bytes only.
+    """Lifts the first nonzero phi entry of the first row by ``1e-11``.
 
-    Lifts the first nonzero phi entry of the first row by ``1e-11`` — above-tolerance
-    (``>> 1e-13``) yet small enough that the OneSlack walk's convergence shape
-    is preserved on these families (so the comparison reaches the aggregate
-    fields rather than tripping the stream-length check). The summed aggregate
-    then drifts by ~``1e-10``, which flips the SHA-256 over ``[phi_agg,
-    eps_agg]`` (``oneslack.py:_aggregate_key``) — the discrete row key — so
-    the captured ``aggregate_bytes`` differ across paths.
+    Sized to flip aggregate bytes only: large enough to drift the summed
+    aggregate by ~``1e-10`` and flip the SHA-256 over ``[phi_agg, eps_agg]``
+    (``oneslack.py:_aggregate_key``), yet small enough to preserve the
+    OneSlack convergence shape on these families, so the comparison reaches
+    the aggregate fields instead of stopping at the stream-length check.
     """
 
     def features_batch(
@@ -433,25 +420,19 @@ class _AggregateBytesPerturbationMap(_BatchOnlyFeatureMap):
         for r in range(phi.shape[0]):
             nz = np.flatnonzero(phi[r])
             if nz.size:
-                # 1e-11 is above tolerance but shape-preserving on these
-                # families: it flips the aggregate SHA-256 without moving the
-                # iteration count, so the gate reaches the aggregate check.
                 phi[r, nz[0]] += 1e-11
                 break
         return phi, eps
 
 
 class _InstallGatePerturbationMap(_BatchOnlyFeatureMap):
-    """Above-tolerance phi perturbation that straddles the OneSlack install gate.
+    """Lifts the first nonzero phi entry of the first row by ``1e-6``.
 
-    Lifts the first nonzero phi entry of the first row by ``1e-6``. The master
-    cannot absorb a single-row lift into theta, so the aggregate slack no
-    longer settles to ``<= ctx.tolerance`` at the clean path's convergence
-    iteration: the install gate ``violation > ctx.tolerance``
-    (``oneslack.py:260``) keeps firing on the perturbed path while the clean
-    path stops, diverging the convergence shape (which the stream-length check
-    fails). A uniform all-rows lift would be absorbed by a theta shift, so
-    the single-row form is deliberate.
+    A single-row lift cannot be absorbed into theta (a uniform all-rows lift
+    could), so the aggregate slack never settles to ``<= ctx.tolerance`` at
+    the clean path's convergence iteration: the install gate
+    ``violation > ctx.tolerance`` (``oneslack.py:260``) keeps firing and the
+    convergence shapes diverge, which the stream-length check fails.
     """
 
     def features_batch(
@@ -462,23 +443,20 @@ class _InstallGatePerturbationMap(_BatchOnlyFeatureMap):
         for r in range(phi.shape[0]):
             nz = np.flatnonzero(phi[r])
             if nz.size:
-                phi[r, nz[0]] += 1e-6  # >> 1e-13; lifts the aggregate off 0
+                phi[r, nz[0]] += 1e-6
                 break
         return phi, eps
 
 
 class _SchedulePerturbationMap(_BatchOnlyFeatureMap):
-    """Above-tolerance phi perturbation that moves the schedule's DualConcentration.
+    """Lifts every row's first nonzero phi entry by ``1e-6``.
 
-    Lifts every row's first nonzero phi entry by ``1e-6`` (``>> 1e-13``). The
-    drift moves the master duals the driver's ``DualConcentration`` schedule
-    payload is condensed from, so the NSlack dual-informed walk no longer
-    converges on the clean path's iteration count — diverging the schedule-
-    concentration stream length, which ``_assert_schedule_equivalent`` hard-
-    fails on. (On these families the support max_weights saturate at ``1.0``,
-    so a continuous weight drift cannot move them; the schedule field is
-    instead exercised through the shape/support divergence the dual shift
-    induces.)
+    The drift moves the master duals behind the driver's
+    ``DualConcentration`` schedule payload, so the NSlack dual-informed walk
+    no longer converges on the clean path's iteration count and the
+    schedule-concentration stream lengths diverge. (max_weights saturate at
+    ``1.0`` on these families, so a continuous weight drift cannot move them;
+    the divergence comes through the shape/support the dual shift induces.)
     """
 
     def features_batch(
@@ -489,23 +467,20 @@ class _SchedulePerturbationMap(_BatchOnlyFeatureMap):
         for r in range(phi.shape[0]):
             nz = np.flatnonzero(phi[r])
             if nz.size:
-                phi[r, nz[0]] += 1e-6  # above the 1e-13 comparison tolerance
+                phi[r, nz[0]] += 1e-6
         return phi, eps
 
 
 class _PerturbationPriceToyOracle(ToyOracle):
-    """A ToyOracle whose ``price`` payoff is perturbed above-tolerance on one agent.
+    """A ToyOracle that lifts agent 0's priced payoff by ``1e-6``.
 
-    Lifts agent 0's priced payoff by ``1e-6`` (``>> 1e-13``) while leaving the
-    chosen bundle byte-identical — so the discrete demand identity holds and
-    only the continuous payoff (hence the certified gap) drifts. The
-    priced-demand stream (the frozen conformance field captured in
-    ``priced_features``) then differs across a clean-vs-perturbed pair, hard-
-    failing the wholesale comparator on its ``payoff drift`` check. (The
-    batched price-path conformance is perturbed separately by
-    ``_DivergentBatchToy`` at its ``price_demands`` call site in
-    ``test_either_one.py``; this oracle instead drives the same price-stage
-    drift through the wholesale capture's demand stream.)
+    The chosen bundle stays byte-identical, so the discrete demand identity
+    holds and only the continuous payoff (hence the certified gap) drifts.
+    The priced-demand stream captured in ``priced_features`` then differs
+    between a clean and a perturbed run, failing the wholesale comparator's
+    payoff-drift check. (The batched price path gets its own divergence from
+    ``_DivergentBatchToy`` in ``test_either_one.py``; this oracle drives the
+    price-stage drift through the wholesale capture's demand stream instead.)
     """
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
@@ -513,7 +488,7 @@ class _PerturbationPriceToyOracle(ToyOracle):
         if int(agent_id) == 0:
             return Demand.exact(
                 bundle=demand.bundle,
-                payoff=demand.payoff + 1e-6,  # above comparison tolerance
+                payoff=demand.payoff + 1e-6,
             )
         return demand
 

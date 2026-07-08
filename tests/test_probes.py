@@ -1,7 +1,7 @@
 """RSS-unit tests for ``combrum.runinfo``.
 
-The tests pin ``normalize_maxrss`` and ``peak_rss_bytes`` against platform
-branches and the kibibyte convention (1 KiB = 1024 bytes).
+Covers ``normalize_maxrss`` and ``peak_rss_bytes`` -- platform branches and
+the kibibyte convention (1 KiB = 1024 bytes).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import combrum.runinfo as runinfo
 from combrum.runinfo import normalize_maxrss, peak_rss_bytes
 
 
-# --- normalize_maxrss unit convention (shipped, sys.platform-driven) --------
+# --- normalize_maxrss unit convention (sys.platform-driven) -----------------
 
 
 @pytest.mark.parametrize(
@@ -29,23 +29,16 @@ from combrum.runinfo import normalize_maxrss, peak_rss_bytes
         ("darwin", 123456, 123456),
         ("darwin", 0, 0),
         ("darwin", 1, 1),
-        # linux ru_maxrss is kibibytes -> x1024. The scale constant is pinned
-        # exactly: a factor of 512 or 2048 fails on these rows.
+        # linux ru_maxrss is kibibytes -> x1024.
         ("linux", 123456, 123456 * 1024),
         ("linux", 1, 1024),
-        # startswith("linux"): the kib->byte contract keys on the prefix, not
-        # the literal, so a narrowing to `== "linux"` raises here instead of
-        # scaling and this row catches it.
+        # the linux branch matches by prefix (startswith), so "linux2" scales too.
         ("linux2", 7, 7 * 1024),
     ],
 )
 def test_normalize_maxrss_unit_convention(
     monkeypatch: pytest.MonkeyPatch, fake_platform: str, raw: int, expected: int
 ) -> None:
-    # Full-output pin against a hand-built table: the whole (platform, raw) ->
-    # bytes mapping is fixed at once, so any darwin-branch corruption (return 0,
-    # drop the *1024, swap the branches, or wrong scale factor) diverges on some
-    # row rather than needing its own named test.
     monkeypatch.setattr(runinfo.sys, "platform", fake_platform)
     assert normalize_maxrss(raw) == expected
 
@@ -54,9 +47,7 @@ def test_normalize_maxrss_unit_convention(
 def test_normalize_maxrss_rejects_unknown_platform(
     monkeypatch: pytest.MonkeyPatch, fake_platform: str
 ) -> None:
-    # The guard turning a silent wrong-unit reading into a hard error. Dropping
-    # it (returning int(ru_maxrss) for any platform) fails here, and the error
-    # type is pinned to RuntimeError — the shipped contract — not ValueError.
+    # unknown platforms must raise, not silently return a wrong-unit reading.
     monkeypatch.setattr(runinfo.sys, "platform", fake_platform)
     with pytest.raises(RuntimeError, match="unit convention unknown"):
         normalize_maxrss(1000)
@@ -64,7 +55,7 @@ def test_normalize_maxrss_rejects_unknown_platform(
         normalize_maxrss(1000)
 
 
-# --- peak_rss_bytes: platform dispatch + RUSAGE_SELF, fully pinned ----------
+# --- peak_rss_bytes: platform dispatch + RUSAGE_SELF ------------------------
 
 
 class _FakeRusage:
@@ -79,10 +70,8 @@ def _patched_peak(
 ) -> tuple[int, int]:
     """Drive peak_rss_bytes with a known raw reading on a chosen platform.
 
-    Returns (reported_bytes, who_arg) where who_arg is the rusage target
-    peak_rss_bytes actually asked for. The fake records ``who`` so a
-    RUSAGE_CHILDREN swap is observable independent of any child high-water mark
-    left by an earlier subprocess/MPI test.
+    Returns (reported_bytes, who) where who is the rusage target
+    peak_rss_bytes asked for.
     """
     seen: dict[str, int] = {}
 
@@ -99,11 +88,8 @@ def _patched_peak(
 def test_peak_rss_bytes_linux_scales_and_reads_self(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # On the darwin dev/CI host normalize_maxrss is identity, so a dropped
-    # x1024 is invisible there. Force the linux branch with a known raw reading:
-    # the kibibyte->byte scaling is hand-derived, so a raw passthrough reports
-    # 4096 and fails. who is pinned to RUSAGE_SELF in the same shot, killing a
-    # RUSAGE_CHILDREN swap regardless of run order.
+    # force the linux branch: on a darwin dev/CI host normalize_maxrss is
+    # identity, so the kib->byte scaling is never exercised natively.
     raw_kib = 4096
     reported, who = _patched_peak(monkeypatch, "linux", raw_kib)
     assert reported == raw_kib * 1024
@@ -113,11 +99,8 @@ def test_peak_rss_bytes_linux_scales_and_reads_self(
 def test_peak_rss_bytes_darwin_identity_and_reads_self(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The linux case above patches platform to "linux", so on its own it cannot
-    # tell a peak_rss_bytes that READS sys.platform from one hardcoding the
-    # linux branch. Force darwin with a known raw reading: the darwin branch is
-    # identity, so a hardcoded-linux path reports raw*1024 and fails here. The
-    # pair pins dispatch on the live platform.
+    # darwin branch is identity; paired with the linux case above, dispatch
+    # has to read the live sys.platform.
     raw = 7777
     reported, who = _patched_peak(monkeypatch, "darwin", raw)
     assert reported == raw
@@ -126,13 +109,11 @@ def test_peak_rss_bytes_darwin_identity_and_reads_self(
 
 # --- peak_rss_bytes: reflects a real allocation, unit-correct ---------------
 
-# A 256 MiB buffer dwarfs a fresh interpreter's resident set, so touching every
-# page raises the child's lifetime ru_maxrss mark well past its own baseline.
+# 256 MiB dwarfs a fresh interpreter's resident set, so touching every page
+# raises the child's lifetime ru_maxrss mark well past its own baseline.
 _PROBE_ALLOC_BYTES = 256 * 1024 * 1024
-# Headroom below the allocation: a real rising peak clears it; a peak that does
-# not reflect the buffer (fabricated, sampled early, dropped) cannot. On darwin
-# a mis-scaled path (reporting kibibytes, i.e. dropping the x1024 on linux) also
-# lands ~1024x too small and falls under this floor.
+# floor with headroom below the allocation; a kibibyte-unit reading lands
+# ~1024x too small and misses it.
 _PROBE_RISE_FLOOR = 64 * 1024 * 1024
 
 _PROBE_SRC = textwrap.dedent(
@@ -158,15 +139,11 @@ _PROBE_SRC = textwrap.dedent(
 
 
 def test_peak_rss_bytes_rises_after_large_allocation(tmp_path: Path) -> None:
-    """peak_rss_bytes reports a monotone, unit-correct peak.
+    """peak_rss_bytes reflects a large allocation, in bytes.
 
-    ru_maxrss is a per-process high-water mark, so this only holds in a FRESH
-    subprocess: within the shared pytest process an earlier test may have pushed
-    the mark far above current usage, and a new allocation would not raise it.
-    The child samples the peak, faults in a large buffer page by page, and
-    requires the reported peak to clear an independent floor above its own
-    pre-allocation baseline. A unit bug (kibibytes on darwin) reports ~1024x too
-    small and falls under the floor; a zeroed-out implementation fails outright.
+    ru_maxrss is a per-process high-water mark, so this needs a fresh
+    subprocess -- within the shared pytest process an earlier test may have
+    pushed the mark far above current usage.
     """
     src = Path(__file__).resolve().parents[1] / "src"
     probe = _PROBE_SRC.format(alloc=_PROBE_ALLOC_BYTES, floor=_PROBE_RISE_FLOOR)

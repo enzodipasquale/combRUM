@@ -59,37 +59,30 @@ class WalkOutcome:
     #: floor — zero at every accepted convergence, so a gate can assert
     #: the terminating solve was a pure LP from the outcome alone.
     final_penalty_weight: float = 0.0
-    #: Max installed-cut count the master held over the run (root reading
-    #: of ``len(master.extract_cuts())`` each iteration). A stripping gate
-    #: bounds it: a retirement policy that retires deeply-slack cuts mid-run
-    #: holds a lower peak than the unstripped accumulation, at an unchanged
-    #: estimate. Zero on every non-root rank and on a run that never reaches
-    #: the loop.
+    #: Max installed-cut count the master held over the run (root reading of
+    #: ``len(master.extract_cuts())`` each iteration); zero on non-root ranks
+    #: and on a run that never reaches the loop. A stripping gate bounds it:
+    #: mid-run retirement holds a lower peak at an unchanged estimate.
     peak_installed_cuts: int = 0
     #: Per-iteration snapshot of the master's installed ``CutRow`` tuple
-    #: (root-only, opt-in via ``capture_installed``), one entry per iteration
-    #: in loop order, taken after that iteration's ``update``. Empty by default.
-    #: The hard-clause gate replays the per-agent
-    #: vs batched features path and asserts these snapshots identical.
+    #: (root-only, opt-in via ``capture_installed``), taken after each
+    #: iteration's ``update``. The hard-clause gate asserts these identical
+    #: across the per-agent vs batched features paths.
     installed_snapshots: tuple[tuple[CutRow, ...], ...] = ()
     #: Per-iteration ``StepRecord`` stream (root-only, opt-in via
-    #: ``capture_steprecords``), captured via a ``ListTraceSink`` on the
-    #: formulation. Each record holds one iteration's filter-chain inputs over
-    #: their full pre-filter domain (reduced costs, violations, purge inputs,
-    #: install key sets, aggregate raw/bytes, priced demand/feature stream).
-    #: Empty by default and on every non-root rank. The wholesale-capture gate
-    #: replays the per-agent vs batched path across shard permutations and
-    #: asserts these field-by-field: discrete identical, continuous within
-    #: ``1e-13``.
+    #: ``capture_steprecords``). Each record holds one iteration's
+    #: filter-chain inputs over their full pre-filter domain — reduced costs,
+    #: violations, purge inputs, install key sets, aggregate raw/bytes, priced
+    #: demand/feature stream. The wholesale-capture gate compares these
+    #: field-by-field across the per-agent vs batched path and shard
+    #: permutations: discrete identical, continuous within ``1e-13``.
     step_records: tuple[StepRecord, ...] = ()
     #: Per-iteration ``DualConcentration`` payload (support ``agent_ids`` +
-    #: per-agent ``max_weights``) the schedule branch reads. Captured here
-    #: because it is driver-owned — computed in this loop, not inside a
-    #: formulation — so it is the one such field visible in run_walk rather than
-    #: formulation-internal. Bcast on root, so identical on every rank;
-    #: populated only under ``capture_steprecords`` with a ``schedule`` active.
-    #: The wholesale gate compares it across feature + shard axes: support
-    #: identical, max_weights within ``1e-13``.
+    #: per-agent ``max_weights``). Captured here because it is driver-owned —
+    #: computed in this loop, not inside a formulation. Bcast on root, so
+    #: identical on every rank; populated only under ``capture_steprecords``
+    #: with a ``schedule`` active. The wholesale gate compares it across
+    #: feature + shard axes: support identical, max_weights within ``1e-13``.
     schedule_concentrations: tuple[DualConcentration, ...] = ()
 
 
@@ -157,15 +150,12 @@ def run_walk(
             # columns would be spurious (and degeneracy-inducing).
             n_agents=None if formulation_cls is OneSlack else n_agents,
         )
-        # Warm-start: replay the prior fit's installed cuts onto the
-        # fresh master before setup. reinstall replaces the installed set,
-        # and NSlack.setup() then solves and rebuilds its bookkeeping
-        # entirely from extract_cuts()/theta(), so it adopts the
-        # pre-installed relaxation with no change of its own. The rows
-        # arrive in the canonical order extract_cuts() emitted, so the
-        # warm master is the byte-identical relaxation the prior fit ended
-        # on. Only a cut-carrying method publishes an active_set; a cutless
-        # prior fit (active_set is None) seeds nothing.
+        # Warm-start: replay the prior fit's installed cuts onto the fresh
+        # master before setup. NSlack.setup() rebuilds its bookkeeping from
+        # extract_cuts()/theta(), and the rows arrive in the canonical order
+        # extract_cuts() emitted, so the warm master is the byte-identical
+        # relaxation the prior fit ended on. A cutless prior fit
+        # (active_set is None) seeds nothing.
         if warm_start is not None and warm_start.active_set is not None:
             master.reinstall(warm_start.active_set)
     ctx = FitContext(
@@ -183,12 +173,10 @@ def run_walk(
     )
     oracle = problem.oracle
     formulation = formulation_cls(problem.features)
-    # Opt-in: attach a capturing sink so the formulation emits one StepRecord
-    # per iteration into `step_sink.records`. Default off, and set_trace_sink
-    # is a no-op-when-None write, so capture_steprecords=False stays identical
-    # to the pre-capture run. The sink attaches on every rank, but only the
-    # rank holding the master populates the admit/purge/install fields; a
-    # non-root record carries just the rank-local contribute fields.
+    # Opt-in capture: one StepRecord per iteration into step_sink.records.
+    # The sink attaches on every rank, but only the rank holding the master
+    # populates the admit/purge/install fields; a non-root record carries
+    # just the rank-local contribute fields.
     step_sink: ListTraceSink | None = (
         ListTraceSink() if capture_steprecords else None
     )
@@ -198,25 +186,20 @@ def run_walk(
     iterations = 0
     cuts_admitted = 0
     pricing_calls = 0
-    # Max installed-cut count over the run, tracked root-only — the master
-    # lives on rank 0 alone, so no other rank can read it. extract_cuts()
-    # is a pure accessor (it sorts the installed keys into a tuple and
-    # touches no solver state), so reading it each iteration cannot move
-    # theta or the solve path: the no-warm/no-strip run stays byte-identical
-    # in its published answer, which the parity and rank-invariance gates
-    # confirm. The metric earns its keep on the stripping path, where a
-    # retired cut lowers this peak below the unstripped accumulation.
+    # Max installed-cut count over the run, tracked root-only (the master
+    # lives on rank 0 alone). extract_cuts() is a pure accessor — it sorts
+    # the installed keys into a tuple and touches no solver state — so
+    # reading it each iteration cannot move theta or the solve path. On the
+    # stripping path a retired cut lowers this peak below the unstripped
+    # accumulation.
     peak_installed_cuts = 0
-    # Per-iteration installed-row snapshots, captured only when the caller
-    # opts in. Same pure extract_cuts() accessor as peak_installed_cuts, so
-    # the default capture_installed=False path stays byte-identical and never
-    # builds this list.
+    # Per-iteration installed-row snapshots, built only when the caller opts
+    # in; the default path never touches this list.
     installed_snapshots: list[tuple[CutRow, ...]] = []
     masks: list[np.ndarray] = []
     supports: list[int] = []
-    # Per-iteration Schedule field, captured only under capture_steprecords
-    # (and only when a schedule is active, where the payload is computed). Built
-    # nowhere on the default path, so it never moves the byte-identical run.
+    # Captured only under capture_steprecords with a schedule active (where
+    # the payload is computed); never built on the default path.
     schedule_concentrations: list[DualConcentration] = []
     # Last iteration each agent was re-priced; identical on every rank (the
     # mask is global and deterministic), so the schedule needs no extra comm.
@@ -226,12 +209,10 @@ def run_walk(
     # a full sweep before the walk stops (the unpriced agents may still be
     # violated). force_full carries that "certify next" obligation.
     force_full = True
-    # Quadratic-penalty decay schedule. qp_weight == 0 disables it
-    # entirely: not one set_penalty call is made and the walk is the
-    # byte-identical pure-LP run every existing caller already gets. When
-    # active the weight decays linearly to exactly zero over `decay`
-    # iterations, so the terminating solve is a pure LP with valid LP
-    # duals (the whole point of the static-anchor schedule).
+    # Quadratic-penalty decay schedule. qp_weight == 0 disables it entirely
+    # (no set_penalty call is ever made); when active, the weight decays
+    # linearly to exactly zero over `decay` iterations, so the terminating
+    # solve is a pure LP with valid LP duals.
     penalty_on = qp_weight > 0.0 and decay > 0
     if qp_weight > 0.0 and decay <= 0:
         raise ValueError(
@@ -313,55 +294,39 @@ def run_walk(
             weight_t = (
                 qp_weight * max(0.0, 1.0 - it / decay) if penalty_on else 0.0
             )
-            if penalty_on and transport.rank == 0:
-                # Re-aim the master objective at the decayed weight and
-                # solve it here, before update(). weight_t hits exactly 0
-                # at it >= decay, so from then on this solve is a pure LP
-                # (set_penalty with weight 0 reverts the quadratic term
-                # entirely, never zeroes it approximately). ref_t is the
-                # current theta (dynamic proximal point) or the fixed
-                # anchor (static). Solving here — not leaving it to
-                # update()'s cut-gated solve — is what makes the weight
-                # actually move theta: a penalized iterate re-prices
-                # already-installed bundles, so update() would admit no
-                # cut and never re-solve, freezing theta at a stale weight.
-                # update()'s _state() then reads this solved theta and
-                # broadcasts it (its own solve only fires, redundantly at
-                # the same weight, when a genuinely new cut is admitted).
+            needs_penalty_solve = penalty_on and (
+                weight_t > 0.0 or last_solve_weight > 0.0
+            )
+            if needs_penalty_solve:
                 ref_t = theta if penalty_ref == "dynamic" else static_ref
-                master.set_penalty(ref_t, weight_t)
-                master.solve()
-                # This solve produced the theta update() is about to adopt
-                # and publish, so it is the weight behind the next answer.
-                last_solve_weight = weight_t
+                prepare_penalty = getattr(formulation, "prepare_penalty_solve", None)
+                if callable(prepare_penalty):
+                    prepare_penalty(ref_t, weight_t)
+                elif transport.rank == 0:
+                    master.set_penalty(ref_t, weight_t)
+                    master.solve()
             progressed = formulation.update(evaluated)
+            if needs_penalty_solve:
+                last_solve_weight = weight_t
             cuts_admitted += progressed
             if master is not None:
-                # Post-update installed set: update() has already added this
-                # step's cuts and run any policy retirement on root, so this
-                # reading is the master's true installed rows this iteration —
-                # the width a stripping policy holds down.
+                # Post-update reading: update() has already added this step's
+                # cuts and run any policy retirement on root, so this is the
+                # true installed width a stripping policy holds down.
                 installed = master.extract_cuts()
                 peak_installed_cuts = max(peak_installed_cuts, len(installed))
                 if capture_installed:
-                    # One snapshot per iteration, in loop order, of the exact
-                    # CutRow objects the master holds — the hard-clause gate
-                    # compares these across the per-agent vs batched features
-                    # paths.
                     installed_snapshots.append(installed)
             last_resolved[mask] = it
             masks.append(mask)
             iterations += 1
             if evaluated.violation <= tolerance:
-                # priced_weight is the weight behind this iteration's priced
-                # theta (set last iteration), so a violation<=tol certificate
-                # is honest only when that theta came from a pure-LP solve. The
-                # decay floor and priced_weight==0 gate refuse convergence until
-                # the weight has fully decayed; below the floor the walk keeps
-                # re-pricing the full sweep (and decaying) until it does. The
-                # theta published on break equals this validated one: a
-                # converged step ships no cut, so re-solving the unchanged cut
-                # set at weight 0 reproduces the same pure-LP vertex.
+                # A violation<=tol certificate is honest only when the priced
+                # theta came from a pure-LP solve; the decay floor and the
+                # priced_weight==0 gate refuse convergence until the weight
+                # has fully decayed. The theta published on break equals the
+                # validated one: a converged step ships no cut, so re-solving
+                # the unchanged cut set at weight 0 gives the same vertex.
                 if (
                     this_full
                     and iterations >= convergence_floor

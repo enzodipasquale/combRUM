@@ -229,6 +229,18 @@ def load_family(name: str, directory: Path) -> dict[str, np.ndarray]:
     return _frozen(arrays)
 
 
+#: On-disk home of the persisted default family fixtures.
+FAMILY_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "families"
+
+
+def load_toy() -> dict[str, np.ndarray]:
+    return load_family("toy", FAMILY_DIR)
+
+
+def load_qkp() -> dict[str, np.ndarray]:
+    return load_family("qkp", FAMILY_DIR)
+
+
 def family_digest(arrays: Mapping[str, np.ndarray]) -> str:
     """SHA-256 hex over a canonical byte rendering of the family arrays.
 
@@ -251,17 +263,12 @@ def family_digest(arrays: Mapping[str, np.ndarray]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Golden-drift guard.
-#
-# The persisted ``tests/fixtures/families/{toy,qkp}.npz`` files are read by
-# roughly a dozen downstream parity tests via :func:`load_family`. Nothing
-# else re-derives them, so a change to a generator here would silently leave
-# every downstream test running against stale on-disk bytes. These tests wire
-# up :func:`family_digest` (built for exactly this purpose) so the fixtures
-# are pinned to what the generators produce at their documented defaults.
+# Golden-drift guard. The persisted ``tests/fixtures/families/{toy,qkp}.npz``
+# files feed a dozen downstream parity tests via :func:`load_family` and
+# nothing else re-derives them, so a generator change would silently leave
+# those tests on stale bytes. Pin the on-disk fixtures to what the generators
+# produce at their documented defaults.
 # --------------------------------------------------------------------------
-
-_FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "families"
 
 
 def _assert_arrays_bitwise_equal(
@@ -278,14 +285,14 @@ def _assert_arrays_bitwise_equal(
 
 def test_toy_fixture_matches_generator_at_defaults() -> None:
     live = toy_family(TOY_DEFAULT_N_OBS, TOY_DEFAULT_N_ITEMS, DEFAULT_SEED)
-    disk = load_family("toy", _FIXTURE_DIR)
+    disk = load_family("toy", FAMILY_DIR)
     _assert_arrays_bitwise_equal(disk, live)
     assert family_digest(disk) == family_digest(live)
 
 
 def test_qkp_fixture_matches_generator_at_defaults() -> None:
     live = qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
-    disk = load_family("qkp", _FIXTURE_DIR)
+    disk = load_family("qkp", FAMILY_DIR)
     _assert_arrays_bitwise_equal(disk, live)
     assert family_digest(disk) == family_digest(live)
 
@@ -300,12 +307,9 @@ def test_persist_load_round_trips_bitwise_exact(tmp_path: Path) -> None:
 
 
 def test_persist_load_honor_the_name_argument(tmp_path: Path) -> None:
-    # Round-trip a *distinct* family under a *non-'toy'* name so the
-    # name -> "{name}.npz" contract is exercised in both directions. A
-    # persist_family or load_family that ignores its name argument (e.g. a
-    # hardcoded "toy.npz") maps every family to the same file and is caught
-    # here: the two families would collide on disk and the reloads would
-    # cross-contaminate.
+    # Two distinct families under distinct names: an implementation that
+    # ignores its name argument (say a hardcoded "toy.npz") would collide the
+    # files on disk and cross-contaminate the reloads.
     toy = toy_family(TOY_DEFAULT_N_OBS, TOY_DEFAULT_N_ITEMS, DEFAULT_SEED)
     qkp = qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
 
@@ -313,24 +317,20 @@ def test_persist_load_honor_the_name_argument(tmp_path: Path) -> None:
     qkp_path = persist_family("qkp_probe", qkp, tmp_path)
     assert toy_path == tmp_path / "toy.npz"
     assert qkp_path == tmp_path / "qkp_probe.npz"
-    # Exactly these two files exist; no name was silently remapped onto a
-    # shared "{name}.npz".
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "qkp_probe.npz",
         "toy.npz",
     ]
 
-    # Each name reloads *its own* payload, not the other family's, so the
-    # name argument selects the file on both the write and the read side.
+    # Each name reloads its own payload on the read side too.
     _assert_arrays_bitwise_equal(load_family("toy", tmp_path), toy)
     _assert_arrays_bitwise_equal(load_family("qkp_probe", tmp_path), qkp)
     assert family_digest(load_family("qkp_probe", tmp_path)) == family_digest(qkp)
 
 
 def _assert_all_read_only(arrays: Mapping[str, np.ndarray]) -> None:
-    # Contract (docstrings of _frozen/load_family): every returned array is
-    # read-only so a caller cannot mutate a shared fixture. False is the
-    # documented flag value, not read back from the implementation.
+    # Every returned array must be read-only so a caller cannot mutate a
+    # shared fixture (the _frozen/load_family contract).
     for key, arr in arrays.items():
         assert arr.flags.writeable is False, key
 
@@ -342,7 +342,7 @@ def test_family_arrays_are_read_only() -> None:
     _assert_all_read_only(
         qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
     )
-    _assert_all_read_only(load_family("toy", _FIXTURE_DIR))
+    _assert_all_read_only(load_family("toy", FAMILY_DIR))
 
 
 def test_loaded_family_is_read_only(tmp_path: Path) -> None:
@@ -352,8 +352,8 @@ def test_loaded_family_is_read_only(tmp_path: Path) -> None:
 
 
 def _toy_min_margin(fam: Mapping[str, np.ndarray]) -> float:
-    # Plain-Python re-derivation of min |r*theta + nu|, structurally distinct
-    # from the vectorised generator so it is an independent oracle.
+    # min |r*theta + nu| in plain Python, structurally distinct from the
+    # vectorised generator.
     r = fam["observables"]
     theta = fam["theta_true"]
     nu = fam["shocks"].reshape(r.shape)
@@ -366,8 +366,8 @@ def _toy_min_margin(fam: Mapping[str, np.ndarray]) -> float:
 
 
 def _qkp_min_gap(fam: Mapping[str, np.ndarray]) -> float:
-    # Plain-Python brute-force best-minus-runner-up across agents; a separate
-    # implementation of the same objective the generator vectorises.
+    # Brute-force best-minus-runner-up across agents in plain Python; a
+    # separate implementation of the objective the generator vectorises.
     x = fam["x"]
     q = fam["Q"]
     weights = fam["weights"]
@@ -408,11 +408,9 @@ _FLOAT_NOISE = 1e-15
 
 
 def test_min_margin_is_a_small_positive_threshold() -> None:
-    # A non-positive threshold guards nothing; the docstring calls it the
-    # smallest *tolerated* margin, far above float noise (~1e-15). Pin both
-    # ends: still small (< 1e-4, well below any real decision gap) but at least
-    # 1e3x above float noise, so it cannot silently decay to noise level and
-    # let a float-flippable family pass as a parity anchor.
+    # Both ends pinned: small enough to sit below any real decision gap, yet
+    # at least 1e3x above float noise so it cannot decay to a level where a
+    # float-flippable family passes as a parity anchor.
     assert MIN_MARGIN >= 1e3 * _FLOAT_NOISE
     assert 0.0 < MIN_MARGIN <= 1e-4
 
@@ -425,9 +423,8 @@ def test_default_families_clear_the_margin() -> None:
 
 
 def _indep_toy_min_margin(fam: Mapping[str, np.ndarray]) -> float:
-    # Independent vectorised re-derivation of min|r*theta + nu|. Distinct in
-    # structure from both the generator and the plain-Python oracle: broadcasts
-    # the whole score grid and mins the flattened absolute value in one shot.
+    # min|r*theta + nu| a third way: broadcast the whole score grid and min
+    # the flattened absolute value in one shot.
     r = fam["observables"]
     theta = fam["theta_true"]
     nu = fam["shocks"].reshape(r.shape)
@@ -436,9 +433,9 @@ def _indep_toy_min_margin(fam: Mapping[str, np.ndarray]) -> float:
 
 
 def _indep_qkp_min_gap(fam: Mapping[str, np.ndarray]) -> float:
-    # Independent brute-force best-minus-second across agents, enumerating
-    # bundles with itertools.product and numpy dot products (a different code
-    # path from both the generator's einsum and the oracle's index loops).
+    # Best-minus-second a third way: itertools.product enumeration with numpy
+    # dot products, unlike the generator's einsum or _qkp_min_gap's index
+    # loops.
     import itertools
 
     x = fam["x"]
@@ -469,31 +466,26 @@ def _indep_qkp_min_gap(fam: Mapping[str, np.ndarray]) -> float:
     return worst
 
 
-def test_margin_oracles_track_an_independent_recomputation() -> None:
-    # The three margin tests lean on _toy_min_margin / _qkp_min_gap as their
-    # "independent oracle", but nothing pinned the oracles themselves. A
-    # constant-return stub (e.g. `return 1e9`) would satisfy every `> MIN_MARGIN`
-    # check vacuously and wave through a genuinely float-flippable family. Pin
-    # each oracle to a wholly separate recomputation from the frozen fixture
-    # arrays, so a stubbed oracle diverges from the truth and fails here.
+def test_margin_recomputations_agree() -> None:
+    # The margin tests lean on _toy_min_margin / _qkp_min_gap; a stub that
+    # returns a large constant would clear every `> MIN_MARGIN` check while
+    # waving through a genuinely float-flippable family. Each helper must
+    # therefore match a separately-written recomputation and the known values
+    # of the frozen defaults.
     toy = toy_family(TOY_DEFAULT_N_OBS, TOY_DEFAULT_N_ITEMS, DEFAULT_SEED)
     qkp = qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
 
     assert _toy_min_margin(toy) == pytest.approx(_indep_toy_min_margin(toy))
     assert _qkp_min_gap(qkp) == pytest.approx(_indep_qkp_min_gap(qkp))
 
-    # Independent recomputations of the frozen defaults land at these exact
-    # values (min|scores| and best-minus-second across the fixture arrays); a
-    # constant-return oracle cannot match them.
     assert _toy_min_margin(toy) == pytest.approx(0.2206431761206875)
     assert _qkp_min_gap(qkp) == pytest.approx(0.0316466606532404)
 
 
-def test_margin_oracles_report_small_on_knife_edge_families() -> None:
-    # The other half of pinning the oracles: on a deliberately knife-edge
-    # family the oracle must report a value BELOW MIN_MARGIN. A constant-return
-    # stub (return 1e9) reports a huge margin here and is caught; the real
-    # oracle sees the near-tie it exists to detect.
+def test_margin_helpers_flag_knife_edge_families() -> None:
+    # The other direction: on a deliberately knife-edge family the helpers
+    # must report a value BELOW MIN_MARGIN, which a large-constant stub
+    # cannot.
     r, nu, signs, magnitude = _scripted_toy_knife_edge()
     knife_toy = {
         "observables": r,
@@ -502,7 +494,7 @@ def test_margin_oracles_report_small_on_knife_edge_families() -> None:
     }
     assert _toy_min_margin(knife_toy) <= MIN_MARGIN
 
-    # Rebuild the same scripted QKP agent's arrays to feed the QKP oracle.
+    # Rebuild the scripted QKP agent's arrays for the QKP helper.
     (
         x,
         weights,
@@ -529,12 +521,10 @@ def test_margin_oracles_report_small_on_knife_edge_families() -> None:
 def test_toy_family_rejects_knife_edge_margin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Bump MIN_MARGIN to JUST above the default seed's real min|scores| so only
-    # a guard measuring the exact decision score trips. edge + 1.0 was too
-    # loose: any modestly sized quantity (e.g. a scores->min|nu| swap, whose
-    # min|nu| ~= 0.015) clears edge + 1.0 ~= 1.22 and still raises, so it never
-    # pinned the guard to |r*theta + nu|. np.nextafter keeps the bump at one
-    # ulp above the true margin instead.
+    # Bump MIN_MARGIN one ulp above the default seed's real min|scores|.
+    # Under a looser bump (say edge + 1.0) a guard measuring the wrong
+    # quantity — min|nu| ~= 0.015, for one — would raise as well, leaving
+    # |r*theta + nu| unpinned.
     edge = _toy_min_margin(
         toy_family(TOY_DEFAULT_N_OBS, TOY_DEFAULT_N_ITEMS, DEFAULT_SEED)
     )
@@ -546,10 +536,9 @@ def test_toy_family_rejects_knife_edge_margin(
 
 
 class _ScriptedRng:
-    """Hands back a fixed sequence of arrays, one per draw call, so a test
-    can drive ``toy_family``/``qkp_family`` through a hand-built family whose
-    decision margins we control exactly. Every generator draw method routes to
-    the same queue in call order.
+    """Hands back a fixed sequence of arrays, one per draw call, so a test can
+    drive ``toy_family``/``qkp_family`` through a hand-built family with exact
+    decision margins.
     """
 
     def __init__(self, draws: list[object]) -> None:
@@ -589,10 +578,10 @@ def _scripted_toy_knife_edge() -> list[object]:
 def test_toy_guard_measures_decision_score_not_shock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A guard on min|nu| instead of min|scores| would accept a family whose
-    # observed choice can float-flip. Feed a hand-built family that is
-    # knife-edge in |scores| (~1e-9) but has large |nu| (~0.5): the real guard
-    # rejects it; a scores->nu faulty implementation would not raise (min|nu| >> MIN_MARGIN).
+    # This hand-built family is knife-edge in |scores| (~1e-9) but has large
+    # |nu| (~0.5), so it is rejected only by a guard reading the decision
+    # score; a guard on min|nu| would accept a family whose observed choice
+    # can float-flip.
     monkeypatch.setattr(
         sys.modules[__name__],
         "_family_rng",
@@ -601,24 +590,22 @@ def test_toy_guard_measures_decision_score_not_shock(
     with pytest.raises(ValueError, match="parity anchor"):
         toy_family(2, 2, 0)
 
-    # Pin the failure direction: replaying the same scripted family through a
-    # min|nu| guard must NOT raise, so the test above genuinely depends on the
-    # guard measuring the decision score.
+    # Both directions, from the same scripted family: min|scores| trips the
+    # guard, min|nu| would not.
     r, nu, signs, magnitude = _scripted_toy_knife_edge()
     scores = r * (signs * magnitude)[None, :] + nu
-    assert float(np.min(np.abs(scores))) <= MIN_MARGIN  # real guard: raises
-    assert float(np.min(np.abs(nu))) > MIN_MARGIN  # nu faulty implementation: would not raise
+    assert float(np.min(np.abs(scores))) <= MIN_MARGIN
+    assert float(np.min(np.abs(nu))) > MIN_MARGIN
 
 
 def test_qkp_family_rejects_near_tie_margin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # As with the toy guard: bump MIN_MARGIN to just above the true
-    # best-minus-second gap so only a guard measuring the SECOND-best fires.
-    # edge + 1.0 was too loose (best-minus-third ~= 0.12 clears it, so a
-    # -2 -> -3 faulty implementation still raised and stayed green). A tiny relative slack
-    # (1e-6) clears the einsum-vs-Python float noise between the generator's
-    # own gap and the oracle's while staying ~3.9x below best-minus-third.
+    # best-minus-second gap. The 1e-6 relative slack clears the einsum-vs-
+    # Python float noise between the generator's gap and the helper's while
+    # staying ~3.9x below best-minus-third, so only a guard measuring the
+    # SECOND-best fires.
     edge = _qkp_min_gap(
         qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
     )
@@ -632,11 +619,10 @@ def test_qkp_family_rejects_near_tie_margin(
 def _scripted_qkp_knife_edge() -> list[object]:
     # qkp_family draw order: x, weights, capacity fractions, chosen pair
     # indices, coupling, alpha, delta, lambda, nu. One agent, two items, zero
-    # coupling, roomy capacity so all four bundles are feasible. The per-item
-    # scores are c0 = 1.0 and c1 = 1e-9, giving bundle utilities
-    # {0.0, 1.0, 1e-9, 1.0 + 1e-9}: best-minus-second ~= 1e-9 (knife-edge) but
-    # best-minus-third ~= 1.0. The real second-best guard fires; a third-best
-    # faulty implementation would measure ~1.0 and pass.
+    # coupling, roomy capacity so all four bundles are feasible. Per-item
+    # scores c0 = 1.0 and c1 = 1e-9 give bundle utilities
+    # {0.0, 1.0, 1e-9, 1.0 + 1e-9}: best-minus-second ~= 1e-9 (knife-edge)
+    # while best-minus-third ~= 1.0.
     x = np.array([[2.0, 2.0]])
     weights = np.array([1.0, 1.0])
     capacity_fractions = np.array([100.0])  # * weights.sum() -> all feasible
@@ -662,10 +648,10 @@ def _scripted_qkp_knife_edge() -> list[object]:
 def test_qkp_guard_measures_second_best_not_third(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A guard on best-minus-third instead of best-minus-second would accept a
-    # genuine near-tie between the optimum and the runner-up. Feed a hand-built
-    # agent whose best-minus-second is ~1e-9 but best-minus-third is ~1.0: the
-    # real guard rejects it; a -2 -> -3 faulty implementation would measure ~1.0 and pass.
+    # The scripted agent's best-minus-second is ~1e-9 but best-minus-third is
+    # ~1.0, so it is rejected only by a guard that measures the runner-up; a
+    # guard on best-minus-third would accept a genuine near-tie between the
+    # optimum and the runner-up.
     monkeypatch.setattr(
         sys.modules[__name__],
         "_family_rng",
@@ -674,11 +660,10 @@ def test_qkp_guard_measures_second_best_not_third(
     with pytest.raises(ValueError, match="parity anchor"):
         qkp_family(1, 2, 0)
 
-    # Pin the failure direction from the bundle utilities directly: the top
-    # gap is knife-edge, the best-minus-third gap is far above MIN_MARGIN.
+    # Both directions, from the bundle utilities directly.
     utilities = sorted([0.0, 1.0, 1e-9, 1.0 + 1e-9], reverse=True)
-    assert utilities[0] - utilities[1] <= MIN_MARGIN  # 2nd guard: raises
-    assert utilities[0] - utilities[2] > MIN_MARGIN  # 3rd faulty implementation: would pass
+    assert utilities[0] - utilities[1] <= MIN_MARGIN
+    assert utilities[0] - utilities[2] > MIN_MARGIN
 
 
 def test_family_digest_detects_any_perturbation() -> None:
@@ -710,13 +695,11 @@ def test_family_digest_detects_any_perturbation() -> None:
     renamed["observables_renamed"] = renamed.pop("observables")
     assert family_digest(renamed) != baseline
 
-    # The length prefix earns its keep: two DISTINCT families whose
-    # unprefixed (name, dtype, shape, value) fields concatenate to the same
-    # byte stream must still hash apart. Here the "u" migrates between the
-    # array name and the dtype string: {'xu': int8} -> b'xu'+b'int8' and
-    # {'x': uint8} -> b'x'+b'uint8' both run together as b'xuint8...'. Drop
-    # the per-field length prefix and these collide; the real digest, which
-    # prefixes every field, must keep them apart.
+    # The length prefix: two DISTINCT families whose unprefixed fields
+    # concatenate to the same byte stream must still hash apart. The "u"
+    # migrates between array name and dtype string — {'xu': int8} ->
+    # b'xu'+b'int8' and {'x': uint8} -> b'x'+b'uint8' both run together as
+    # b'xuint8...' — so without per-field prefixes these collide.
     aliased_a = {"xu": np.array([7], dtype=np.int8)}
     aliased_b = {"x": np.array([7], dtype=np.uint8)}
     assert family_digest(aliased_a) != family_digest(aliased_b)

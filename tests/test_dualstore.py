@@ -16,10 +16,9 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "dualstore"
 # Golden fixtures: canonical literals + regeneration script.
 #
 # The checked-in npz files under FIXTURE_DIR were written by
-# write_golden_fixtures() from these literals. Loading them must reproduce
-# the payloads content-bitwise: bytes written today parse identically
-# forever. Every literal is dyadic with an explicit dtype, so there is no
-# RNG or platform-dependent default in play.
+# write_golden_fixtures() from these literals; loading them must reproduce
+# the payloads bit-for-bit. Every literal is dyadic with an explicit dtype,
+# so no RNG or platform-dependent default is in play.
 # ---------------------------------------------------------------------------
 
 
@@ -81,8 +80,7 @@ def test_write_load_round_trips_content_bitwise(tmp_path: Path) -> None:
     assert path == tmp_path / "rep-00000000.npz"
     loaded = DualStoreReader(tmp_path).load(0)
     assert equal(loaded, dual)
-    # Assert dtypes explicitly: non-default int32 ids and int8 table
-    # must survive natively, which equal() alone would not catch.
+    # Non-default dtypes (int32 ids, int8 table) must survive natively.
     assert loaded.agent_ids.dtype == np.dtype(np.int32)
     assert loaded.bundle_row_ids.dtype == np.dtype(np.int64)
     assert loaded.pis.dtype == np.dtype(np.float64)
@@ -92,9 +90,8 @@ def test_write_load_round_trips_content_bitwise(tmp_path: Path) -> None:
 
 
 def test_writer_canonicalizes_bound_coords_on_disk(tmp_path: Path) -> None:
-    # The writer promises one encoding per payload regardless of dict order.
-    # Feed unsorted insertion order and read the raw npz: bound_coords must
-    # land sorted ascending, with bound_values carried alongside their coord.
+    # One encoding per payload regardless of dict order: on disk,
+    # bound_coords ascending with bound_values paired to their coord.
     path = DualStoreWriter(tmp_path).write(make_dual(bound_duals={3: 1.0, 0: 2.0}))
     with np.load(path) as npz:
         assert npz["bound_coords"].tolist() == [0, 3]
@@ -120,12 +117,9 @@ def test_missing_rep_load_names_rep_and_dir(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError) as excinfo:
         DualStoreReader(tmp_path).load(42)
     message = str(excinfo.value)
-    # Pin the raw rep id as a token, not the bare "42" that the zero-padded
-    # filename rep-00000042.npz also carries: a message that only echoed the
-    # resolved path would still contain "42" and str(tmp_path) yet drop the
-    # "replication 42" wording this contract promises.
+    # The message must say "replication 42", not merely echo the padded
+    # filename rep-00000042.npz (which also contains "42").
     assert "replication 42" in message
-    # The unpadded rep id, not the padded filename form, must name the rep.
     assert "rep-00000042" not in message
     assert str(tmp_path) in message
 
@@ -136,9 +130,8 @@ def test_rep_ids_sorted_and_files_zero_padded(
     writer = DualStoreWriter(tmp_path)
     for rep_id in (5, 3, 9):
         writer.write(make_dual(rep_id=rep_id))
-    # Force iterdir() to hand back the rep files in descending name order so
-    # rep_ids() cannot pass by inheriting the filesystem's incidental sort:
-    # a reader that skips its own sort would return (9, 5, 3) here.
+    # Hand back the rep files in descending name order so rep_ids() cannot
+    # inherit the filesystem's incidental sort.
     real_iterdir = Path.iterdir
 
     def reversed_iterdir(self: Path) -> Iterator[Path]:
@@ -167,7 +160,7 @@ def test_iteration_ascending_and_lazy(tmp_path: Path) -> None:
     iterator = iter(reader)
     first = next(iterator)
     assert first.rep_id == 0
-    # The streaming contract: consuming the first rep loaded exactly one.
+    # Lazy: the first next() triggered exactly one load.
     assert loads == [0]
     assert [dual.rep_id for dual in iterator] == [1, 2]
     assert loads == [0, 1, 2]
@@ -181,10 +174,8 @@ def test_write_leaves_no_tmp_residue(tmp_path: Path) -> None:
 def test_torn_write_propagates_and_leaves_no_tmp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Force the rename-into-place to fail after the .tmp is written: this is
-    # the only path where the writer's finally-cleanup is load-bearing. On
-    # success os.replace consumes the .tmp, so the success-path test above
-    # cannot see whether the cleanup exists.
+    # Fail the rename-into-place after the .tmp is written. On success
+    # os.replace consumes the .tmp, so only this path exercises the cleanup.
     import combrum.dualstore as dualstore
 
     boom = OSError("disk full")
@@ -196,16 +187,14 @@ def test_torn_write_propagates_and_leaves_no_tmp(
     with pytest.raises(OSError) as excinfo:
         DualStoreWriter(tmp_path).write(make_dual())
     assert excinfo.value is boom
-    # No final file and, critically, no torn .tmp sibling left behind.
+    # No final file and no leftover .tmp.
     assert list(tmp_path.iterdir()) == []
 
 
 def test_rep_ids_excludes_foreign_and_torn_write_siblings(tmp_path: Path) -> None:
-    # rep_ids() must list exactly the well-formed rep files. Drop siblings that
-    # share the rep prefix but are not rep files: a torn-write .tmp, a stray
-    # .bak, a foreign .txt, and a prefix-only rep-.npz. A reader that anchored
-    # only the prefix (fullmatch -> match, or dropping the trailing \.npz)
-    # would count rep-000000NN.npz.tmp/.bak as phantom duplicate reps.
+    # Siblings that share the rep prefix but are not rep files -- a torn-write
+    # .tmp, a stray .bak, a foreign .txt, a prefix-only rep-.npz -- must not
+    # count as reps.
     writer = DualStoreWriter(tmp_path)
     for rep_id in (7, 2):
         writer.write(make_dual(rep_id=rep_id))
@@ -214,11 +203,8 @@ def test_rep_ids_excludes_foreign_and_torn_write_siblings(tmp_path: Path) -> Non
     (tmp_path / "notes.txt").write_text("x")
     (tmp_path / "rep-.npz").write_bytes(b"x")
     reader = DualStoreReader(tmp_path)
-    # Full set, ascending, no phantom or duplicate: the faulty implementation returns
-    # (2, 2, 7, 7); a filter that also swallowed rep-.npz would add a stray.
     assert reader.rep_ids() == (2, 7)
-    # Iterating loads only the two real reps, in order — the siblings never
-    # reach load() (which would fail on their non-npz bytes).
+    # Iteration never touches the siblings (their bytes are not valid npz).
     assert [dual.rep_id for dual in reader] == [2, 7]
 
 
@@ -253,8 +239,7 @@ def test_golden_interior_fixture_is_frozen_format() -> None:
 def test_golden_on_bound_fixture_preserves_bound_duals() -> None:
     loaded = DualStoreReader(FIXTURE_DIR).load(1)
     assert equal(loaded, canonical_on_bound())
-    # Assert nonempty and exact on their own: a store that drops or
-    # zeroes bound multipliers must fail here, not only via equal().
+    # Multipliers must come back nonzero, not dropped or zeroed.
     assert all(value != 0.0 for value in loaded.bound_duals.values())
     assert loaded.bound_duals == {0: -0.5, 3: 1.25}
 
@@ -268,9 +253,7 @@ def test_golden_payloads_round_trip_through_fresh_store(tmp_path: Path) -> None:
 
 
 def test_equal_is_bitwise_on_signed_zero(tmp_path: Path) -> None:
-    # Value equality would call +0.0 and -0.0 equal; the round-trip
-    # predicate must not, since flipping bits while preserving values
-    # still changes the frozen format.
+    # +0.0 and -0.0 are equal by value, but the frozen format is bitwise.
     plus = make_dual(pis=np.array([0.0, 0.5]))
     minus = make_dual(pis=np.array([-0.0, 0.5]))
     assert not equal(plus, minus)
@@ -279,28 +262,25 @@ def test_equal_is_bitwise_on_signed_zero(tmp_path: Path) -> None:
     assert not equal(bound_plus, bound_minus)
     # Positive control: bitwise-identical payloads still compare equal.
     assert equal(plus, make_dual(pis=np.array([0.0, 0.5])))
-    # rep_id is part of the contract: payloads identical in every array and
-    # bound multiplier but differing only in rep_id must not compare equal.
+    # rep_id is part of the contract too.
     assert not equal(make_dual(rep_id=0), make_dual(rep_id=1))
-    # equal() must compare ALL four arrays, not just pis. Each control differs
-    # from the baseline in exactly one array (value, then dtype), so an equal()
-    # that quietly stopped comparing agent_ids / bundle_row_ids / bundle_table
-    # would wrongly call these equal.
+    # All four arrays are compared; each control below differs from base in
+    # exactly one of them.
     base = make_dual()
     assert not equal(base, make_dual(agent_ids=np.array([3, 6], dtype=np.int32)))
     assert not equal(base, make_dual(bundle_row_ids=np.array([1, 1], dtype=np.int64)))
     assert not equal(
         base, make_dual(bundle_table=np.array([[1, 0, 2], [3, 1, 9]], dtype=np.int8))
     )
-    # Same values, wider dtype: the bit-format comparison must reject it too.
+    # Same values, wider dtype: still not equal.
     assert not equal(base, make_dual(agent_ids=np.array([3, 5], dtype=np.int64)))
 
 
 def _rewrite_bound_arrays(
     path: Path, coords: np.ndarray, values: np.ndarray
 ) -> None:
-    # Corrupt the file the way a buggy producer would: valid envelope,
-    # malformed bound arrays — bypassing the writer on purpose.
+    # Corrupt the file as a buggy producer would: valid envelope, malformed
+    # bound arrays, writer bypassed.
     with np.load(path) as npz:
         payload = {name: npz[name] for name in npz.files}
     payload["bound_coords"] = coords
@@ -337,11 +317,8 @@ def test_load_rejects_duplicate_bound_coordinates(tmp_path: Path) -> None:
 def test_load_rejects_non_integer_bound_coordinates(
     tmp_path: Path, dtype: type
 ) -> None:
-    # Non-integer coords must be rejected outright: without the dtype guard,
-    # int(c) would silently truncate float coords [0.7, 3.2] into keys {0, 3},
-    # accepting a wrong-coordinate payload as valid. Parametrizing over the
-    # whole non-integer class (float64/float32/complex) kills a regression that
-    # narrows the guard to reject only one of them.
+    # Without the dtype guard, int(c) would silently truncate coords
+    # [0.7, 3.2] into keys {0, 3} and accept a wrong-coordinate payload.
     writer = DualStoreWriter(tmp_path)
     path = writer.write(make_dual(bound_duals={0: 1.0, 3: 2.0}))
     _rewrite_bound_arrays(
@@ -354,10 +331,8 @@ def test_load_rejects_non_integer_bound_coordinates(
 
 
 def test_load_accepts_non_int64_integer_bound_coordinates(tmp_path: Path) -> None:
-    # The guard rejects the non-integer class, not everything but int64: a
-    # coords array in another integer dtype (int32) is still a valid flattened
-    # mapping and must load, decoding to the exact {coord: value} payload.
-    # This kills a regression that over-narrows the guard to `dtype == int64`.
+    # The guard rejects non-integer dtypes, not everything but int64: int32
+    # coords are still a valid flattened mapping and must load.
     writer = DualStoreWriter(tmp_path)
     path = writer.write(make_dual(bound_duals={0: 1.0, 3: 2.0}))
     _rewrite_bound_arrays(

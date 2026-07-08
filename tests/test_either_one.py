@@ -15,8 +15,6 @@ Three layers, all on the in-process transport doubles:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -51,14 +49,12 @@ from combrum.interface_resolution import (
 )
 from combrum.formulations import NSlack, OneSlack
 from combrum.rowgen import MaxContribution
-from _support.families import load_family
+from _support.families import load_qkp, load_toy
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
 from combrum.oracle import Oracle
 from combrum.transport import LocalCluster, SerialTransport, TransportError
 from combrum.transport.base import Transport
-
-FAMILY_DIR = Path(__file__).resolve().parent / "fixtures" / "families"
 
 GUROBI_AVAILABLE = gurobi_backend.available()
 HIGHS_AVAILABLE = highs_backend.available()
@@ -81,14 +77,6 @@ pytestmark = [
         "ignore::RuntimeWarning:.*matmul.*"
     ),
 ]
-
-
-def load_toy() -> dict[str, np.ndarray]:
-    return load_family("toy", FAMILY_DIR)
-
-
-def load_qkp() -> dict[str, np.ndarray]:
-    return load_family("qkp", FAMILY_DIR)
 
 
 # --- the generic guard on a synthetic either-one ABC -------------------------
@@ -173,10 +161,8 @@ def test_both_resolves_to_optimized_with_reference() -> None:
     res = _resolve_surface(inst, SerialTransport())
     assert res.mode is Mode.BOTH
     assert res.runs_optimized
-    # Both members compute x+1, so value checks alone cannot tell which physical
-    # member got bound where. Pin the binding by identity: active must be the
-    # OPTIMIZED (fast) member bound to this instance, reference the per-agent
-    # (plain) member. A swap of either binding is caught here.
+    # Both members compute x+1, so values cannot tell them apart; check the
+    # bindings by identity instead.
     assert res.active.__func__ is _Both.fast
     assert res.active.__self__ is inst
     assert res.reference is not None
@@ -187,8 +173,6 @@ def test_both_resolves_to_optimized_with_reference() -> None:
 
 
 def test_whole_mro_override_detected_through_intermediate_base() -> None:
-    # The override lives on _PlainOnly, reached via the MRO from a subclass
-    # that adds nothing — a cls.__dict__ check would miss it.
     res = _resolve_surface(_PlainViaIntermediate(), SerialTransport())
     assert res.mode is Mode.DEFAULT
     assert res.active(7) == 8
@@ -268,11 +252,10 @@ def test_dispatch_routes_each_mode() -> None:
 def _conformance_grid() -> tuple[list, list, tuple, tuple]:
     """A 2-item grid, each item carrying two discrete and two continuous fields.
 
-    Field layout per item tuple: (d0, c0, d1, c1) so discrete=(0, 2),
-    continuous=(1, 3) interleave — a loop that only visited leading indices or
-    only the first item would miss a perturbed cell. Each continuous field sits
-    at a DISTINCT just-under-bar drift; discrete fields are byte-identical.
-    Returned as (optimized, reference, discrete, continuous).
+    Fields interleave per item as (d0, c0, d1, c1), so discrete=(0, 2) and
+    continuous=(1, 3). Each continuous field sits at a distinct just-under-bar
+    drift; discrete fields are byte-identical. Returned as (optimized,
+    reference, discrete, continuous).
     """
     d00 = np.array([1.0, 2.0, 0.0])
     c00 = np.array([-3.0, 4.5])
@@ -282,8 +265,7 @@ def _conformance_grid() -> tuple[list, list, tuple, tuple]:
     c10 = np.array([5.5])
     d11 = np.array([-1.0, 0.0, 4.0])
     c11 = np.array([12.0, -13.5])
-    # per-field just-under-bar drifts (all <= 1e-13); distinct so each field's
-    # own comparison is exercised, not a shared one.
+    # per-field just-under-bar drifts, all <= 1e-13 and all distinct
     opt = [
         (d00.copy(), c00 + 0.5e-13, d01.copy(), c01 + 0.9e-13),
         (d10.copy(), c10 + 0.3e-13, d11.copy(), c11 + 0.7e-13),
@@ -296,19 +278,15 @@ def _conformance_grid() -> tuple[list, list, tuple, tuple]:
 
 
 def test_assert_conforms_passes_within_tol_and_byte_exact() -> None:
-    # Distinct from the tolerance-bracket test (single item, single field of
-    # each kind): this pins that assert_conforms visits EVERY item and EVERY
-    # discrete/continuous field. The whole 2x(2+2) grid sits just under the
-    # bar and must pass; then each cell is perturbed one at a time and the raise
-    # must name exactly that field/item coordinate — proving the item loop and
-    # both field loops are complete (no truncation, no break-for-continue).
+    # The whole 2x(2+2) grid sits just under the bar and must pass; then each
+    # cell is perturbed one at a time and the raise must name that exact
+    # field/item coordinate.
     opt, ref, discrete, continuous = _conformance_grid()
     assert_conforms(
         "probe", optimized=opt, reference=ref, discrete=discrete, continuous=continuous
     )
 
-    # Perturbation one continuous cell per (item, field): an above-tolerance drift injected
-    # into item `pos`, continuous field `idx`, must raise naming that cell.
+    # above-tolerance drift in one continuous cell at a time
     for pos in range(2):
         for idx in continuous:
             perturbed = [tuple(arr.copy() for arr in item) for item in opt]
@@ -327,8 +305,7 @@ def test_assert_conforms_passes_within_tol_and_byte_exact() -> None:
                     continuous=continuous,
                 )
 
-    # Perturbation one discrete cell per (item, field): a one-bit flip in item `pos`,
-    # discrete field `idx`, must raise naming that cell.
+    # one-bit flip in one discrete cell at a time
     for pos in range(2):
         for idx in discrete:
             perturbed = [tuple(arr.copy() for arr in item) for item in opt]
@@ -351,13 +328,11 @@ def test_assert_conforms_passes_within_tol_and_byte_exact() -> None:
 
 
 def test_conformance_bar_is_1e_13_and_brackets_tightly() -> None:
-    # The two other tolerance tests leave a ~6-order gap (pass drives 0.5e-13,
-    # fail drives 1e-6): a bar widened anywhere in (~1e-13, 1e-6) is invisible to
-    # them. Bracket the bar tightly so a widening past ~1e-13 (or a tightening
-    # below it) is caught, and pin the constant itself.
+    # The other tolerance tests probe 0.5e-13 vs 1e-6; bracket the bar tightly
+    # from both sides here.
     assert CONTINUOUS_TOL == 1e-13
     a = np.array([1.0, 2.0, 0.0])
-    # Just under the bar passes (guards against a tightening below 1e-13).
+    # Just under the bar passes.
     assert_conforms(
         "probe",
         optimized=[(a + 0.5e-13, a)],
@@ -365,10 +340,8 @@ def test_conformance_bar_is_1e_13_and_brackets_tightly() -> None:
         discrete=(1,),
         continuous=(0,),
     )
-    # Just over the bar fails (guards against a widening above 1e-13). The
-    # probe sits ~5% over the bar (real drift ~1.05e-13), so any effective
-    # widening into (1e-13, ~1.05e-13] -- e.g. tol*1.5 = 1.5e-13 -- is caught;
-    # a ~2e-13 probe would leave that whole window invisible.
+    # Just over the bar fails; the probe sits ~5% over (real drift ~1.05e-13)
+    # to keep the bracket tight.
     over = a + 1.05e-13
     assert 1e-13 < float(np.max(np.abs(over - a))) < 1.1e-13
     with pytest.raises(AssertionError, match="continuous field 0"):
@@ -394,11 +367,9 @@ def test_assert_conforms_accepts_matching_infinite_continuous_fields() -> None:
 
 
 def test_assert_conforms_rejects_divergence_on_opposite_sign_infinite_field() -> None:
-    # The same_inf mask only excuses SAME-sign infinities. Opposite-sign inf
-    # (feasible payoff +inf vs infeasible -inf, e.g. a capacity-infeasible
-    # demand) is a real divergence and must fail: +inf - -inf = +inf,
-    # which is > any tol. Dropping the signbit half of the mask would swallow
-    # this feasible/infeasible mismatch.
+    # The same_inf mask only excuses same-sign infinities; +inf vs -inf
+    # (feasible payoff vs infeasible, e.g. a capacity-infeasible demand) is a
+    # real divergence and must fail.
     bundle = np.array([1.0, 0.0])
     with pytest.raises(AssertionError, match="continuous field"):
         assert_conforms(
@@ -468,9 +439,7 @@ class _DivergentBatchToy(ToyOracle):
 class _ExtraIdBatchToy(ToyOracle):
     """Both supplied; price_batch leaks one id outside the requested shard.
 
-    The requested subset itself conforms to the per-agent path — the perturbation
-    is purely the extra id (a stale/foreign shard leak), which the shard-exact
-    domain check must catch even though every requested id agrees.
+    The requested subset itself conforms — only the extra id is wrong.
     """
 
     def price_batch(self, theta, local_ids):
@@ -484,10 +453,8 @@ class _ExtraIdBatchToy(ToyOracle):
 class _MissingIdBatchToy(ToyOracle):
     """Optimized-only; price_batch drops one requested id from its shard.
 
-    The other half of the shard-exact domain check: a batch that returns fewer
-    ids than requested (a shard-local truncation) must fail. Batch-only, so
-    the raise comes from ``_batched_demands``' domain check itself, not the
-    both-supplied conformance gate.
+    Batch-only, so the raise comes from ``_batched_demands``' domain check,
+    not the both-supplied conformance gate.
     """
 
     price = Oracle.price  # keep the raising default -> optimized-only
@@ -565,13 +532,10 @@ def _demand_fingerprint(d) -> tuple[bytes, str, float, float]:
 def _qkp_price_from_arrays(
     arrays: dict[str, np.ndarray], theta: np.ndarray, agent_id: int
 ) -> tuple[np.ndarray, float]:
-    """The QKP demand recomputed by brute-force enumeration over the raw arrays.
+    """Brute-force QKP demand from the raw arrays, without ``QKPOracle``.
 
-    Independent of ``QKPOracle`` (does not share its precomputed ``_quad`` /
-    ``_bundles`` accessors): enumerate every subset, mask by capacity, take the
-    argmax of ``b.(alpha*x - delta + nu) + lambda*0.5*b'Qb``. Used as the
-    conformance oracle so the check below is a genuine differential against the
-    combrum gate, not a comparison of the code-under-test against itself.
+    Enumerate every subset, mask by capacity, take the argmax of
+    ``b.(alpha*x - delta + nu) + lambda*0.5*b'Qb``.
     """
     x = np.asarray(arrays["x"], dtype=np.float64)
     nu = np.asarray(arrays["shocks"], dtype=np.float64)[:, 0, :]
@@ -603,17 +567,11 @@ def _assert_price_batch_conforms(
     arrays: dict[str, np.ndarray],
     reference_rule,
 ) -> None:
-    """Drive combrum's BOTH-mode price gate and check its output against an
-    oracle-independent rule.
+    """Run the BOTH-mode price gate and match its demands against ``reference_rule``.
 
-    ``oracle`` supplies both ``price`` and ``price_batch``, so it resolves to
-    :attr:`Mode.BOTH`: :func:`price_demands` runs the real combrum path
-    (``_conform_demands`` -> ``_batched_demands`` -> ``conform_demands``) rather
-    than the fixture doubles, and the returned demands are matched byte-for-byte
-    (bundle) / within the bar (payoff, gap) against ``reference_rule`` — a rule
-    recomputed straight from the raw arrays, never ``oracle.price``. If any of
-    those combrum symbols stops participating, this test calls it directly; a
-    wrong batch return is caught by the independent oracle. Two thetas.
+    ``oracle`` supplies both members, so :func:`price_demands` runs the full
+    ``_conform_demands`` -> ``_batched_demands`` -> ``conform_demands`` path;
+    bundles must match byte-for-byte, payoff/gap within the bar. Two thetas.
     """
     res = _price_resolution(oracle, SerialTransport())
     assert res.mode is Mode.BOTH
@@ -643,9 +601,8 @@ def test_price_batch_conforms_on_qkp() -> None:
 
 
 def test_both_supplied_price_conformance_passes() -> None:
-    # A both-supplied oracle resolves to the batch path; price_demands runs
-    # the engine's price-phase gate and, since the batch twin is bitwise the
-    # per-agent path, returns the batched demands unflagged.
+    # Both supplied: price_demands runs the conformance gate, and the batch
+    # member matches the per-agent path bitwise, so the demands come back.
     toy = load_toy()
     oracle = ToyOracle(toy)  # overrides both price and price_batch
     res = _price_resolution(oracle, SerialTransport())
@@ -659,9 +616,8 @@ def test_both_supplied_price_conformance_passes() -> None:
 
 
 def test_both_supplied_divergent_price_rejects_divergence() -> None:
-    # The divergent both-supplied oracle resolves to BOTH; price_demands runs
-    # the conformance gate at the call site, which fails on the above-tolerance
-    # payoff perturbation (coverage for the price A(i) condition).
+    # The divergent both-supplied oracle resolves to BOTH; the conformance
+    # gate fails on the above-tolerance payoff perturbation.
     toy = load_toy()
     oracle = _DivergentBatchToy(toy)
     res = _price_resolution(oracle, SerialTransport())
@@ -675,12 +631,10 @@ def test_both_supplied_divergent_price_rejects_divergence() -> None:
 def _toy_price_from_arrays(
     arrays: dict[str, np.ndarray], theta: np.ndarray, agent_id: int
 ) -> tuple[np.ndarray, float]:
-    """The toy price rule recomputed straight from the raw fixture arrays.
+    """The toy price rule recomputed from the raw fixture arrays.
 
-    Independent of ``ToyOracle.price``: ``scores = r[i]*theta + nu[i]``, the
-    chosen bundle is ``scores > 0``, the payoff sums the positive scores. Used
-    so the fallback assertion below is not tautological against the very member
-    it is checking (``res.reference`` *is* the bound per-agent ``price``).
+    ``scores = r[i]*theta + nu[i]``; the bundle is ``scores > 0`` and the
+    payoff sums the positive scores.
     """
     r = np.asarray(arrays["observables"], dtype=np.float64)
     nu = np.asarray(arrays["shocks"], dtype=np.float64)[:, 0, :]
@@ -690,12 +644,8 @@ def _toy_price_from_arrays(
 
 
 def test_price_both_divergence_falls_back_to_per_agent() -> None:
-    # On a conformance fail the per-agent member is the documented
-    # recovery path: pricing the shard through Resolution.reference recovers
-    # the correct (non-perturbed) demands the batch gate refused. Because
-    # res.reference IS the bound per-agent price, the recovered demands are
-    # checked against a value recomputed independently from the raw arrays,
-    # not against oracle.price (which would be tautological).
+    # On a conformance fail, Resolution.reference (the per-agent member) is
+    # the documented recovery path and must return the unperturbed demands.
     toy = load_toy()
     oracle = _DivergentBatchToy(toy)
     res = _price_resolution(oracle, SerialTransport())
@@ -705,15 +655,13 @@ def test_price_both_divergence_falls_back_to_per_agent() -> None:
     with pytest.raises(AssertionError, match="conformance for 'price'"):
         price_demands(res, theta, ids)
 
-    # The batch perturbation is real: the first id's batched payoff differs from the
-    # independent rule by more than tolerance, so the gate refused an actual divergence.
+    # the batched payoff for the first id really diverges past tolerance
     batched = oracle.price_batch(theta, ids)
     perturbed = int(min(batched))
     _, expected_payoff = _toy_price_from_arrays(toy, theta, perturbed)
     assert abs(batched[perturbed].payoff - expected_payoff) > 1e-9
 
-    # The reference recovers the correct demand for every id, matched against
-    # the independently recomputed toy rule (not against oracle.price).
+    # the reference recovers the correct demand for every id
     fallback = {int(i): res.reference(theta, int(i)) for i in ids}
     for i in ids:
         exp_bundle, exp_payoff = _toy_price_from_arrays(toy, theta, int(i))
@@ -724,10 +672,8 @@ def test_price_both_divergence_falls_back_to_per_agent() -> None:
 
 
 def test_price_batch_extra_id_outside_request_rejects_divergence() -> None:
-    # price_batch must key exactly local_ids. Returning the conforming
-    # requested subset plus one extra id (a stale/foreign shard) breaks the
-    # shard-local O(len(ids)) contract and must fail, even though every
-    # requested id conforms — extra demands cannot escape to the engine.
+    # price_batch must key exactly local_ids: one extra id (a stale/foreign
+    # shard) must fail even though every requested id conforms.
     toy = load_toy()
     oracle = _ExtraIdBatchToy(toy)
     res = _price_resolution(oracle, SerialTransport())
@@ -740,13 +686,8 @@ def test_price_batch_extra_id_outside_request_rejects_divergence() -> None:
 
 
 def test_price_batch_missing_id_inside_request_rejects_divergence() -> None:
-    # The other half of the shard-exact domain check: a price_batch that DROPS a
-    # requested id (returns fewer ids than asked) must fail too. Optimized-
-    # only, so the ValueError comes from the domain check, not the conformance
-    # gate. The oracle drops the first inserted id, so want-got == {ids[0]} and
-    # got-want is empty; pin the whole parenthetical against those independently
-    # known sets so a swapped/garbled payload (extra and missing reported under
-    # each other's labels, or the wrong id) is caught, not just the raise.
+    # Dropping a requested id must fail too. Optimized-only, so the ValueError
+    # comes from the domain check, not the conformance gate.
     toy = load_toy()
     oracle = _MissingIdBatchToy(toy)
     res = _price_resolution(oracle, SerialTransport())
@@ -759,8 +700,7 @@ def test_price_batch_missing_id_inside_request_rejects_divergence() -> None:
         match=rf"extra ids \[\], missing ids \[{dropped_id}\]",
     ) as excinfo:
         price_demands(res, theta, ids)
-    # Also assert the exact reported sets straight from the message payload, so
-    # a regression that reports the right label with wrong contents is caught.
+    # the message must report the exact extra/missing sets, not just raise
     text = str(excinfo.value)
     assert f"extra ids {sorted(set())}" in text
     assert f"missing ids {sorted({dropped_id})}" in text
@@ -788,13 +728,8 @@ def test_fit_step_price_conformance_failure_is_rank_agreed() -> None:
 
 
 def test_feature_rows_accepts_empty_ndarray_ids() -> None:
-    # The empty-shard guard exists to protect the BATCHED path: without it an
-    # empty shard falls into _batched_rows, whose np.stack over zero rows
-    # raises. Resolve an OPTIMIZED (batch-only) map so the guarded branch is
-    # the one under test — a DEFAULT resolution would return [] with or
-    # without the guard (the per-agent zip never runs), so it cannot catch a
-    # guard deletion. The member also asserts it is never handed an empty
-    # shard, so the guard is what keeps that promise.
+    # The empty-shard guard protects the batched path (np.stack over zero rows
+    # raises), so resolve a batch-only map to put that branch under test.
     called_with: list[int] = []
 
     class _RecordingBatchOnly(FeatureMap):
@@ -813,8 +748,7 @@ def test_feature_rows_accepts_empty_ndarray_ids() -> None:
     assert feature_rows(res, np.array([], dtype=np.int64), np.empty((0, 2))) == []
     # The batched member was never invoked for the empty shard.
     assert called_with == []
-    # And a real shard does route through the batched member (the branch is
-    # live, so the empty case genuinely skips it).
+    # A real shard does route through the batched member.
     ids = np.array([0, 1], dtype=np.int64)
     bundles = np.array([[1.0, 0.0], [0.0, 1.0]])
     rows = feature_rows(res, ids, bundles)
@@ -822,8 +756,8 @@ def test_feature_rows_accepts_empty_ndarray_ids() -> None:
 
 
 def test_price_instance_monkeypatch_is_ignored() -> None:
-    # Class-pure: shadowing price_batch on the instance must not change the
-    # resolved mode (it stays the class's resolution).
+    # Same class-pure rule on the price surface: the instance shadow is
+    # ignored.
     oracle = _PriceOnlyToy(load_toy())
     oracle.price_batch = lambda theta, ids: {}  # type: ignore[method-assign]
     res = _price_resolution(oracle, SerialTransport())
@@ -904,9 +838,8 @@ def test_feature_batch_aggregate_requires_explicit_keywords() -> None:
 
 
 def test_feature_batch_aggregate_validates_weights_shape() -> None:
-    # The weights-shape guard is dead in the happy-path test above (weights are
-    # always (ids.size,)). Feed a mismatched length: the member would return a
-    # correctly-shaped phi regardless, so only the guard can catch it.
+    # The member would return a correctly-shaped phi regardless, so a
+    # mismatched weights length must be rejected up front.
     def aggregate_batch(ids, bundles, *, weights=None, aggregate=False):
         if aggregate:
             return np.ones(np.asarray(bundles).shape[1], dtype=np.float64), 0.0
@@ -921,8 +854,7 @@ def test_feature_batch_aggregate_validates_weights_shape() -> None:
 
 
 def test_feature_batch_aggregate_validates_returned_phi_shape() -> None:
-    # The returned-phi-shape guard is dead in the happy path too (phi is always
-    # (K,)). A member returning a wrong-length aggregate must be rejected.
+    # A member returning a wrong-length aggregate must be rejected.
     def bad_phi(ids, bundles, *, weights=None, aggregate=False):
         if aggregate:
             return np.ones(3, dtype=np.float64), 0.0  # (3,) != (K=2,)
@@ -936,9 +868,8 @@ def test_feature_batch_aggregate_validates_returned_phi_shape() -> None:
 
 
 def test_feature_batch_aggregate_forwards_K_to_capable_member() -> None:
-    # A member with a keyword-capable K param is supported, and feature_batch_
-    # aggregate forwards the K value. Deleting the K-forwarding branch leaves K
-    # unset, which this catches.
+    # A member with a keyword-capable K param is supported and receives the
+    # K value.
     seen: dict[str, object] = {}
 
     def aggregate_with_K(ids, bundles, *, weights=None, aggregate=False, K=None):
@@ -982,9 +913,9 @@ def test_feature_batch_aggregate_rejects_positional_only_params() -> None:
 
 # --- the FEATURES either-one end-to-end on both formulations -----------------
 #
-# The load-bearing invariant: a FeatureMap providing features_batch yields
-# identical published answers to the bare-callable per-agent path, byte-for-
-# byte, on toy and QKP for both formulations.
+# A FeatureMap providing features_batch must yield published answers identical
+# byte-for-byte to the bare-callable per-agent path, on toy and QKP for both
+# formulations.
 
 
 def _swap_features(problem, features):
@@ -1083,11 +1014,9 @@ def test_oneslack_featuremap_matches_bare_callable_qkp(make_map) -> None:
 
 @needs_highs
 def test_features_both_supplied_conformance_runs_through_walk(monkeypatch) -> None:
-    # Distinct from the byte-identity parametrized cases: those pass even if the
-    # BOTH gate never fired (batch == per-agent by construction). Here we spy on
-    # assert_conforms to prove the gate is actually on the happy path — it fires
-    # at least once per walk — and that the batched-feature answer still matches
-    # the bare callable byte-for-byte.
+    # Spy on assert_conforms: the BOTH gate must fire at least once during the
+    # featuremap walk, and the answer must still match the bare callable
+    # byte-for-byte.
     import combrum.interface_resolution as ir
 
     gate_calls = {"n": 0}
@@ -1104,9 +1033,8 @@ def test_features_both_supplied_conformance_runs_through_walk(monkeypatch) -> No
         SerialTransport(), NSlack, "highs", toy_feature_map
     )
     assert mapped.converged
-    # The BOTH-mode conformance gate ran inside the featuremap walk. The bare
-    # walk resolves to DEFAULT (no gate), so every count here is the mapped
-    # walk's — a gate that was silently skipped would leave this at zero.
+    # The bare walk resolves to DEFAULT (no gate), so every count here is the
+    # mapped walk's.
     assert gate_calls["n"] >= 1
     _assert_nslack_identical(bare, mapped)
 
@@ -1118,11 +1046,8 @@ def test_features_divergent_batch_rejects_divergence_in_walk() -> None:
     # by the transport collective into the agreed verdict.
     toy = load_toy()
     problem = _swap_features(toy_problem(toy), divergent_feature_map(toy))
-    # match= pins the failure to the features conformance gate (mirroring the
-    # price sibling test_both_supplied_divergent_price_rejects_divergence): the walk
-    # has other bare asserts, so a bare pytest.raises would pass even if the
-    # divergence slipped past the gate and tripped an unrelated assert. The
-    # substring survives the TransportError wrapper ("[rank N] ..." prefix).
+    # match= ties the failure to the features gate — the walk has other bare
+    # asserts. The substring still matches under the "[rank N]" prefix.
     with pytest.raises((AssertionError, TransportError),
                        match="conformance for 'features'"):
         run_walk(toy, problem, NSlack, SerialTransport(), backend="highs")
@@ -1131,9 +1056,8 @@ def test_features_divergent_batch_rejects_divergence_in_walk() -> None:
 @pytest.mark.parametrize("size", [2, 4])
 @needs_highs
 def test_nslack_featuremap_rank_invariant_matches_bare(size) -> None:
-    # The FeatureMap path holds bitwise rank-invariance too: interleaved
-    # shards re-route every cut, and the batched-features answer must match
-    # the serial bare-callable answer on every rank.
+    # Interleaved shards re-route every cut; the batched-features answer must
+    # match the serial bare-callable answer on every rank.
     serial = _toy_walk_bare(SerialTransport(), NSlack, "highs")
     results = LocalCluster(size).run(
         lambda transport: _toy_walk_featuremap(

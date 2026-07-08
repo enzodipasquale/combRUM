@@ -382,7 +382,7 @@ def battery(t: Transport) -> dict[str, Any]:
 
 
 def counter_scenario(t: MpiTransport) -> dict[str, dict[str, int]]:
-    """Round-shape audit through the transport's own invocation tallies.
+    """Round shapes read from the transport's own invocation tallies.
 
     Needs the MpiTransport introspection surface (counts/reset) — the
     in-process references have no MPI primitives to count — so it runs
@@ -534,13 +534,12 @@ def _chunked_partition(
 def _install_overfragment_probe() -> None:
     """Split the scatter stream into twice as many windows as bytes need.
 
-    The regression the byte-ceiling bound must reject: a chunk
-    schedule that fragments every stream into extra windows (here, half
-    the rows per window) while still delivering the payload bit-for-bit.
-    The mirror ``_n_windows`` uses the same ``chunk // row`` formula, so a
-    mirror-vs-transport equality echoes the inflation; only a ceiling
-    derived from bytes catches it. Installed under an env flag so the
-    bound's coverage can be proved without editing src on disk.
+    Fault injection for the byte-ceiling bound: a chunk schedule with half
+    the rows per window still delivers the payload bit-for-bit, and the
+    mirror ``_n_windows`` uses the same ``chunk // row`` formula, so a
+    mirror-vs-transport equality would echo the inflation — only a ceiling
+    derived from bytes rejects it. Installed under an env flag; src on
+    disk is never edited.
     """
     import combrum.transport.mpi as _mpi
 
@@ -726,9 +725,9 @@ class _InFlightMeter:
     claims to cap at one window (``chunk_bytes * (size - 1)``) regardless
     of row count.
 
-    When ``defer_waitall`` is set (the injected regression: root
-    lifts the Waitall out of the per-window loop and only drains once at
-    the end), the per-window drops are suppressed so the accounting
+    When ``defer_waitall`` is set (the injected failure: the root lifts
+    the Waitall out of the per-window loop and only drains once at the
+    end), the per-window drops are suppressed so the accounting
     accumulates every window's chunks — exactly what the root would hold
     if the in-flight bound were removed. The real MPI completion still
     runs so the transfer does not deadlock.
@@ -769,11 +768,10 @@ class _InFlightMeter:
 def _install_double_recv_probe() -> None:
     """Make each receiver retain a full second copy of its shard.
 
-    The regression the receiver RSS band must reject: a
-    ``_scatter_recv`` that keeps a redundant duplicate of every received
-    shard alive for the call's duration, roughly doubling the resident
-    shard at peak. Installed only when the injection env flag is set so
-    the band's coverage can be proved without editing src on disk.
+    Fault injection for the receiver RSS band: a ``_scatter_recv`` that
+    keeps a duplicate of every received shard alive for the call's
+    duration roughly doubles the resident shard at peak. Installed only
+    under the env flag; src on disk is never edited.
     """
     orig = MpiTransport._scatter_recv
 
@@ -999,12 +997,11 @@ def split_axis_smoke(t: Transport) -> dict[str, Any]:
         transport=t,
     )
     if os.environ.get("COMBRUM_SMOKE_PROBE_MOMENT_SCALE"):
-        # Regression for the empirical-moment oracle: scale the
-        # pooled moment by N/(N+1). Applied identically on MpiTransport and
-        # the LocalCluster reference (both run this function), so the
-        # record equality still holds while the hand-computed [6, 25, 125]
-        # oracle no longer matches. Injected under an env flag; src is not
-        # edited on disk.
+        # Fault injection for the empirical-moment check: scale the pooled
+        # moment by N/(N+1). Applied identically on MpiTransport and the
+        # LocalCluster reference (both run this function), so record
+        # equality still holds while the hand-computed [6, 25, 125] no
+        # longer matches.
         scaled = np.asarray(prep.empirical_moment, dtype=np.float64) * (
             N / (N + 1)
         )
@@ -1189,7 +1186,7 @@ class _BootstrapObservationWeights:
         return bootstrap_observation_weights(_BOOT_N, _BOOT_SEED, rep_id)
 
 
-def nslack_bootstrap_serial_oracle() -> dict[str, Any]:
+def nslack_bootstrap_serial_reference() -> dict[str, Any]:
     import combrum as cb
 
     model, data = _bootstrap_model_and_data()

@@ -37,9 +37,8 @@ ALL_BACKENDS = (
         ),
     ),
 )
-# The penalty contract is asymmetric by design: only quadratic-capable
-# backends install/revert; the highs leg asserts the hard error in its
-# own dedicated test below, so nothing is skipped silently.
+# Only quadratic-capable backends install/revert the penalty; the highs
+# hard error has its own test below.
 PENALTY_CAPABLE = ("fake", ALL_BACKENDS[1])
 
 
@@ -76,8 +75,7 @@ class FakeMaster(MasterBackend):
 
     @property
     def pure_lp(self) -> bool:
-        # The observable the conformance test reads: True iff no
-        # quadratic penalty is installed.
+        # True iff no quadratic penalty is installed.
         return self._penalty is None
 
     def _rows(self) -> tuple[CutRow, ...]:
@@ -102,8 +100,7 @@ class FakeMaster(MasterBackend):
             raw = np.zeros(self._K, dtype=np.float64)
         if self._penalty is not None:
             ref, weight = self._penalty
-            # The penalty must change the solution, else the pure_lp flag
-            # would be untestable.
+            # Proximal pull, so an installed penalty is visible in theta.
             raw = (raw + weight * ref) / (1.0 + weight)
         theta = np.clip(raw, self._lower, self._upper)
         self._bound_duals = {
@@ -271,10 +268,9 @@ def test_master_implements_contract(build: Builder) -> None:
     master.solve()
     assert master.theta().shape == (K,)
     assert isinstance(master.objective(), float)
-    # 0.5 is exact on every backend: the double reports epsilon, and on
-    # the real LP the default c = (-1, -1.5) sends theta to its upper
-    # bounds, leaving the row active with the slack basic — so the row
-    # dual equals the slack coefficient u_coef(1) = 0.5.
+    # 0.5 on every backend: the double reports epsilon; on the real LP the
+    # default c = (-1, -1.5) sends theta to its upper bounds, the row stays
+    # active with the slack basic, so the row dual is u_coef(1) = 0.5.
     assert master.dual_values() == {(1, b"a"): 0.5}
 
 
@@ -361,14 +357,10 @@ def test_reinstall_replaces_installed_set_on_used_master(
 
 
 def test_fake_double_pure_lp_flag_tracks_penalty_revert() -> None:
-    # WHITE-BOX DOUBLE ONLY — exercises no combrum src. pure_lp is a
-    # FakeMaster-only observable (no real backend defines it), so this pins
-    # the double's own revert semantics, proving the contract is
-    # implementable. The behavioral revert over real backends lives in
-    # test_set_penalty_installs_then_reverts_exactly; the highs no-op leg in
-    # test_set_penalty_unsupported_backend_is_a_hard_error. Guard the scope
-    # so nobody mistakes this for src coverage: pure_lp must not exist on the
-    # real backends this suite ships.
+    # pure_lp exists on the double alone — not on the ABC, not on any real
+    # backend — so this pins FakeMaster's own revert semantics. The real
+    # backends are covered by test_set_penalty_installs_then_reverts_exactly
+    # and test_set_penalty_unsupported_backend_is_a_hard_error.
     for real in (gurobi_backend.GurobiMaster, highs_backend.HighsMaster):
         assert not hasattr(real, "pure_lp")
     assert not hasattr(MasterBackend, "pure_lp")
@@ -405,17 +397,13 @@ def test_set_penalty_installs_then_reverts_exactly(
     ref = np.full(K, 5.0)
     master.set_penalty(ref, weight=4.0)
     master.solve()
-    # Pin WHERE the penalty steers theta, not just that it moved. The real
-    # backends minimize 0.25*t0 - 1.25*t1 + u1 + 1.5*u2 + 4*||theta - 5||^2
-    # over the four INTERIOR_ROWS. Rows a (u1 >= t0+2) and c (u2 >= t0+t1-1)
-    # bind; substituting them the theta objective is
-    # 2.75*t0 + 0.25*t1 + 0.5 + 4*[(t0-5)^2 + (t1-5)^2], whose stationary
-    # point is t0 = 5 - 2.75/8 = 149/32, t1 = 5 - 0.25/8 = 159/32, with the
-    # other two rows slack (0.6875, 10.28125 > 0). That fixes the proximal
-    # minimizer and objective as closed-form fixture math, independent of the
-    # solver — a wrong linear-shift factor (-1*w*ref) or halved quadratic
-    # weight lands theta at (2.15625, 2.46875) and is caught here. The double
-    # runs its own proximal pull ((mean + w*ref)/(1+w) = (4.05, 4.1)).
+    # Where the penalty lands, in closed form. The real backends minimize
+    # 0.25*t0 - 1.25*t1 + u1 + 1.5*u2 + 4*||theta - 5||^2 over the four
+    # INTERIOR_ROWS. Rows a (u1 >= t0+2) and c (u2 >= t0+t1-1) bind;
+    # substituting them, the theta objective is
+    # 2.75*t0 + 0.25*t1 + 0.5 + 4*[(t0-5)^2 + (t1-5)^2], stationary at
+    # t0 = 5 - 2.75/8 = 149/32, t1 = 5 - 0.25/8 = 159/32, with the other
+    # two rows slack. The double's pull is (mean + w*ref)/(1+w) = (4.05, 4.1).
     if isinstance(master, FakeMaster):
         np.testing.assert_allclose(
             master.theta(), [4.05, 4.1], rtol=0, atol=1e-12
@@ -436,9 +424,8 @@ def test_set_penalty_installs_then_reverts_exactly(
 
 @pytest.mark.skipif(not HIGHS_AVAILABLE, reason="highspy missing or broken")
 def test_set_penalty_unsupported_backend_is_a_hard_error() -> None:
-    # The asymmetric leg of the penalty contract: a backend without
-    # scalable native quadratic support must refuse weight > 0 loudly and treat
-    # weight <= 0 as the no-op it is; never approximate.
+    # A backend without native quadratic support must refuse weight > 0
+    # loudly and treat weight <= 0 as the no-op it is; never approximate.
     with _make_real("highs", -10.0, 10.0, (-1.0, -1.5), _default_u) as master:
         master.add_cuts([make_row(1, b"a", [1.0, 2.0], epsilon=0.5)])
         master.solve()
@@ -452,10 +439,9 @@ def test_set_penalty_unsupported_backend_is_a_hard_error() -> None:
 
 
 def test_set_rhs_default_raises_for_non_overriding_subclass() -> None:
-    # set_rhs is a concrete default-raising method (the price_batch risk
-    # class), not a new @abstractmethod: a subclass that omits it still
-    # instantiates, but calling it must fail loudly rather than silently
-    # no-op the RHS rewrite. FakeMaster deliberately does not override it.
+    # set_rhs defaults to raising rather than being abstract: a subclass
+    # that omits it still instantiates, but calling it fails loudly instead
+    # of silently skipping the RHS rewrite. FakeMaster does not override it.
     master = FakeMaster(K, [-10.0] * K, [10.0] * K)
     master.add_cuts([make_row(1, b"a", [1.0, 0.0], epsilon=1.0)])
     with pytest.raises(NotImplementedError, match="set_rhs"):
@@ -467,22 +453,17 @@ def test_bound_duals_empty_when_interior(build: Builder) -> None:
     master.add_cuts(list(INTERIOR_ROWS))
     master.solve()
     assert master.bound_duals() == {}
-    # Pin the objective VALUE, not just its type: a uniform constant
-    # offset on a real solver's ObjVal cancels in every same-backend
-    # equality check elsewhere but is caught here. The real optimum is
-    # (t0,t1,u1,u2) = (1,2,3,2), so with c=(0.25,-1.25) and u_coef
-    # {1:1,2:1.5} the objective is 0.25 - 2.5 + 3 + 3 = 3.75. The double
-    # instead reports theta@theta + sum(epsilon) at its clipped mean
+    # The real optimum is (t0,t1,u1,u2) = (1,2,3,2), so with c=(0.25,-1.25)
+    # and u_coef {1:1,2:1.5} the objective is 0.25 - 2.5 + 3 + 3 = 3.75.
+    # The double reports theta@theta + sum(epsilon) at its clipped mean
     # (0.25,0.5): 0.0625 + 0.25 + 5 = 5.3125.
     if isinstance(master, FakeMaster):
         assert master.objective() == pytest.approx(5.3125, abs=1e-12)
     else:
         assert master.objective() == pytest.approx(3.75, abs=1e-9)
-    # Absolute cut-dual oracle at a nondegenerate point: the real backends
-    # report the hand-solved LP multipliers (Pi), which differ per key from
-    # the rows' epsilons — so a dual accessor that returns epsilon (or any
-    # other same-shaped wrong source) instead of Pi is caught here. The
-    # line-259 pin cannot: there all four candidate sources coincide at 0.5.
+    # At this nondegenerate point the hand-solved multipliers (Pi) differ
+    # per key from the rows' epsilons, so dual_values must be reporting Pi.
+    # The double reports epsilon by design.
     if isinstance(master, FakeMaster):
         assert master.dual_values() == pytest.approx(INTERIOR_FAKE_DUALS)
     else:
@@ -510,11 +491,9 @@ def test_bound_duals_nonempty_at_bound(build: Builder) -> None:
     assert set(duals) == {0}
     assert isinstance(duals[0], float)
     assert master.theta()[0] == 0.5
-    # Pin the reduced-cost VALUE (with sign), not just nonzero: on a real
-    # solver theta_0 sits on its upper bound priced at c0 + 4*u_coef(2) =
-    # -2 + 4*0.25 = -1, so a sign flip or wrong magnitude is caught. The
-    # double reports a different quantity — the clip residual raw-theta =
-    # 2 - 0.5 = 1.5 — so it is pinned separately.
+    # Value with sign: on a real solver theta_0 sits on its upper bound
+    # priced at c0 + 4*u_coef(2) = -2 + 4*0.25 = -1. The double reports the
+    # clip residual raw - theta = 2 - 0.5 = 1.5.
     if isinstance(master, FakeMaster):
         assert duals[0] == pytest.approx(1.5, abs=1e-12)
     else:

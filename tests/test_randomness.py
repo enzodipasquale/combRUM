@@ -28,12 +28,9 @@ def _assert_reproducible_normalized(
 
 
 def test_rep_seed_is_placement_invariant() -> None:
-    # Seeds depend only on (base_seed, rep_id), so the same reps drawn
-    # in two different orders yield bitwise-identical streams. Permutation
-    # alone can't fail for any deterministic seeder, so also pin the exact
-    # derivation: the entropy pool must be the (base_seed, rep_id) tuple
-    # itself. A stateful spawn path (parent.spawn(...)) or a constant-seed
-    # collapse both change .entropy away from (123, 3), so they fail here.
+    # Seeds depend only on (base_seed, rep_id): the same reps drawn in two
+    # different orders yield bitwise-identical streams. The entropy pool is
+    # the (base_seed, rep_id) tuple itself, not a spawned child sequence.
     first = _draws_by_rep(123, [5, 3, 9])
     second = _draws_by_rep(123, [9, 5, 3])
     for rep in (3, 5, 9):
@@ -41,12 +38,9 @@ def test_rep_seed_is_placement_invariant() -> None:
 
     seed = randomness.rep_seed(123, 3)
     assert seed.entropy == (123, 3)
-    # Independent oracle: a hand-built SeedSequence over the same tuple must
-    # produce the identical state words the derivation relies on.
     reference = np.random.SeedSequence((123, 3))
     assert np.array_equal(seed.generate_state(4), reference.generate_state(4))
-    # Absolute-stream lock, so a coordinated change to the seeding path that
-    # somehow preserved .entropy still fails here.
+    # Golden values pin the exact stream.
     stream = randomness.rep_rng(123, 3).standard_normal(4)
     golden = np.array(
         [
@@ -89,24 +83,18 @@ def test_multiplier_weights_are_reproducible_and_normalized() -> None:
 
     _assert_reproducible_normalized(first, second, 8)
 
-    # The lower-bound guard rejects an empty/negative unit axis rather than
-    # silently returning an empty array via the sum-zero normalization branch.
+    # n_units < 1 is rejected up front, not normalized into an empty array.
     with pytest.raises(ValueError, match="n_units must be >= 1"):
         multiplier_weights(0, 123, 4)
     with pytest.raises(ValueError, match="n_units must be >= 1"):
         multiplier_weights(-1, 123, 4)
 
-    # Pin the actual exponential content, not just the normalized sum.
-    # Reconstruct the raw draw independently through rep_rng + an explicit
-    # standard_exponential call, then hand-normalize to sum n. This fixes the
-    # distribution: swapping standard_exponential for another draw (e.g.
-    # standard_normal) keeps shape/dtype/sum but changes these values.
+    # The draw is rep_rng(...).standard_exponential, normalized to sum n.
     raw = rep_rng(123, 4).standard_exponential(8)
     expected = raw * (8.0 / raw.sum())
     np.testing.assert_array_equal(first, expected)
 
-    # Golden literals lock the exact draw so a coordinated change to the
-    # rep_rng seeding path is caught too (mirrors the bootstrap golden test).
+    # Literal values guard against a change in the seeding path itself.
     golden = np.array(
         [
             float.fromhex(h)
@@ -124,10 +112,7 @@ def test_multiplier_weights_are_reproducible_and_normalized() -> None:
     )
     np.testing.assert_array_equal(first, golden)
 
-    # Bind the normalization target to the ARGUMENT, not the constant 8 the
-    # cases above all happen to use. Rebuild the whole n=5 array from an
-    # independent draw normalized to 5, so a target hardcoded to any literal
-    # (or any other normalization regression) is caught wholesale.
+    # A second size checks that the normalization target tracks n.
     raw5 = rep_rng(123, 4).standard_exponential(5)
     expected5 = raw5 * (5.0 / raw5.sum())
     got5 = multiplier_weights(5, 123, 4)
@@ -172,9 +157,7 @@ def test_bootstrap_observation_weights_are_reproducible_and_normalized() -> None
     raw = np.array([bootstrap_multiplier(123, 4, i) for i in range(8)])
     np.testing.assert_allclose(first, raw * (8.0 / raw.sum()))
 
-    # Same as multiplier_weights: pin the target to the argument, not 8.
-    # Reconstruct the whole n=6 array from bootstrap_multiplier normalized to
-    # 6 so a hardcoded normalization constant (or a shifted target) dies here.
+    # Same check as multiplier_weights: the normalization target tracks n.
     raw6 = np.array([bootstrap_multiplier(123, 4, i) for i in range(6)])
     expected6 = raw6 * (6.0 / raw6.sum())
     got6 = bootstrap_observation_weights(6, 123, 4)
@@ -194,9 +177,7 @@ def make_replayed_weights(**overrides: object) -> ReplayedWeights:
 
 
 def test_replayed_weights_validation() -> None:
-    # Cross both sides of the `ndim != 2` guard: a 1-D array (too few dims)
-    # and a 3-D array (too many). A `< 2` regression would let the 3-D case
-    # through and change weights_for row-indexing semantics silently.
+    # Both sides of the `ndim != 2` guard: 1-D and 3-D.
     with pytest.raises(ValueError, match=r"must be 2-D \(B, N\)"):
         make_replayed_weights(matrix=np.ones(3))
     with pytest.raises(ValueError, match=r"must be 2-D \(B, N\)"):

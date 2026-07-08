@@ -10,14 +10,8 @@ K, N, S = 3, 4, 2
 
 
 def base_kwargs() -> dict[str, object]:
-    # Every array field carries distinguishable, non-symmetric values so that a
-    # storage-order swap or scramble of any field is visible on read-back:
-    #   - theta_bounds lower != upper elementwise (asymmetric, so a (lower,upper)
-    #     swap changes the stored values),
-    #   - theta_coef is a strictly increasing arange,
-    #   - agent_weights is a normalized ramp (not the uniform vector, so a
-    #     reversal is not a no-op),
-    #   - local_ids is a strictly increasing arange.
+    # Asymmetric, non-uniform values throughout, so a swapped, reversed, or
+    # scrambled field shows up on read-back.
     return dict(
         K=K,
         N=N,
@@ -32,8 +26,7 @@ def base_kwargs() -> dict[str, object]:
 
 
 def _ramp_weights(n: int) -> np.ndarray:
-    # Non-uniform, strictly increasing, normalized to sum 1 -- distinguishable
-    # under reversal (w[::-1] != w) unlike a uniform weight vector.
+    # Strictly increasing and normalized to sum 1; w[::-1] != w.
     w = np.arange(1, n + 1, dtype=np.float64)
     return w / w.sum()
 
@@ -49,15 +42,10 @@ def test_valid_context_accepted() -> None:
     assert ctx.n_agents == N * S
     assert ctx.theta_init is None
 
-    # Pin the ENTIRE stored payload against independent expected values built
-    # here (not read back from ctx). Every array field uses distinguishable,
-    # non-symmetric values, so a per-field storage swap, reversal, scramble, or
-    # dropped dtype coercion changes the read-back and fails one of these.
+    # Expected values are rebuilt here, not read back from ctx.
     exp_lower = np.array([-1.0, -2.0, -3.0])
     exp_upper = np.array([4.0, 5.0, 6.0])
     lower, upper = ctx.theta_bounds
-    # Order matters: lower != upper elementwise, so a stored (upper, lower) swap
-    # is caught here.
     np.testing.assert_array_equal(lower, exp_lower)
     np.testing.assert_array_equal(upper, exp_upper)
     assert lower.dtype == np.float64
@@ -73,10 +61,8 @@ def test_valid_context_accepted() -> None:
     np.testing.assert_array_equal(ctx.local_ids, np.arange(N * S, dtype=np.int64))
     assert np.issubdtype(ctx.local_ids.dtype, np.integer)
 
-    # Pin the stored theta_init by value against an independent oracle. The seed
-    # is non-zero and strictly non-palindromic, so a stored reversal, scramble,
-    # or zeroing of the warm-start vector fails here (a shape/dtype-only check
-    # would miss all three).
+    # Non-zero, non-palindromic seed: a reversed, scrambled, or zeroed
+    # warm-start vector cannot match it.
     seed = np.array([7.0, -3.0, 5.0])
     assert seed.shape == (K,)
     ctx = make_context(theta_init=seed)
@@ -87,10 +73,8 @@ def test_valid_context_accepted() -> None:
 
 
 def test_int_array_inputs_coerced_to_float64() -> None:
-    # base_kwargs already passes float64 arrays, so the dtype= coercion inside
-    # FitContext is a no-op there and a dropped `dtype=np.float64` would be
-    # invisible. Feed integer arrays for the fields that are coerced and assert
-    # the stored dtype is float64 -- this is the case the coercion exists for.
+    # Integer inputs are the case the float64 coercion exists for; the float64
+    # arrays in base_kwargs make it a no-op.
     ctx = make_context(
         theta_bounds=(np.array([-1, -2, -3]), np.array([4, 5, 6])),
         theta_coef=np.arange(N * S, dtype=np.int64),
@@ -110,9 +94,7 @@ def test_int_array_inputs_coerced_to_float64() -> None:
 
 
 def test_rejects_wrong_theta_coef_length() -> None:
-    # Both length directions must be pinned: an exact-shape check rejects
-    # n_agents-1 and n_agents+1, but a one-sided `.size > n_agents` guard would
-    # silently accept the too-short array.
+    # Both directions: a one-sided size check would accept one of these.
     with pytest.raises(ValueError, match=r"theta_coef must have shape \(n_agents,\)"):
         make_context(theta_coef=np.zeros(N * S + 1))
     with pytest.raises(ValueError, match=r"theta_coef must have shape \(n_agents,\)"):
@@ -120,8 +102,6 @@ def test_rejects_wrong_theta_coef_length() -> None:
 
 
 def test_rejects_wrong_agent_weights_length() -> None:
-    # Pin both directions: a one-sided `.size < n_agents` guard would accept the
-    # too-long array, so exercise n_agents-1 and n_agents+1.
     with pytest.raises(ValueError, match=r"agent_weights must have shape"):
         make_context(agent_weights=np.zeros(N * S - 1))
     with pytest.raises(ValueError, match=r"agent_weights must have shape"):
@@ -146,10 +126,8 @@ def test_rejects_float_local_ids() -> None:
 
 
 def test_rejects_multidimensional_local_ids() -> None:
-    # A 2-D local_ids would slip past the uniqueness check (np.unique flattens)
-    # and the range check (min/max are elementwise), then be stored and corrupt
-    # the sim-major a = s*N + i indexing convention. Only the ndim guard rejects
-    # it, and no other setup exercises that guard.
+    # A 2-D array passes the uniqueness check (np.unique flattens) and the
+    # range check; only the ndim guard rejects it.
     two_d = np.arange(N * S, dtype=np.int64).reshape(2, 4)
     with pytest.raises(ValueError, match="local_ids must be one-dimensional"):
         make_context(local_ids=two_d)
@@ -163,8 +141,7 @@ def test_rejects_lb_above_ub() -> None:
 
 
 def test_accepts_equal_bounds() -> None:
-    # lower == upper pins a fixed parameter and must be accepted; this pins the
-    # boundary so a lower>upper -> lower>=upper regression cannot slip through.
+    # lower == upper fixes a parameter and must be accepted.
     pinned = np.full(K, 0.5)
     ctx = make_context(theta_bounds=(pinned, pinned.copy()))
     lower, upper = ctx.theta_bounds
@@ -175,9 +152,8 @@ def test_accepts_equal_bounds() -> None:
 def test_rejects_wrong_bounds_length() -> None:
     with pytest.raises(ValueError, match=r"theta_bounds lower must have shape \(K,\)"):
         make_context(theta_bounds=(np.zeros(K + 1), np.ones(K + 1)))
-    # Isolate the upper-shape guard: keep lower correct-length so only the upper
-    # check can fire. A size-1 upper broadcasts against (K,) in the lower<=upper
-    # comparison, so without the shape guard it would slip through silently.
+    # A size-1 upper broadcasts against (K,) in the lower<=upper comparison,
+    # so only the shape guard can catch it; lower stays correct-length here.
     with pytest.raises(ValueError, match=r"theta_bounds upper must have shape \(K,\)"):
         make_context(theta_bounds=(np.zeros(K), np.ones(1)))
     with pytest.raises(ValueError, match=r"theta_bounds upper must have shape \(K,\)"):
@@ -185,10 +161,7 @@ def test_rejects_wrong_bounds_length() -> None:
 
 
 def test_rejects_malformed_theta_bounds_container() -> None:
-    # The container-shape guard (isinstance tuple and len == 2) is never crossed
-    # by the other bounds tests, which all pass a well-formed 2-tuple. Exercise
-    # the malformed containers the guard exists for: a non-tuple, a too-long
-    # tuple (extra entry would be silently dropped), and a too-short tuple.
+    # Non-tuple, too-long tuple, too-short tuple: the container guard's cases.
     lower = np.zeros(K)
     upper = np.ones(K)
     with pytest.raises(
@@ -208,16 +181,11 @@ def test_rejects_malformed_theta_bounds_container() -> None:
 def test_rejects_nonpositive_tolerance() -> None:
     with pytest.raises(ValueError, match="tolerance must be > 0"):
         make_context(tolerance=0.0)
-    # Negative tolerance is nonsensical too; pinning it stops a > 0 -> != 0
-    # regression that would reject only exactly zero.
     with pytest.raises(ValueError, match="tolerance must be > 0"):
         make_context(tolerance=-1.0)
 
 
 def test_rejects_wrong_theta_init_length() -> None:
-    # Pin both length directions like the theta_coef/bounds tests: an exact-shape
-    # check rejects K-1 and K+1, but a one-sided `.shape[0] > K` guard would
-    # silently accept the too-short array.
     with pytest.raises(ValueError, match=r"theta_init must have shape \(K,\)"):
         make_context(theta_init=np.zeros(K + 1))
     with pytest.raises(ValueError, match=r"theta_init must have shape \(K,\)"):
@@ -263,10 +231,7 @@ def test_rejects_nonpositive_S() -> None:
 
 
 def test_accepts_minimal_dimensions() -> None:
-    # K=N=S=1 is the smallest legal geometry. Pinning it as accepted stops an
-    # off-by-one tightening of the lower guards (e.g. K < 1 -> K < 2) that would
-    # wrongly reject single-parameter / single-observation callers while the
-    # K=3,N=4,S=2 base still constructs and hides the regression.
+    # K=N=S=1 is the smallest legal geometry and must construct.
     ctx = make_context(
         K=1,
         N=1,

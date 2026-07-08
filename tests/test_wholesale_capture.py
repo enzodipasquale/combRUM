@@ -21,7 +21,6 @@ the aggregate fields.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 import struct
 
 import numpy as np
@@ -48,7 +47,7 @@ from combrum.formulations import NSlack, OneSlack
 from combrum.formulations import nslack as _nslack_module
 from combrum.oracle import Oracle
 from _support.constants import TOLERANCE
-from _support.families import load_family
+from _support.families import load_qkp, load_toy
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
 from combrum import informed_schedule as _informed_schedule_module
@@ -59,8 +58,6 @@ from combrum.informed_schedule import (
 )
 from combrum.steprecord import StepRecord
 from combrum.transport import LocalCluster, SerialTransport
-
-FAMILY_DIR = Path(__file__).resolve().parent / "fixtures" / "families"
 
 #: The continuous-field bar; discrete fields are compared byte-exact.
 TOL = 1e-13
@@ -83,14 +80,6 @@ pytestmark = [
 ]
 
 
-def load_toy() -> dict[str, np.ndarray]:
-    return load_family("toy", FAMILY_DIR)
-
-
-def load_qkp() -> dict[str, np.ndarray]:
-    return load_family("qkp", FAMILY_DIR)
-
-
 def _nslack_policy() -> Compose:
     """A non-trivial policy that fires admit, purge and install.
 
@@ -107,26 +96,21 @@ def _nslack_policy() -> Compose:
     )
 
 
-#: The admit bar for the strict-subset admit gate. Every received candidate has
-#: already cleared the emit threshold (``rc > TOLERANCE``), and on both families
-#: the received pre-admit violations span ~0.02 up past 40 (toy) / 100 (qkp), so
-#: a bar of 1.0 leaves a healthy split: some received rows sit above it (admitted)
-#: and some below (rejected), making the captured admitted set a strict subset of
-#: the received candidates at most iterations — the condition an admit-everything
-#: bug fails on.
+#: Admit bar for the strict-subset gate. Received pre-admit violations span
+#: ~0.02 up past 40 (toy) / 100 (qkp), so a bar of 1.0 splits them: some
+#: received rows clear it, some do not, and the admitted set is a strict
+#: subset of the received candidates at most iterations.
 _ADMIT_SUBSET_EPSILON = 1.0
 
 
 def _nslack_admit_subset_policy() -> Compose:
     """A policy whose admit stage rejects the weakly-violated received rows.
 
-    ``SlackThreshold(epsilon=1.0)`` admits only candidates whose pre-admit
-    violation exceeds ``1.0``; under it the admit filter genuinely excludes the
-    received rows below the bar, so the captured ``admitted`` set is a strict
-    subset of the received candidates (unlike the ``epsilon=0.0`` default, where
-    every received row clears the bar and admitted degenerates to the whole
-    received set). ``PurgeInactive(max_age=1)`` keeps the purge branch alive; a
-    fresh instance per call (no cross-thread streak state).
+    Under the ``epsilon=0.0`` default every received row clears the bar and
+    admitted degenerates to the whole received set; ``epsilon=1.0`` makes the
+    admit filter genuinely exclude rows. ``PurgeInactive(max_age=1)`` keeps
+    the purge branch alive; fresh instance per call (no cross-thread streak
+    state).
     """
     return Compose(
         admit_chain=[SlackThreshold(epsilon=_ADMIT_SUBSET_EPSILON)],
@@ -137,14 +121,12 @@ def _nslack_admit_subset_policy() -> Compose:
 def _nslack_slack_policy() -> Compose:
     """A policy whose retirement stage reads row SLACK, not the dual.
 
-    ``PurgeInactive`` (the default policy above) has
-    ``needs_purge_slacks=False``, so ``nslack._purge`` sets ``slack=None`` on
-    every captured ``PurgeInput`` and the comparator's slack branch never runs.
-    ``SlackStrip`` has ``needs_purge_slacks=True``, so the master's solver-native
-    row slack is read and captured — the field the slack witness/comparator
-    below need populated. ``percentile=50.0`` keeps roughly half the rows each
-    call, so cuts churn and the slack readings span both binding (~0) and loose
-    (>0) rows over the run. A fresh instance per call (no cross-thread state).
+    ``PurgeInactive`` (the default above) has ``needs_purge_slacks=False``,
+    so every captured ``PurgeInput.slack`` is ``None``; ``SlackStrip`` reads
+    and captures the master's solver-native row slack instead.
+    ``percentile=50.0`` keeps roughly half the rows each call, so cuts churn
+    and the slack readings span both binding (~0) and loose (>0) rows. Fresh
+    instance per call (no cross-thread state).
     """
     return Compose(
         admit_chain=[SlackThreshold(epsilon=0.0)],
@@ -246,8 +228,7 @@ def _decode_bundle_key(key: bytes) -> np.ndarray:
 def _independent_eps(bundle_key: bytes, nu_row: np.ndarray) -> float:
     # eps = sum of the shock over the chosen items, accumulated by a plain
     # Python scalar loop — a structurally distinct reduction from the feature
-    # map's vectorised dot, so it is a genuine oracle rather than a re-run of
-    # the code under test. (Matches the captured float64 to <1e-15 here.)
+    # map's vectorised dot. (Matches the captured float64 to <1e-15 here.)
     bundle = _decode_bundle_key(bundle_key)
     acc = 0.0
     for on, w in zip(bundle, nu_row):
@@ -259,12 +240,11 @@ def _independent_eps(bundle_key: bytes, nu_row: np.ndarray) -> float:
 def _independent_phi(
     arrays: dict[str, np.ndarray], agent_id: int, bundle_key: bytes
 ) -> np.ndarray:
-    # phi recomputed straight from the RAW family arrays, not via the fixture's
-    # own feature callable (problem.features / observed_features) — that callable
-    # is the very function whose output priced_features_from stores, so reusing
-    # it would be tautological. The layout is the family's canonical phi
-    # (toy: b * r_a; qkp: [x_a . b, -b, 0.5 b'Qb]), reconstructed here so a
-    # capture-only phi corruption that both paths share still fails.
+    # phi recomputed straight from the RAW family arrays, not via the
+    # fixture's feature callable — that callable is the very function whose
+    # output priced_features_from stores, so it cannot check itself. The
+    # layout is the family's canonical phi (toy: b * r_a;
+    # qkp: [x_a . b, -b, 0.5 b'Qb]).
     b = _decode_bundle_key(bundle_key).astype(np.float64)
     if "observables" in arrays:  # toy
         r = np.asarray(arrays["observables"], dtype=np.float64)
@@ -307,23 +287,20 @@ def _assert_it0_feature_field_witness(
     records: Sequence[StepRecord],
     nu: np.ndarray,
     arrays: dict[str, np.ndarray],
-    theta_oracle: dict[int, _ThetaSnapshot],
+    theta_snapshots: dict[int, _ThetaSnapshot],
 ) -> None:
-    """Independent field-level check on captured gap/eps/payoff/phi at it 0.
+    """Captured gap/eps/payoff/phi at iteration 0 hold their fixture values.
 
-    The A-vs-B gate compares the two paths' captured continuous fields against
-    *each other*, so a capture that mangles a field identically on both paths
-    (they share ``priced_features_from``) compares equal. This pins the actual
-    values against fixture-derived oracles: every family demand is
-    ``Demand.exact`` so ``gap`` must be exactly ``0.0``; eps is the shock summed
+    Both paths share ``priced_features_from``, so comparing them to each
+    other says nothing about the values themselves. Every family demand is
+    ``Demand.exact``, so ``gap`` is exactly ``0.0``; eps is the shock summed
     over the chosen items; phi is the family's raw feature layout recomputed
-    from the decoded bundle key; and payoff is the demand identity ``phi . theta
-    + eps`` at the iteration-0 master theta (an independent snapshot) — none of
-    these read the captured field back from combrum.
+    from the decoded bundle key; payoff is the demand identity
+    ``phi . theta + eps`` at the iteration-0 theta snapshot.
     """
     assert records, "no StepRecord captured — nothing to witness"
     assert records[0].priced_features, "iteration 0 captured no priced feature"
-    theta0, _ = theta_oracle[records[0].iteration]
+    theta0, _ = theta_snapshots[records[0].iteration]
     for pf in records[0].priced_features:
         phi_expected = _independent_phi(arrays, pf.agent_id, pf.bundle_key)
         got_phi = np.asarray(pf.phi, dtype=np.float64)
@@ -371,19 +348,17 @@ def _assert_rc_field_witness(
     records: Sequence[StepRecord],
     nu: np.ndarray,
     arrays: dict[str, np.ndarray],
-    theta_oracle: dict[int, _ThetaSnapshot],
+    theta_snapshots: dict[int, _ThetaSnapshot],
 ) -> None:
-    """Independent field-level check on the captured priced reduced costs.
+    """Each captured ``PricedReducedCost.rc`` equals ``payoff - u_a``.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' rc against each other.
-    This also checks each captured ``PricedReducedCost.rc`` against the
-    reduced-cost identity ``rc = payoff - u_a``, with payoff recomputed from the
-    raw arrays and an independent per-iteration theta snapshot. Requires at
-    least one non-zero rc so the oracle checks a real value.
+    payoff is recomputed from the raw arrays at the per-iteration theta
+    snapshot. At least one non-zero rc is required, so the check sees a real
+    value.
     """
     checked = 0
     for r in records:
-        snapshot = theta_oracle.get(r.iteration)
+        snapshot = theta_snapshots.get(r.iteration)
         if snapshot is None or not r.priced_reduced_costs:
             continue
         theta, u = snapshot
@@ -408,24 +383,19 @@ def _assert_admit_violation_field_witness(
     records: Sequence[StepRecord],
     nu: np.ndarray,
     arrays: dict[str, np.ndarray],
-    theta_oracle: dict[int, _ThetaSnapshot],
-    received_oracle: dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]],
+    theta_snapshots: dict[int, _ThetaSnapshot],
+    received_snapshots: dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]],
 ) -> None:
-    """Independent field-level check on the captured admit violations.
-
-    The A-vs-B / A-vs-shard gate compares the two paths' admit violations
-    against each other. This also checks each captured
-    ``AdmitViolation.violation`` against the pre-admit signal ``phi . theta +
-    eps - u_a`` recomputed from the received cut row and an independent theta/u
-    snapshot. Requires at least one non-zero violation so the oracle checks a
-    real value.
+    """Each captured ``AdmitViolation.violation`` equals the pre-admit signal
+    ``phi . theta + eps - u_a``, recomputed from the received cut row and the
+    theta/u snapshot. At least one non-zero violation is required.
     """
     checked = 0
     for r in records:
         if not r.admit_violations:
             continue
-        theta_u = theta_oracle.get(r.iteration)
-        rows = received_oracle.get(r.iteration)
+        theta_u = theta_snapshots.get(r.iteration)
+        rows = received_snapshots.get(r.iteration)
         assert theta_u is not None and rows is not None, (
             f"no independent admit snapshot for iteration {r.iteration}"
         )
@@ -465,17 +435,14 @@ def _assert_install_before_field_witness(
     records: Sequence[StepRecord],
     installed_snapshots: Sequence[Sequence[object]],
 ) -> None:
-    """Independent field-level check on the captured ``installed_before`` set.
+    """Captured ``installed_before`` matches the driver's own snapshots.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' ``installed_before``
-    key sets against each other. This also checks them against a separate
-    capture site: the driver's per-iteration ``extract_cuts()`` snapshot
-    (``WalkOutcome.installed_snapshots``, taken in ``_walk`` after ``update``),
-    which the ``InstallSnapshot`` field never touches. The master's
-    installed set at the start of iteration ``i``'s add is exactly its state at
-    the end of iteration ``i-1``, i.e. ``installed_snapshots[i-1]``; iteration 0
-    starts from the empty (no-warm-start) master. So the captured
-    ``installed_before`` must equal that prior-iteration snapshot key set.
+    ``WalkOutcome.installed_snapshots`` is a separate capture site — the
+    driver's per-iteration ``extract_cuts()``, taken in ``_walk`` after
+    ``update`` — which the ``InstallSnapshot`` field never touches. The
+    master's installed set at the start of iteration ``i``'s add is its state
+    at the end of ``i-1``, so ``installed_before`` must equal
+    ``installed_snapshots[i-1]`` (empty at iteration 0: no warm start).
     """
     assert records, "no StepRecord captured — nothing to witness"
     assert len(installed_snapshots) == len(records), (
@@ -509,40 +476,36 @@ def _assert_install_before_field_witness(
 
 def _assert_admitted_field_witness(
     records: Sequence[StepRecord],
-    theta_oracle: dict[int, _ThetaSnapshot],
-    received_oracle: dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]],
+    theta_snapshots: dict[int, _ThetaSnapshot],
+    received_snapshots: dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]],
     *,
     epsilon: float = 0.0,
     require_strict_subset: bool = False,
 ) -> None:
-    """Independent full-set check on the captured ``InstallSnapshot.admitted``.
+    """Captured ``InstallSnapshot.admitted`` matches the admit rule exactly.
 
-    ``installed_before`` has the driver-snapshot oracle above. This reconstructs
-    the whole admitted set
-    from the ``SlackThreshold(epsilon)`` admit rule: a received candidate is
-    admitted iff its pre-admit violation ``phi . theta + eps - u_a`` exceeds
-    ``epsilon``, evaluated from the received row's own ``(phi, eps)`` and an
-    independent theta/u snapshot — never read back from the record. The captured
-    set must equal that reconstruction exactly (a union, a dropped key, a
-    spurious extra key all fail), be a subset of the received candidates, and be
-    disjoint from ``installed_before`` under the fresh-admit policy.
+    Reconstruct the whole admitted set from ``SlackThreshold(epsilon)``: a
+    received candidate is admitted iff its pre-admit violation
+    ``phi . theta + eps - u_a`` exceeds ``epsilon``, evaluated from the
+    received row's own ``(phi, eps)`` and the theta/u snapshot — never read
+    back from the record. The captured set must equal that reconstruction,
+    be a subset of the received candidates, and be disjoint from
+    ``installed_before`` under the fresh-admit policy.
 
-    Under the ``epsilon=0.0`` policy every received row already cleared the emit
-    threshold, so the admit filter never excludes one and the reconstruction
-    degenerates to ``frozenset(received)`` — an admit-everything bug then admits
-    the same set and survives. ``require_strict_subset`` (paired with a positive
-    ``epsilon`` policy that leaves some received violation below the bar) demands
-    at least one iteration whose captured admitted set is a strict subset of the
-    received candidates, so the threshold clause has to bite: an admit-everything
-    bug then admits a super-set and fails the exact-equality check.
+    Under ``epsilon=0.0`` every received row clears the bar and the
+    reconstruction degenerates to ``frozenset(received)``, which says nothing
+    about the threshold. ``require_strict_subset`` (paired with a positive
+    ``epsilon``) demands at least one iteration whose admitted set is a
+    strict subset of the received candidates, so the threshold clause has to
+    exclude a real row.
     """
     checked = 0
     strict_subset = 0
     for r in records:
         if r.install is None:
             continue
-        theta_u = theta_oracle.get(r.iteration)
-        rows = received_oracle.get(r.iteration)
+        theta_u = theta_snapshots.get(r.iteration)
+        rows = received_snapshots.get(r.iteration)
         assert theta_u is not None and rows is not None, (
             f"no independent admit snapshot for iteration {r.iteration}"
         )
@@ -707,9 +670,9 @@ def _union_shard_fields(
 def _assert_nslack_records_exercised(records: Sequence[StepRecord]) -> None:
     """Every NSlack field is actually populated, and the events fired."""
     assert records, "no StepRecord captured — the walk never iterated"
-    # priced_reduced_costs covers every priced agent, including sub-threshold
-    # ones (the survivor-only hole): at least one rc <= tolerance that emitted
-    # no row but was still captured — otherwise the survivor-only hole is open.
+    # priced_reduced_costs must cover every priced agent, not only the rows
+    # that cleared the emit threshold: require at least one captured
+    # rc <= tolerance that shipped nothing.
     total_priced = sum(len(r.priced_reduced_costs) for r in records)
     sub_threshold = sum(
         1
@@ -719,8 +682,8 @@ def _assert_nslack_records_exercised(records: Sequence[StepRecord]) -> None:
     )
     assert total_priced > 0, "priced_reduced_costs was never populated"
     assert sub_threshold > 0, (
-        "priced_reduced_costs never captured a sub-threshold agent — the"
-        " survivor-only hole is not exercised"
+        "priced_reduced_costs never captured a sub-threshold agent — only"
+        " rows that shipped were recorded"
     )
     # At least one admit candidate, one purge-input key, one install event.
     assert sum(len(r.admit_violations) for r in records) > 0, (
@@ -735,8 +698,7 @@ def _assert_nslack_records_exercised(records: Sequence[StepRecord]) -> None:
         if r.install is not None
     )
     assert fresh > 0, "no fresh cut was ever installed"
-    # at least one purge-input carried a real (non-None) dual reading, so the
-    # purge-signal capture is meaningfully exercised, not all-None.
+    # At least one purge-input must carry a real (non-None) dual reading.
     assert any(
         pi.dual is not None for r in records for pi in r.purge_inputs
     ), "every purge-input dual was None — the purge signal is never present"
@@ -790,35 +752,31 @@ def _nslack_cluster(
     return _union_shard_fields([out.step_records for out in results])
 
 
-#: All independent NSlack oracles a single instrumented reference walk yields:
-#: per-iteration purge duals, theta/u snapshots, and the exchanged rows'
-#: (phi, eps) — enough to pin the purge-dual, payoff, rc and admit-violation
-#: fields against reads the records never touch.
-_NSlackOracles = tuple[
+#: What one instrumented reference walk yields: per-iteration purge duals,
+#: theta/u snapshots, and the exchanged rows' (phi, eps) — reads the records
+#: never touch, enough to check the purge-dual, payoff, rc and
+#: admit-violation fields.
+_NSlackSnapshots = tuple[
     dict[int, dict[tuple[int, bytes], float]],  # purge duals at _purge time
     dict[int, _ThetaSnapshot],  # theta + u at price/install time
     dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]],  # received rows
 ]
 
 
-def _nslack_serial_with_purge_dual_oracle(
+def _nslack_serial_with_snapshots(
     arrays, problem, features, backend
-) -> tuple[WalkOutcome, _NSlackOracles]:
-    """A serial NSlack walk plus the independent per-iteration field oracles.
+) -> tuple[WalkOutcome, _NSlackSnapshots]:
+    """A serial NSlack walk plus the per-iteration reference snapshots.
 
-    At every ``_purge`` call the master is still open, so we snapshot its
-    published per-cut duals via ``master.dual_values()`` — a DIFFERENT accessor
-    than the ``cut_readings().dual_map()`` the capture consumes, and one the
-    ``PurgeInput`` record never touches. At every ``contribute`` we snapshot the
-    pricing master's ``theta`` and per-agent ``u`` (the values payoff / rc read),
-    and at every ``apply_step`` we snapshot the exchanged rows' ``(phi, eps)``
-    (the admit-violation inputs). ``self._master.theta()`` / ``self._u`` at
-    ``apply_step`` equal the ``contribute`` snapshot (no re-solve between price
-    and install), so one theta/u map serves the payoff, rc and admit witnesses.
-    Each snapshot is a read the records never touch, so a pure capture-value
-    corruption is caught even though both feature/shard paths would corrupt it
-    identically. The master closes when the walk returns, hence the mid-walk
-    snapshots.
+    At every ``_purge`` the master is still open, so we snapshot its
+    published per-cut duals via ``master.dual_values()`` — a different
+    accessor than the ``cut_readings().dual_map()`` the capture consumes. At
+    every ``contribute`` we snapshot the pricing master's ``theta`` and
+    per-agent ``u``, and at every ``apply_step`` the exchanged rows'
+    ``(phi, eps)``. ``self._master.theta()`` / ``self._u`` at ``apply_step``
+    equal the ``contribute`` snapshot (no re-solve between price and
+    install), so one theta/u map serves the payoff, rc and admit checks. The
+    master closes when the walk returns, hence the mid-walk snapshots.
     """
     duals: dict[int, dict[tuple[int, bytes], float]] = {}
     theta_u: dict[int, _ThetaSnapshot] = {}
@@ -859,9 +817,9 @@ def _nslack_serial_with_purge_dual_oracle(
     _nslack_module.NSlack.contribute = _snapshotting_contribute
     _nslack_module.NSlack.apply_step = _snapshotting_apply
     try:
-        # capture_installed rides along so the same instrumented reference feeds
-        # the install-before witness too (its oracle is the driver's own
-        # per-iteration extract_cuts() snapshot, a distinct capture site).
+        # capture_installed rides along so the same instrumented reference
+        # also feeds the install-before check (which compares against the
+        # driver's own per-iteration extract_cuts() snapshot).
         outcome = _nslack_serial(
             arrays, problem, features, backend, capture_installed=True
         )
@@ -874,27 +832,22 @@ def _nslack_serial_with_purge_dual_oracle(
 
 def _assert_purge_dual_field_witness(
     records: Sequence[StepRecord],
-    dual_oracle: dict[int, dict[tuple[int, bytes], float]],
+    published_duals: dict[int, dict[tuple[int, bytes], float]],
 ) -> None:
-    """Independent field-level check on the captured purge duals.
+    """Captured ``PurgeInput.dual`` matches the master's own duals.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' purge duals against
-    each other, so a capture that doubles the dual identically on both paths
-    compares equal. This pins the captured ``PurgeInput.dual`` against the
-    master's own published ``dual_values()`` read at purge time (not read back
-    from the record), so a capture-value corruption fails. The loop is driven
-    from the ORACLE's key set, not the captured non-None entries: for every cut
-    the master published a dual for, the capture must hold a NON-None matching
-    value — closing the converse direction (a real reading silently dropped to
-    ``None``, e.g. a magnitude-guard bug) that a captured-only loop skips over.
-    Only the non-zero duals carry a value probe (doubling a ``0.0`` reading
-    stays ``0.0``), so the witness requires at least one non-zero dual to bite.
+    The reference is ``master.dual_values()`` read at purge time, not read
+    back from the record. The loop runs over the master's key set, not the
+    captured non-None entries: every cut the master published a dual for
+    must be captured with a non-None matching value, so a real reading
+    silently dropped to ``None`` also fails. A ``0.0`` reading proves
+    nothing about the value path, so at least one non-zero dual is required.
     """
     checked = 0
     for r in records:
         if not r.purge_inputs:
             continue
-        published = dual_oracle.get(r.iteration)
+        published = published_duals.get(r.iteration)
         assert published is not None, (
             f"no independent dual snapshot for purge iteration {r.iteration}"
         )
@@ -922,8 +875,8 @@ def _assert_purge_dual_field_witness(
     )
 
 
-# The slack-witness snapshot: theta, per-agent u, and each installed cut's
-# (phi, eps). Everything the looseness oracle below needs, keyed by iteration.
+# Theta, per-agent u, and each installed cut's (phi, eps) — everything the
+# looseness recompute below needs, keyed by iteration.
 _SlackSnapshot = tuple[
     np.ndarray,  # theta at purge time
     dict[int, float],  # u_values at purge time
@@ -931,20 +884,20 @@ _SlackSnapshot = tuple[
 ]
 
 
-def _nslack_serial_with_purge_slack_oracle(
+def _nslack_serial_with_slack_snapshots(
     arrays, problem, features, backend
 ) -> tuple[WalkOutcome, dict[int, _SlackSnapshot]]:
-    """A serial NSlack walk under a SLACK-reading policy plus a slack oracle.
+    """A serial NSlack walk under a SLACK-reading policy, plus snapshots.
 
-    Drives ``_nslack_slack_policy`` (a ``SlackStrip`` retirement stage) so the
-    captured ``PurgeInput.slack`` is populated at all — under the default
-    ``PurgeInactive`` policy ``needs_purge_slacks`` is ``False`` and every
-    captured slack is ``None`` (a dead comparator branch). At each ``_purge`` the
-    master is open, so we snapshot ``theta()``, ``u_values()`` and the installed
-    rows' ``(phi, eps)`` — accessors the slack capture (which reads
-    ``cut_readings(slack=True)`` off ``getSolution().row_value``) never touches.
+    Drives ``_nslack_slack_policy`` (a ``SlackStrip`` retirement stage) so
+    the captured ``PurgeInput.slack`` is populated at all — under the default
+    ``PurgeInactive`` policy every captured slack is ``None``. At each
+    ``_purge`` the master is open, so we snapshot ``theta()``, ``u_values()``
+    and the installed rows' ``(phi, eps)`` — accessors the slack capture
+    (which reads ``cut_readings(slack=True)`` off
+    ``getSolution().row_value``) never touches.
     """
-    oracle: dict[int, _SlackSnapshot] = {}
+    snapshots: dict[int, _SlackSnapshot] = {}
     original = _nslack_module.NSlack._purge
 
     def _snapshotting_purge(self, policy, profile, installed, pending=None):
@@ -958,7 +911,7 @@ def _nslack_serial_with_purge_slack_oracle(
             )
             for row in master.extract_cuts()
         }
-        oracle.setdefault(self._iteration, (theta, u, rows))
+        snapshots.setdefault(self._iteration, (theta, u, rows))
         return original(self, policy, profile, installed, pending)
 
     _nslack_module.NSlack._purge = _snapshotting_purge
@@ -974,37 +927,29 @@ def _nslack_serial_with_purge_slack_oracle(
         )
     finally:
         _nslack_module.NSlack._purge = original
-    return outcome, oracle
+    return outcome, snapshots
 
 
 def _assert_purge_slack_field_witness(
     records: Sequence[StepRecord],
-    slack_oracle: dict[int, _SlackSnapshot],
+    slack_snapshots: dict[int, _SlackSnapshot],
 ) -> None:
-    """Independent field-level check on the captured purge slacks.
+    """Captured ``PurgeInput.slack`` equals the recomputed row looseness.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' purge slacks against
-    each other. This also checks the captured ``PurgeInput.slack`` against the
-    row looseness recomputed independently:
-    ``slack(a, d) = u_a - (phi_a(d) . theta + eps_a(d))`` — the definition the
-    slack convention encodes (binding ~0, looser rows larger), evaluated from
-    ``theta()`` / ``u_values()`` / the cut ``(phi, eps)``, a structurally
-    distinct path from the backend's ``getSolution().row_value - eps`` read the
-    capture consumes. The loop is driven from the ORACLE's installed rows (the
-    ``extract_cuts()`` set at purge time, which is the last-solved relaxation, so
-    every one holds a reading), not the captured non-None entries: for every such
-    cut the capture must hold a NON-None matching slack — closing the converse
-    direction (a real reading silently dropped to ``None``) a captured-only loop
-    skips. Only the rows whose looseness is non-trivial carry a value probe:
-    shifting a binding ``0.0`` slack by the capture bug is still caught, but a
-    witness that only ever saw ``0.0`` would have no oracle to bite, so we
-    require at least one non-zero looseness.
+    ``slack(a, d) = u_a - (phi_a(d) . theta + eps_a(d))`` — binding ~0,
+    looser rows larger — evaluated from ``theta()`` / ``u_values()`` / the
+    cut ``(phi, eps)``, a structurally distinct path from the backend's
+    ``getSolution().row_value - eps`` read the capture consumes. The loop
+    runs over the snapshot's installed rows (the ``extract_cuts()`` set at
+    purge time; every one holds a reading), not the captured non-None
+    entries, so a real reading silently dropped to ``None`` also fails. At
+    least one non-zero looseness is required, so the check sees a real value.
     """
     checked = 0
     for r in records:
         if not r.purge_inputs:
             continue
-        snapshot = slack_oracle.get(r.iteration)
+        snapshot = slack_snapshots.get(r.iteration)
         assert snapshot is not None, (
             f"no independent slack snapshot for purge iteration {r.iteration}"
         )
@@ -1036,12 +981,10 @@ def _assert_purge_slack_field_witness(
 
 
 def _assert_nslack_slack_records_exercised(records: Sequence[StepRecord]) -> None:
-    """The slack-reading walk actually populated the ``PurgeInput.slack`` field.
+    """The slack-reading walk actually populated ``PurgeInput.slack``.
 
-    Under the default policy this would be all-``None`` (a dead branch); the
-    slack policy must produce real (non-``None``) readings, including at least
-    one non-zero looseness so the comparator's ``_close(sa, sb)`` slack branch
-    and the slack witness are both genuinely exercised.
+    Under the default policy every reading is ``None``; the slack policy
+    must produce real readings, including at least one non-zero looseness.
     """
     assert records, "no StepRecord captured — the walk never iterated"
     assert sum(len(r.purge_inputs) for r in records) > 0, (
@@ -1052,7 +995,7 @@ def _assert_nslack_slack_records_exercised(records: Sequence[StepRecord]) -> Non
     )
     assert non_none > 0, (
         "every captured purge slack was None — the SlackStrip policy did not"
-        " populate the slack field, so the slack comparator branch is dead"
+        " populate the slack field"
     )
     non_zero = sum(
         1
@@ -1061,8 +1004,7 @@ def _assert_nslack_slack_records_exercised(records: Sequence[StepRecord]) -> Non
         if pi.slack is not None and abs(pi.slack) > TOL
     )
     assert non_zero > 0, (
-        "every captured purge slack read ~0.0 — no loose cut was ever priced,"
-        " so a slack-value corruption could hide behind None==None / 0.0==0.0"
+        "every captured purge slack read ~0.0 — no loose cut was ever priced"
     )
 
 
@@ -1084,48 +1026,34 @@ def _nslack_slack_cluster(
 
 
 def _gate_nslack(arrays, problem, batch_only_map, backend) -> None:
-    # The reference walk: per-agent features, serial shard. Instrumented so the
-    # master's own published cut duals, its theta/u, and the exchanged rows are
-    # snapshot mid-walk, giving every field witness an oracle independent of the
-    # captured record.
-    per_agent, (purge_dual_oracle, theta_oracle, received_oracle) = (
-        _nslack_serial_with_purge_dual_oracle(
+    # Reference walk: per-agent features, serial shard, instrumented so the
+    # master's published duals, its theta/u, and the exchanged rows are
+    # snapshot mid-walk. Both capture paths share the capture code, so the
+    # field checks below compare against those snapshots, not the other path.
+    per_agent, (published_duals, theta_snapshots, received_snapshots) = (
+        _nslack_serial_with_snapshots(
             arrays, problem, problem.features, backend
         )
     )
     nu = _family_nu(arrays)
     _assert_nslack_records_exercised(per_agent.step_records)
-    # Field-level oracle: the captured gap/eps/payoff/phi hold their true
-    # fixture values, not merely agree with the (identically-captured) other
-    # path.
     _assert_it0_feature_field_witness(
-        per_agent.step_records, nu, arrays, theta_oracle
+        per_agent.step_records, nu, arrays, theta_snapshots
     )
-    # Field-level oracle: the captured reduced costs hold payoff - u_a, and the
-    # captured admit violations hold phi . theta + eps - u_a — recomputed from
-    # the raw arrays and an independent theta/u snapshot, not the other path.
     _assert_rc_field_witness(
-        per_agent.step_records, nu, arrays, theta_oracle
+        per_agent.step_records, nu, arrays, theta_snapshots
     )
     _assert_admit_violation_field_witness(
-        per_agent.step_records, nu, arrays, theta_oracle, received_oracle
+        per_agent.step_records, nu, arrays, theta_snapshots, received_snapshots
     )
-    # Field-level oracle: the captured purge duals hold the master's published
-    # cut duals, not merely agree with the (identically-captured) other path.
     _assert_purge_dual_field_witness(
-        per_agent.step_records, purge_dual_oracle
+        per_agent.step_records, published_duals
     )
-    # Field-level oracle: the captured install-before key set holds the master's
-    # true prior-iteration installed set (the driver's own extract_cuts()
-    # snapshot), not merely agree with the (identically-captured) other path.
     _assert_install_before_field_witness(
         per_agent.step_records, per_agent.installed_snapshots
     )
-    # Field-level oracle: the captured admitted set is the whole reconstructed
-    # admit set (violation > 0 over the received rows), disjoint from
-    # installed_before — not merely equal to the (identically-captured) path.
     _assert_admitted_field_witness(
-        per_agent.step_records, theta_oracle, received_oracle
+        per_agent.step_records, theta_snapshots, received_snapshots
     )
 
     # Axis 1 — features: batched features, same serial shard. Must match the
@@ -1133,12 +1061,12 @@ def _gate_nslack(arrays, problem, batch_only_map, backend) -> None:
     batched = _nslack_serial(arrays, problem, batch_only_map, backend)
     _assert_records_equivalent(per_agent.step_records, batched.step_records)
 
-    # Axis 2 — shard: per-agent features, interleaved LocalCluster. The folded
-    # full-domain stream must match the serial reference too.
+    # Axis 2 — shard: per-agent features, interleaved LocalCluster, folded
+    # back to one full-domain stream.
     folded = _nslack_cluster(arrays, problem, problem.features, backend, 2)
     _assert_records_equivalent(per_agent.step_records, folded)
 
-    # Combined — both axes at once: batched features and interleaved shard.
+    # Both axes at once.
     folded_batched = _nslack_cluster(arrays, problem, batch_only_map, backend, 2)
     _assert_records_equivalent(per_agent.step_records, folded_batched)
 
@@ -1165,27 +1093,24 @@ def test_nslack_wholesale_capture_qkp() -> None:
 
 # --- the gate: NSlack strict-subset admit -------------------------------------
 #
-# The default epsilon=0.0 admit policy admits every received candidate (they all
-# already cleared the emit threshold), so the admitted-set reconstruction
-# collapses to the whole received set and an admit-everything bug survives. This
-# gate drives a positive-epsilon (SlackThreshold(1.0)) admit policy so the admit
-# filter genuinely rejects the weakly-violated received rows: the captured
-# admitted set is then a strict subset of the received candidates, and the
-# independent reconstruction (violation > epsilon over the received rows) has a
-# real threshold to check against.
+# Under the default epsilon=0.0 admit policy every received candidate is
+# admitted (each already cleared the emit threshold), so admitted == received
+# and the reconstruction has no threshold to check. This gate drives
+# SlackThreshold(1.0) so the admit filter genuinely rejects the
+# weakly-violated received rows and the admitted set is a strict subset.
 
 
 def _nslack_admit_subset_serial(
     arrays, problem, features, backend
 ) -> tuple[WalkOutcome, dict[int, _ThetaSnapshot], dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]]]:
-    """A serial NSlack walk under the positive-epsilon admit policy + oracles.
+    """A serial NSlack walk under the positive-epsilon admit policy.
 
-    Snapshots the pricing master's ``theta`` / per-agent ``u`` at ``contribute``
-    and the exchanged rows' ``(phi, eps)`` at ``apply_step`` — the two reads the
-    admitted-set reconstruction needs, neither of which touches the captured
-    ``InstallSnapshot.admitted``. ``self._master.theta()`` / ``self._u`` at
-    ``apply_step`` equal the ``contribute`` snapshot (no re-solve between price
-    and install), so the one theta/u map feeds the whole reconstruction.
+    Snapshots the pricing master's ``theta`` / per-agent ``u`` at
+    ``contribute`` and the exchanged rows' ``(phi, eps)`` at ``apply_step`` —
+    the two reads the admitted-set reconstruction needs, neither of which
+    touches the captured ``InstallSnapshot.admitted``. No re-solve happens
+    between price and install, so the one theta/u map feeds the whole
+    reconstruction.
     """
     theta_u: dict[int, _ThetaSnapshot] = {}
     received: dict[int, dict[tuple[int, bytes], tuple[np.ndarray, float]]] = {}
@@ -1251,24 +1176,22 @@ def _nslack_admit_subset_cluster(
 
 
 def _gate_nslack_admit_subset(arrays, problem, batch_only_map, backend) -> None:
-    per_agent, theta_oracle, received_oracle = _nslack_admit_subset_serial(
+    per_agent, theta_snapshots, received_snapshots = _nslack_admit_subset_serial(
         arrays, problem, problem.features, backend
     )
     _assert_nslack_records_exercised(per_agent.step_records)
-    # Independent oracle: the captured admitted set is the whole reconstructed
-    # admit set (violation > epsilon over the received rows), and at least one
-    # iteration admits a strict subset of the received candidates — so an
-    # admit-everything bug (or a >= vs > boundary flip) is caught, not merely
-    # equal to the identically-captured other path.
+    # The captured admitted set must equal the reconstruction (violation >
+    # epsilon over the received rows), with at least one iteration admitting
+    # a strict subset of the candidates.
     _assert_admitted_field_witness(
         per_agent.step_records,
-        theta_oracle,
-        received_oracle,
+        theta_snapshots,
+        received_snapshots,
         epsilon=_ADMIT_SUBSET_EPSILON,
         require_strict_subset=True,
     )
 
-    # Axis 1 — features: batched features, same serial shard.
+    # Feature axis, shard axis, then both, as in _gate_nslack.
     batched = run_walk(
         arrays,
         _with_features(problem, batch_only_map),
@@ -1280,13 +1203,11 @@ def _gate_nslack_admit_subset(arrays, problem, batch_only_map, backend) -> None:
     )
     _assert_records_equivalent(per_agent.step_records, batched.step_records)
 
-    # Axis 2 — shard: per-agent features, interleaved LocalCluster.
     folded = _nslack_admit_subset_cluster(
         arrays, problem, problem.features, backend, 2
     )
     _assert_records_equivalent(per_agent.step_records, folded)
 
-    # Combined — batched features and interleaved shard.
     folded_batched = _nslack_admit_subset_cluster(
         arrays, problem, batch_only_map, backend, 2
     )
@@ -1319,22 +1240,17 @@ def test_nslack_admit_subset_wholesale_capture_qkp() -> None:
 #
 # The default NSlack policy (PurgeInactive) reads the dual, not the slack, so
 # every captured PurgeInput.slack is None and the comparator's slack branch
-# (_close(sa, sb)) never runs — a slack-value corruption compares None==None.
-# This gate drives a SlackStrip retirement stage so the slack field is
-# populated, then runs the full A-vs-B / A-vs-shard comparator (proving the
-# slack branch survives the feature/shard permutations) plus an independent
-# slack oracle (proving the captured value is the true row looseness, not
-# merely equal to the identically-captured other path).
+# (_close(sa, sb)) never runs. This gate drives a SlackStrip retirement stage
+# so the slack field is populated, then runs the full feature/shard comparator
+# plus the row-looseness recompute.
 
 
 def _gate_nslack_slack(arrays, problem, batch_only_map, backend) -> None:
-    per_agent, slack_oracle = _nslack_serial_with_purge_slack_oracle(
+    per_agent, slack_snapshots = _nslack_serial_with_slack_snapshots(
         arrays, problem, problem.features, backend
     )
-    # The slack field is actually populated (non-None, some non-zero looseness).
     _assert_nslack_slack_records_exercised(per_agent.step_records)
-    # Independent oracle: the captured slack is the recomputed row looseness.
-    _assert_purge_slack_field_witness(per_agent.step_records, slack_oracle)
+    _assert_purge_slack_field_witness(per_agent.step_records, slack_snapshots)
 
     # Axis 1 — features: batched features, same serial shard. The whole record
     # (slack branch included) matches the per-agent reference field-by-field.
@@ -1349,11 +1265,9 @@ def _gate_nslack_slack(arrays, problem, batch_only_map, backend) -> None:
     )
     _assert_records_equivalent(per_agent.step_records, batched.step_records)
 
-    # Axis 2 — shard: per-agent features, interleaved LocalCluster.
     folded = _nslack_slack_cluster(arrays, problem, problem.features, backend, 2)
     _assert_records_equivalent(per_agent.step_records, folded)
 
-    # Combined — batched features and interleaved shard.
     folded_batched = _nslack_slack_cluster(
         arrays, problem, batch_only_map, backend, 2
     )
@@ -1410,25 +1324,23 @@ def _oneslack_cluster(arrays, problem, features, backend, size) -> list[StepReco
     return _union_shard_fields([out.step_records for out in results])
 
 
-def _oneslack_serial_with_theta_oracle(
+def _oneslack_serial_with_theta_snapshots(
     arrays, problem, features, backend
 ) -> tuple[WalkOutcome, dict[int, _ThetaSnapshot]]:
     """A serial OneSlack walk plus a per-iteration theta/aggregate-u snapshot.
 
     ``finalise`` computes ``aggregate_raw`` from ``self._theta`` / ``self._u``
-    (the aggregate epigraph value) at the current, pre-update master solution.
-    We snapshot both there — a read the ``aggregate_raw`` / ``aggregate_bytes``
-    capture and the priced-feature capture never touch — so the aggregate and
-    it-0 payoff witnesses have an oracle independent of the record. ``u`` rides
-    the snapshot as a single float keyed by the synthetic aggregate agent 0.
+    at the current, pre-update master solution. Snapshot both there — a read
+    the aggregate and priced-feature captures never touch. ``u`` rides the
+    snapshot as a single float keyed by the synthetic aggregate agent 0.
     """
-    oracle: dict[int, _ThetaSnapshot] = {}
+    snapshots: dict[int, _ThetaSnapshot] = {}
     from combrum.formulations import oneslack as _oneslack_module
 
     original = _oneslack_module.OneSlack.finalise
 
     def _snapshotting_finalise(self, reduced):
-        oracle.setdefault(
+        snapshots.setdefault(
             self._iteration,
             (np.asarray(self._theta, dtype=np.float64).copy(), {0: float(self._u)}),
         )
@@ -1439,17 +1351,15 @@ def _oneslack_serial_with_theta_oracle(
         outcome = _oneslack_serial(arrays, problem, features, backend)
     finally:
         _oneslack_module.OneSlack.finalise = original
-    return outcome, oracle
+    return outcome, snapshots
 
 
 def _bitmatch_eps(bundle_key: bytes, nu_row: np.ndarray) -> float:
-    # eps = bundle . nu via the vectorised float64 dot the family feature map
-    # uses. Unlike _independent_eps's scalar-loop reduction (a distinct summation
-    # for the eps *value* witness, which is only pinned to TOL), the aggregate
-    # SHA-256 is a byte-exact artifact of the exact arithmetic, so its
-    # reconstruction must match combrum's dot bit-for-bit — a 1-ULP eps
-    # difference flips the digest. Fixture math either way (b . nu), not a read
-    # of the captured field.
+    # eps = bundle . nu via the same vectorised float64 dot the family feature
+    # map uses. _independent_eps deliberately sums differently (its value is
+    # only compared to TOL); the aggregate SHA-256 is byte-exact, so this
+    # reconstruction must match combrum's arithmetic bit-for-bit — a 1-ULP
+    # eps difference flips the digest.
     b = _decode_bundle_key(bundle_key).astype(np.float64)
     return float(b @ np.asarray(nu_row, dtype=np.float64))
 
@@ -1457,15 +1367,13 @@ def _bitmatch_eps(bundle_key: bytes, nu_row: np.ndarray) -> float:
 def _reconstruct_aggregate(
     rec: StepRecord, nu: np.ndarray, arrays: dict[str, np.ndarray], K: int
 ) -> np.ndarray:
-    # The aggregate row (phi_agg | eps_agg), rebuilt from the raw arrays exactly
-    # as the reduction kernel forms it: one weighted (phi | eps) row per priced
-    # agent, weight 1.0 (the walk's agent_weights), stacked in ascending
-    # agent-id order and reduced with np.add.reduce — the ascending-id,
-    # add.reduce contract canonical_sum documents. phi and eps use the family's
-    # exact vectorised feature arithmetic so the row bytes match combrum's;
-    # reproducing that contract (not calling combrum's summer) makes the
-    # reconstruction bitwise identical to reduced.aggregate, so the SHA-256 over
-    # it matches the true row key.
+    # The aggregate row (phi_agg | eps_agg), rebuilt from the raw arrays
+    # exactly as the reduction kernel forms it: one (phi | eps) row per
+    # priced agent (weight 1.0, the walk's agent_weights), stacked in
+    # ascending agent-id order and reduced with np.add.reduce — the contract
+    # canonical_sum documents, reproduced here rather than called, so the
+    # reconstruction is bitwise identical to reduced.aggregate and its
+    # SHA-256 matches the true row key.
     pfs = sorted(rec.priced_features, key=lambda pf: pf.agent_id)
     rows = np.empty((len(pfs), K + 1), dtype=np.float64)
     for i, pf in enumerate(pfs):
@@ -1478,17 +1386,14 @@ def _assert_aggregate_field_witness(
     records: Sequence[StepRecord],
     nu: np.ndarray,
     arrays: dict[str, np.ndarray],
-    theta_oracle: dict[int, _ThetaSnapshot],
+    theta_snapshots: dict[int, _ThetaSnapshot],
 ) -> None:
-    """Independent field-level check on the captured OneSlack aggregate.
+    """Captured OneSlack aggregate fields hold the reconstructed row.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' ``aggregate_raw`` /
-    ``aggregate_bytes`` against each other. This also checks them against a
-    reconstruction of the aggregate row rebuilt from the raw arrays: ``raw =
-    phi_agg . theta + eps_agg - u`` at the independent theta/u snapshot, and
+    ``raw = phi_agg . theta + eps_agg - u`` at the theta/u snapshot, and
     ``bytes = sha256(concatenate([phi_agg, [eps_agg]]).tobytes())`` computed
     test-side over the reconstructed row — never read back from the record.
-    Requires at least one non-zero raw so the oracle checks a real value.
+    At least one non-zero raw is required.
     """
     import hashlib
 
@@ -1498,7 +1403,7 @@ def _assert_aggregate_field_witness(
         assert r.aggregate_raw is not None and r.aggregate_bytes is not None, (
             f"iteration {r.iteration} carried no aggregate — nothing to witness"
         )
-        theta, u = theta_oracle[r.iteration]
+        theta, u = theta_snapshots[r.iteration]
         agg = _reconstruct_aggregate(r, nu, arrays, K)
         phi_agg = agg[:K]
         eps_agg = float(agg[K])
@@ -1529,19 +1434,16 @@ def _assert_aggregate_field_witness(
 
 
 def _gate_oneslack(arrays, problem, batch_only_map, backend) -> None:
-    per_agent, theta_oracle = _oneslack_serial_with_theta_oracle(
+    per_agent, theta_snapshots = _oneslack_serial_with_theta_snapshots(
         arrays, problem, problem.features, backend
     )
     nu = _family_nu(arrays)
     _assert_oneslack_records_exercised(per_agent.step_records)
     _assert_it0_feature_field_witness(
-        per_agent.step_records, nu, arrays, theta_oracle
+        per_agent.step_records, nu, arrays, theta_snapshots
     )
-    # Field-level oracle: the captured aggregate raw and aggregate key bytes hold the
-    # reconstructed aggregate row, not merely agree with the (identically-
-    # captured) other path.
     _assert_aggregate_field_witness(
-        per_agent.step_records, nu, arrays, theta_oracle
+        per_agent.step_records, nu, arrays, theta_snapshots
     )
 
     # Axis 1 — features: the aggregate raw within TOL and SHA-256 aggregate bytes
@@ -1583,23 +1485,19 @@ def test_oneslack_wholesale_capture_qkp() -> None:
 
 # --- the gate: the priced-demand gap field ------------------------------------
 #
-# Every family oracle prices Demand.exact, so every captured PricedFeature.gap
-# is exactly 0.0: the it-0 witness's `gap == 0.0` pins a fixture-guaranteed
-# constant, and the comparator's `gap drift` branch compares 0.0 to 0.0. Neither
-# can distinguish "stores demand.gap" from "stores the constant 0.0" — a
-# gap=0.0 hardcode in priced_features_from survives. This gate drives an oracle
-# that stamps each priced demand with a KNOWN nonzero certified gap (a pure
-# function of the agent id, injected — never a read of demand.gap), so the
-# captured gap has a non-constant oracle to pin it against. The bundle and payoff
-# stay byte-identical (the gap is a certificate, consumed only by the reporting
-# tally, so the walk trajectory is unchanged), keeping the A-vs-B / A-vs-shard
-# comparator valid while checking the gap-capture wiring.
+# Every family oracle prices Demand.exact, so every captured
+# PricedFeature.gap is exactly 0.0 — a constant that cannot distinguish
+# "stores demand.gap" from "stores 0.0". This gate wraps the oracle to stamp
+# each priced demand with a KNOWN nonzero certified gap (a pure function of
+# the agent id, never a read of demand.gap). The bundle and payoff stay
+# byte-identical — the gap is a certificate consumed only by the reporting
+# tally, so the walk trajectory is unchanged and the feature/shard comparator
+# stays valid.
 
 
 def _injected_gap(agent_id: int) -> float:
-    # A distinct positive gap per agent, injected by the oracle below and
-    # recomputed here as the witness oracle. Not a read of any captured field:
-    # the same fixture math on both sides, the pattern the eps/phi oracles use.
+    # A distinct positive gap per agent, injected by the wrapper below and
+    # recomputed here as the expected value.
     return 0.5 + 0.25 * int(agent_id)
 
 
@@ -1646,14 +1544,11 @@ class _InexactGapOracle(Oracle):
 
 
 def _assert_gap_field_witness(records: Sequence[StepRecord]) -> None:
-    """Independent field-level check on the captured priced-feature gap.
+    """Every captured ``PricedFeature.gap`` equals the injected gap.
 
-    Pins each captured ``PricedFeature.gap`` against the KNOWN gap the oracle
-    injected for that agent (:func:`_injected_gap`), recomputed test-side from
-    the agent id — never read back from the record. Requires at least one
-    non-zero gap so a ``gap=0.0`` (or any drop-the-gap) capture bug has a real
-    value to check. The whole gap stream is checked, not one element, so a
-    scale/shift/swap of the gap field fails wholesale too.
+    :func:`_injected_gap` is recomputed test-side from the agent id — never
+    read back from the record — and the whole gap stream is checked, with at
+    least one non-zero value required.
     """
     checked = 0
     nontrivial = 0
@@ -1673,8 +1568,8 @@ def _assert_gap_field_witness(records: Sequence[StepRecord]) -> None:
         "no priced-feature gap was witnessed"
     )
     assert nontrivial > 0, (
-        "every injected gap read ~0.0 — the gap oracle has no non-constant value"
-        " to distinguish a gap=0.0 hardcode"
+        "every injected gap read ~0.0 — nothing distinguishes a gap=0.0"
+        " hardcode"
     )
 
 
@@ -1682,19 +1577,15 @@ def _gate_nslack_gap(arrays, problem, batch_only_map, backend) -> None:
     inexact = _with_oracle(problem, _InexactGapOracle(problem.oracle))
     per_agent = _nslack_serial(arrays, inexact, inexact.features, backend)
     _assert_nslack_records_exercised(per_agent.step_records)
-    # Independent oracle: the captured gap holds the injected per-agent certified
-    # gap, not the fixture-constant 0.0 the exact oracles all yield.
     _assert_gap_field_witness(per_agent.step_records)
 
-    # Axis 1 — features: batched features, same oracle (same gaps).
+    # Feature axis (same wrapped oracle, same gaps), shard axis, then both.
     batched = _nslack_serial(arrays, inexact, batch_only_map, backend)
     _assert_records_equivalent(per_agent.step_records, batched.step_records)
 
-    # Axis 2 — shard: per-agent features, interleaved LocalCluster.
     folded = _nslack_cluster(arrays, inexact, inexact.features, backend, 2)
     _assert_records_equivalent(per_agent.step_records, folded)
 
-    # Combined — batched features and interleaved shard.
     folded_batched = _nslack_cluster(arrays, inexact, batch_only_map, backend, 2)
     _assert_records_equivalent(per_agent.step_records, folded_batched)
 
@@ -1798,24 +1689,24 @@ def _independent_max_weight(
     return out
 
 
-def _nslack_schedule_walk_with_weight_oracle(
+def _nslack_schedule_walk_recording_duals(
     arrays, problem, features, backend, transport
 ) -> tuple[WalkOutcome, dict[int, dict[int, float]]]:
-    """A dual-informed NSlack walk plus a per-iteration max_weight oracle.
+    """A dual-informed NSlack walk plus per-iteration expected max_weights.
 
     The driver builds the schedule payload by calling
-    ``DualConcentration.from_cut_duals(master.dual_values())`` each iteration.
-    We intercept that classmethod to record its ground-truth per-cut duals and
-    recompute the per-agent max/sum share independently (a distinct reduction),
-    giving the weight witness an oracle the captured ``max_weights`` never feed.
-    Keyed by the payload index (schedule iterations are appended in loop order).
+    ``DualConcentration.from_cut_duals(master.dual_values())`` each
+    iteration. Intercept that classmethod to record its ground-truth per-cut
+    duals and recompute the per-agent max/sum share by a distinct reduction
+    the captured ``max_weights`` never feed. Keyed by the payload index
+    (schedule iterations are appended in loop order).
     """
-    oracle: dict[int, dict[int, float]] = {}
+    expected: dict[int, dict[int, float]] = {}
     index = [0]
     original = _informed_schedule_module.DualConcentration.from_cut_duals.__func__
 
     def _recording(cls, duals):
-        oracle[index[0]] = _independent_max_weight(dict(duals))
+        expected[index[0]] = _independent_max_weight(dict(duals))
         index[0] += 1
         return original(cls, duals)
 
@@ -1830,40 +1721,37 @@ def _nslack_schedule_walk_with_weight_oracle(
         _informed_schedule_module.DualConcentration.from_cut_duals = classmethod(
             original
         )
-    return outcome, oracle
+    return outcome, expected
 
 
 def _assert_schedule_max_weight_witness(
     stream: Sequence[DualConcentration],
-    weight_oracle: dict[int, dict[int, float]],
+    expected_weights: dict[int, dict[int, float]],
     *,
     require_nontrivial: bool,
 ) -> None:
-    """Independent field-level check on the captured schedule max_weights.
+    """Each captured ``max_weight`` equals ``max(support)/sum(support)``.
 
-    The A-vs-B / A-vs-shard gate compares the two paths' max_weights against
-    each other. This also checks each captured ``max_weight`` against
-    ``max(support)/sum(support)`` recomputed from the ground-truth per-cut duals
-    by an independent reduction, not read back from the payload. On families
-    where every support agent holds a single
-    cut the true weight is a constant ``1.0`` (so only the ``0.95`` hardcode is
-    distinguishable); ``require_nontrivial`` demands at least one weight strictly
-    below ``1.0``, which the multi-cut family must produce so the ``min`` vs
-    ``max`` distinction is exercised.
+    The expected values are recomputed from the ground-truth per-cut duals,
+    never read back from the payload. Where every support agent holds a
+    single cut the true weight is the constant ``1.0``;
+    ``require_nontrivial`` demands at least one weight strictly below
+    ``1.0``, which the multi-cut family must produce so the ``min`` vs
+    ``max`` distinction is real.
     """
-    assert stream, "no schedule concentration captured — nothing to witness"
-    assert len(stream) == len(weight_oracle), (
-        "schedule payload stream and weight-oracle stream disagree in length"
+    assert stream, "no schedule concentration captured — nothing to check"
+    assert len(stream) == len(expected_weights), (
+        "schedule payload stream and expected-weight stream disagree in length"
     )
     checked = 0
     nontrivial = 0
     for i, conc in enumerate(stream):
-        expected = weight_oracle[i]
+        expected = expected_weights[i]
         captured = _conc_map(conc)
         assert set(captured) == set(expected), (
-            f"schedule support at payload {i} differs from the independent"
+            f"schedule support at payload {i} differs from the recomputed"
             f" dual support: captured-only {sorted(set(captured) - set(expected))[:3]},"
-            f" oracle-only {sorted(set(expected) - set(captured))[:3]}"
+            f" expected-only {sorted(set(expected) - set(captured))[:3]}"
         )
         for agent, weight in captured.items():
             assert _close(weight, expected[agent]), (
@@ -1875,13 +1763,13 @@ def _assert_schedule_max_weight_witness(
             if expected[agent] < 1.0 - 1e-9:
                 nontrivial += 1
     assert checked > 0, (
-        "no support agent was witnessed"
+        "no support agent was checked"
     )
     if require_nontrivial:
         assert nontrivial > 0, (
-            "every recomputed max_weight was 1.0 (single-cut support), so the"
-            " min-vs-max distinction cannot bite — this family must hold a"
-            " support agent with unequal multi-cut dual mass"
+            "every recomputed max_weight was 1.0 (single-cut support) — this"
+            " family must hold a support agent with unequal multi-cut dual"
+            " mass"
         )
 
 
@@ -1904,20 +1792,16 @@ def _nslack_schedule_walk(
 def _gate_schedule(
     arrays, problem, batch_only_map, backend, *, require_nontrivial_weight
 ) -> None:
-    # Reference: per-agent features, serial shard, dual-informed schedule.
-    # Instrumented so the ground-truth per-cut duals are recorded each schedule
-    # build, giving the max_weight witness an oracle independent of the payload.
-    per_agent, weight_oracle = _nslack_schedule_walk_with_weight_oracle(
+    # Reference: per-agent features, serial shard, dual-informed schedule,
+    # instrumented to record the ground-truth per-cut duals each schedule
+    # build.
+    per_agent, expected_weights = _nslack_schedule_walk_recording_duals(
         arrays, problem, problem.features, backend, SerialTransport()
     )
     _assert_schedule_records_exercised(per_agent.schedule_concentrations)
-    # Field-level oracle: the captured max_weights hold max(support)/sum(support)
-    # recomputed from the master's own duals, not merely agree with the
-    # (identically-captured) other path. The multi-cut family (qkp) must produce
-    # a weight strictly below 1.0 so the min-vs-max distinction bites.
     _assert_schedule_max_weight_witness(
         per_agent.schedule_concentrations,
-        weight_oracle,
+        expected_weights,
         require_nontrivial=require_nontrivial_weight,
     )
 
@@ -1963,10 +1847,9 @@ def _gate_schedule(
 )
 def test_nslack_schedule_concentration_wholesale_capture_toy(backend) -> None:
     toy = load_toy()
-    # Every toy support agent holds a single cut, so its true max_weight is a
-    # constant 1.0; the weight witness still pins that constant (catching the
-    # 0.95 hardcode) but cannot bite a min-vs-max swap, so no non-trivial weight
-    # is demanded here — the qkp variant carries that obligation.
+    # Every toy support agent holds a single cut, so its true max_weight is
+    # the constant 1.0 and a min-vs-max swap is indistinguishable here; the
+    # qkp variant carries that obligation.
     _gate_schedule(
         toy,
         toy_problem(toy),
@@ -1979,8 +1862,8 @@ def test_nslack_schedule_concentration_wholesale_capture_toy(backend) -> None:
 @needs_gurobi
 def test_nslack_schedule_concentration_wholesale_capture_qkp() -> None:
     qkp = load_qkp()
-    # qkp forms support agents holding several cuts of unequal dual mass, so the
-    # true max_weight is strictly below 1.0 for at least one support agent.
+    # qkp forms support agents holding several cuts of unequal dual mass, so
+    # at least one true max_weight sits strictly below 1.0.
     _gate_schedule(
         qkp,
         qkp_problem(qkp),
@@ -1992,19 +1875,17 @@ def test_nslack_schedule_concentration_wholesale_capture_qkp() -> None:
 
 # --- wholesale-capture perturbation checks ------------------------------------
 #
-# One perturbation per filter stage proves the wholesale-capture check fails when
-# the batched path diverges. Each perturbation is an optimized-only
-# (``features_batch``-only) FeatureMap, so the divergence reaches
-# ``feature_rows`` and the formulation capture without being intercepted by a
-# both-supplied conformance check. Every perturbation is above the ``1e-13``
-# comparison tolerance or crosses a discrete threshold: exact-zero support,
-# aggregate key bytes, install threshold, or emit threshold.
+# One perturbation per filter stage, each proving the wholesale-capture
+# comparator fails when the batched path diverges. Each perturbation is an
+# optimized-only (``features_batch``-only) FeatureMap, so the divergence
+# reaches ``feature_rows`` and the formulation capture without being
+# intercepted by a both-supplied conformance check. Every perturbation sits
+# above the 1e-13 comparison tolerance or crosses a discrete threshold:
+# exact-zero support, aggregate key bytes, install threshold, emit threshold.
 #
-# Each test first asserts the
-# clean ``*_batch_only`` map passes the same comparator (so the check is not
-# already failing for an unrelated reason), then asserts the perturbation trips it.
-# The comparators are reused verbatim (``_assert_records_equivalent`` /
-# ``_assert_schedule_equivalent``) — no reimplementation.
+# Each test first asserts the clean ``*_batch_only`` map passes the same
+# comparator (so it is not already failing for an unrelated reason), then
+# asserts the perturbation trips it. The comparators are reused verbatim.
 
 
 def _nslack_records(arrays, problem, features, backend):
@@ -2029,12 +1910,11 @@ def _it0_feature_phi(records, agent_id: int) -> bytes | None:
     return None
 
 
-# Stage 1 — feature phi value (continuous). A nonzero phi
-# coefficient is lifted by 1e-6. The drift reaches the admit-side
-# violation (phi.theta + eps - u) on the matched-shape backend, and changes the
-# walk's convergence shape on the more sensitive backend — either way the check
-# fails. Since it-0 always aligns, its priced_features phi bytes are
-# asserted divergent directly.
+# Stage 1 — feature phi value (continuous). A nonzero phi coefficient is
+# lifted by 1e-6. The drift reaches the admit-side violation
+# (phi.theta + eps - u) on the matched-shape backend and changes the
+# convergence shape on the more sensitive one; iteration 0 always aligns, so
+# its phi bytes are asserted divergent directly.
 @pytest.mark.parametrize(
     "backend",
     [
@@ -2049,24 +1929,20 @@ def test_perturbation_phi_value_nslack_rejects_divergence(backend) -> None:
     clean = _nslack_records(toy, problem, toy_feature_map_batch_only(toy), backend)
     reference = _nslack_records(toy, problem, problem.features, backend)
     _assert_records_equivalent(reference, clean)
-    # The perturbation must fail (admit-violation drift on a matched
-    # shape, or the stream-length check when the drift moves the
-    # convergence shape — both are the comparator refusing the divergence).
+    # The perturbation must fail: an admit-violation drift on a matched
+    # shape, or the stream-length check when the drift moves the shape.
     perturbed = _nslack_records(
         toy, problem, toy_phi_value_perturbation(toy), backend
     )
     with pytest.raises(AssertionError):
         _assert_records_equivalent(reference, perturbed)
-    # Field-level witness: the it-0 priced_features phi bytes for the
-    # perturbed agent differ from the per-agent reference — the value
-    # drift is captured in phi, not hidden.
+    # The it-0 phi bytes for the perturbed agent must differ — the value
+    # drift lands in the captured phi.
     assert _it0_feature_phi(perturbed, 0) != _it0_feature_phi(reference, 0)
 
 
-# Stage 2 — feature support (discrete). An exact-zero phi entry becomes 1e-12:
-# the support mask flips rather than moving within tolerance. The flipped phi
-# bytes are witnessed at it-0; the full
-# comparator trips on the admit-side violation the perturbed phi feeds.
+# Stage 2 — feature support (discrete). An exact-zero phi entry becomes
+# 1e-12: the support mask flips rather than moving within tolerance.
 @pytest.mark.parametrize(
     "backend",
     [
@@ -2084,27 +1960,23 @@ def test_perturbation_phi_support_nslack_rejects_divergence(backend) -> None:
     perturbed = _nslack_records(
         toy, problem, toy_phi_support_perturbation(toy), backend
     )
-    # The comparator catches the perturbation (the phi feeds phi.theta + eps -
-    # u); the 1e-12 lift is above the comparison tolerance. The
-    # specific failure location is vertex/backend-dependent: with predeclared
-    # u-columns the gurobi warm walk re-cycles the malformed cut to
-    # a different iteration count (a length mismatch), while highs trips on the
-    # admit-side violation the perturbed phi feeds — both are the captured drift
-    # this gate pins (the malformed input is never silently absorbed). The phi
-    # bytes (the zero-mask) flip is witnessed next.
+    # Where it trips is vertex/backend-dependent: with predeclared u-columns
+    # the gurobi warm walk re-cycles the malformed cut to a different
+    # iteration count (a length mismatch), while highs trips on the
+    # admit-side violation the perturbed phi feeds.
     with pytest.raises(
         AssertionError, match="admit_violations|different number of iterations"
     ):
         _assert_records_equivalent(reference, perturbed)
-    # Support-mask witness: an exact-zero phi entry became nonzero, so the it-0
-    # priced_features phi bytes differ (the zero-mask is part of those bytes).
+    # The exact-zero phi entry became nonzero, so the it-0 phi bytes differ
+    # (the zero-mask is part of those bytes).
     assert _it0_feature_phi(perturbed, 0) != _it0_feature_phi(reference, 0)
 
 
-# Stage 3 — feature eps (continuous). One row's eps is lifted by 1e-6.
-# eps enters the cut row and the admit-side violation, so the comparator
-# fails on the admit-violation comparator (stable on both backends — the
-# eps lift does not move the convergence shape here).
+# Stage 3 — feature eps (continuous). One row's eps is lifted by 1e-6. eps
+# enters the cut row and the admit-side violation, so the failure lands on
+# admit_violations (stable on both backends — the lift does not move the
+# convergence shape here).
 @pytest.mark.parametrize(
     "backend",
     [
@@ -2137,15 +2009,12 @@ def _with_oracle(problem: FamilyProblem, oracle: object) -> FamilyProblem:
     )
 
 
-# Stage 4 — price payoff (continuous). The priced demand stream is
-# the frozen conformance field the capture records in priced_features. A
-# divergent price (agent 0's payoff lifted by 1e-6, bundle byte-identical) makes
-# that stream differ across a clean-vs-perturbed pair: on OneSlack the shape is
-# preserved, so the comparator fails precisely on the priced_features "payoff
-# drift" check — the continuous price field. (The batched price path's own
-# either-one conformance — price_batch vs price — is perturbed at its real
-# price_demands call site by _DivergentBatchToy in test_either_one.py; this
-# drives the same price drift through the wholesale demand stream.)
+# Stage 4 — price payoff (continuous). Agent 0's payoff is lifted by 1e-6
+# with the bundle byte-identical. On OneSlack the walk shape is preserved,
+# so the failure lands precisely on the priced_features "payoff drift"
+# check. (price_batch vs price itself is perturbed at its real call site by
+# _DivergentBatchToy in test_either_one.py; this drives the same drift
+# through the wholesale demand stream.)
 @pytest.mark.parametrize(
     "backend",
     [
@@ -2156,13 +2025,13 @@ def _with_oracle(problem: FamilyProblem, oracle: object) -> FamilyProblem:
 def test_perturbation_price_payoff_oneslack_rejects_divergence(backend) -> None:
     toy = load_toy()
     problem = toy_problem(toy)
-    # Non-vacuity guard: the clean (unperturbed-oracle) batched path passes.
+    # The clean (unperturbed-oracle) batched path must pass first.
     reference = _oneslack_records(toy, problem, problem.features, backend)
     _assert_records_equivalent(
         reference, _oneslack_records(toy, problem, toy_feature_map_batch_only(toy), backend)
     )
-    # The perturbation rides the oracle, not the features — but it reaches the same
-    # priced_features demand stream the wholesale gate compares.
+    # The perturbation rides the oracle, not the features, but reaches the
+    # same priced_features demand stream the gate compares.
     perturbed_problem = _with_oracle(problem, toy_perturbation_price_oracle(toy))
     perturbed = _oneslack_records(
         toy, perturbed_problem, perturbed_problem.features, backend
@@ -2171,16 +2040,13 @@ def test_perturbation_price_payoff_oneslack_rejects_divergence(backend) -> None:
         _assert_records_equivalent(reference, perturbed)
 
 
-# Stage 5 — NSlack emit rc threshold (straddle ctx.tolerance). The emit-stage
-# field is priced_reduced_costs: rc = payoff - u captured for every priced agent
-# before the rc > ctx.tolerance emit threshold (the survivor-inclusive
-# capture). The same price drift (agent 0's payoff +1e-6) drives rc
-# across paths: on gurobi the policy walk cycles to the same length on both
-# paths, so the comparator fails precisely on the priced_reduced_costs drift —
-# the emit-threshold input; a drift this size at an agent sitting near
-# ctx.tolerance flips its emit decision. (On highs the drift moves the
-# convergence shape, so the stream-length check fails instead — still the comparator
-# refusing the divergence.)
+# Stage 5 — NSlack emit rc threshold (straddle ctx.tolerance). rc =
+# payoff - u is captured for every priced agent before the
+# rc > ctx.tolerance emit threshold. The same price drift (agent 0's payoff
+# +1e-6) drives rc apart: on gurobi the policy walk cycles to the same
+# length on both paths, so the failure lands precisely on the
+# priced_reduced_costs drift. (On highs the drift moves the convergence
+# shape and the stream-length check fails instead, so this is gurobi-only.)
 @needs_gurobi
 def test_perturbation_emit_rc_nslack_rejects_divergence() -> None:
     toy = load_toy()
@@ -2218,23 +2084,21 @@ def test_perturbation_aggregate_bytes_oneslack_rejects_divergence(backend) -> No
     perturbed = _oneslack_records(
         toy, problem, toy_aggregate_bytes_perturbation(toy), backend
     )
-    # The aggregate fields trip (aggregate_raw drift then the byte identity);
-    # the assertion message there is positional, so match-free is correct.
+    # The aggregate fields trip (aggregate_raw drift, then the byte
+    # identity); the assertion message there is positional, so no match.
     with pytest.raises(AssertionError):
         _assert_records_equivalent(reference, perturbed)
-    # Aggregate-key witness: the it-0 aggregate SHA-256 differs — the discrete row
-    # key flipped, exactly the bit a <=1e-13 aggregate drift would move.
+    # The it-0 aggregate SHA-256 flipped — the discrete row key moved —
+    # while the drift that flipped it exceeds the comparison tolerance.
     assert perturbed[0].aggregate_bytes != reference[0].aggregate_bytes
-    # ...while the magnitude that flipped it is larger than the comparison tolerance.
     assert abs(perturbed[0].aggregate_raw - reference[0].aggregate_raw) > TOL
 
 
-# Stage 7 — OneSlack install gate (discrete straddle ctx.tolerance). A single-
-# row 1e-6 phi lift the master cannot absorb keeps the aggregate
-# slack above ctx.tolerance at the iteration the clean path converges on, so the
-# install gate (violation > ctx.tolerance) keeps firing on the perturbed path —
-# the install decision straddles the threshold and the convergence shape
-# diverges, failing the comparator's stream-length check.
+# Stage 7 — OneSlack install gate (discrete straddle of ctx.tolerance). A
+# single-row 1e-6 phi lift the master cannot absorb keeps the aggregate
+# slack above ctx.tolerance at the iteration the clean path converges on, so
+# the install gate keeps firing on the perturbed path and the convergence
+# shape diverges.
 @pytest.mark.parametrize(
     "backend",
     [
@@ -2259,13 +2123,11 @@ def test_perturbation_install_gate_oneslack_rejects_divergence(backend) -> None:
     assert len(perturbed) != len(reference)
 
 
-# Stage 8 — Schedule DualConcentration. A 1e-6 phi lift moves the
-# master duals the driver-owned DualConcentration is condensed from, diverging
-# the NSlack dual-informed walk's convergence shape — so the schedule-
-# concentration stream length differs and _assert_schedule_equivalent hard-
-# fails. (On these families the support max_weights saturate at 1.0, so the
-# continuous weight field cannot be moved off the ceiling; the schedule field
-# is exercised through the shape/support divergence the dual shift induces.)
+# Stage 8 — Schedule DualConcentration. A 1e-6 phi lift moves the master
+# duals the driver-owned DualConcentration is condensed from, diverging the
+# dual-informed walk's convergence shape and hence the concentration stream
+# length. (The support max_weights saturate at 1.0 on these families, so the
+# continuous weight field cannot be moved off the ceiling.)
 @pytest.mark.parametrize(
     "backend",
     [

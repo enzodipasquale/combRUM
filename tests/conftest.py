@@ -26,17 +26,8 @@ def _mpi_available() -> bool:
     )
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "slow: repeated real solves, timing/RSS probes, or large synthetic"
-        " sweeps",
-    )
-    config.addinivalue_line(
-        "markers",
-        "requires_mpi: shells out to mpirun (skipped unless mpirun is on PATH"
-        " or COMBRUM_MPIRUN is set, and mpi4py is importable)",
-    )
+# Markers are declared in pyproject.toml [tool.pytest.ini_options] so
+# --strict-markers can reject typos.
 
 
 def pytest_collection_modifyitems(

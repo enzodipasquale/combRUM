@@ -72,8 +72,7 @@ def test_result_zero_active_cuts_valid() -> None:
     assert res.slack is None and res.active_set is None and res.dual is None
     assert res.metadata == {}
 
-    # objective has no sign constraint: a minimized negative loss must
-    # survive unflipped. Crosses the sign boundary a stray abs() would hide.
+    # objective has no sign constraint; a minimized loss can be negative.
     neg = FormulationResult(
         theta_hat=np.zeros(K), objective=-3.5, n_active_cuts=0
     )
@@ -92,9 +91,6 @@ def test_result_carries_opaque_active_set() -> None:
         active_set=installed,
         dual=dual_marker,
     )
-    # Pin every constructed field against the inputs, not just active_set:
-    # a nonzero cut count, a negative objective, and non-None opaque fields
-    # must all round-trip verbatim.
     np.testing.assert_array_equal(res.theta_hat, np.full(K, 2.0))
     assert res.objective == -3.5
     assert res.n_active_cuts == 2
@@ -105,9 +101,7 @@ def test_result_carries_opaque_active_set() -> None:
 
 def test_result_default_metadata_is_per_instance() -> None:
     # Default metadata must be a fresh dict per result, not a shared mutable
-    # default: one method's diagnostics must never leak into another's. The
-    # `== {}` checks elsewhere pass even under a shared empty dict, so pin the
-    # object identity and the write-isolation directly.
+    # default: one method's diagnostics must never leak into another's.
     r1 = FormulationResult(theta_hat=np.zeros(K), objective=0.0, n_active_cuts=0)
     r2 = FormulationResult(theta_hat=np.zeros(K), objective=0.0, n_active_cuts=0)
     assert r1.metadata == {} and r2.metadata == {}
@@ -125,9 +119,7 @@ def test_result_rejects_negative_active_cuts() -> None:
 
 
 def test_result_rejects_non_vector_theta_hat() -> None:
-    # Both non-(K,) shapes: a 2-D matrix and a 0-D scalar. A `ndim > 1`
-    # guard rejects the matrix but accepts the scalar, which is still not
-    # a one-dimensional (K,) vector.
+    # Neither a 2-D matrix nor a 0-D scalar is a (K,) vector.
     for bad in (np.zeros((K, K)), np.float64(3.0)):
         with pytest.raises(
             ValueError, match="theta_hat must be one-dimensional"
@@ -138,8 +130,6 @@ def test_result_rejects_non_vector_theta_hat() -> None:
 
 
 def test_result_rejects_non_finite_theta_hat() -> None:
-    # Cross both sides of the finiteness boundary: NaN and both infinities.
-    # A NaN-only guard would let +/-inf through.
     for bad in (
         np.array([0.0, np.nan]),
         np.array([0.0, np.inf]),
@@ -162,11 +152,10 @@ def test_result_arrays_read_only() -> None:
         with pytest.raises(ValueError):
             arr[0] = 9.0
 
-    # Freezing must not alter the payload: a read-only copy that drops or
-    # zeroes the values would still pass the writeable checks above.
+    # Freezing must not alter the values.
     np.testing.assert_array_equal(res.theta_hat, np.arange(K, dtype=np.float64))
     np.testing.assert_array_equal(res.slack, np.ones(N * S))
-    assert res.n_active_cuts == 2  # the nonzero count passed in must survive
+    assert res.n_active_cuts == 2
 
 
 # --- master-free formulation double ---------------------------------------
@@ -178,12 +167,11 @@ def test_formulation_abc_not_instantiable() -> None:
 
 
 class BestThetaFormulation(Formulation):
-    """Master-free double: walks the full contract with no master, no cuts.
+    """Master-free double -- no master, no cuts.
 
-    Queries a fixed deterministic path and publishes its best-evaluated
-    theta — not the last solve() query — exercising result-not-last-iterate,
-    n_active_cuts == 0, and dual/slack None at once. Assumes oracle payoffs
-    are <= 0, so the negated mean payoff is a nonnegative distance.
+    Walks a fixed query path and publishes its best-evaluated theta, not
+    the last solve() query. Assumes payoffs are <= 0, so the negated mean
+    payoff is a nonnegative violation.
     """
 
     _PATH = (0.0, 1.0, 2.0, 3.0)  # query scales; overshoots past the optimum
@@ -255,7 +243,7 @@ def test_master_free_walk_publishes_best_not_last() -> None:
     queries: list[np.ndarray] = []
     violations: list[float] = []
     progress: list[int] = []
-    for _ in range(4):  # >= 3 iterations: the path must genuinely overshoot
+    for _ in range(4):  # enough steps for the path to overshoot
         theta = formulation.solve()
         queries.append(np.array(theta, copy=True))
         ev = formulation.evaluate(price_all(theta, ctx))

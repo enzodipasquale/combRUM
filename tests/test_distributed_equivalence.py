@@ -168,7 +168,7 @@ def _data(arrays: Mapping[str, np.ndarray]) -> cb.Data:
     )
 
 
-def _observed_moment_oracle(arrays: Mapping[str, np.ndarray]) -> np.ndarray:
+def _observed_moment_by_hand(arrays: Mapping[str, np.ndarray]) -> np.ndarray:
     """Per-column observed moment ``(1/N) sum_i observed[i,k] * r[i,k]``."""
     r = np.asarray(arrays["observables"], dtype=np.float64)
     observed = np.asarray(arrays["observed"], dtype=bool)
@@ -213,10 +213,8 @@ def test_surface_uses_distinct_simulation_ids() -> None:
 
 @needs_highs
 def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
-    # non-degenerate moment seed (see _MOMENT_SEED above), so the observed
-    # reduction can be checked per column
     arrays = toy_family(_N, _K, _MOMENT_SEED)
-    expected_moment = _observed_moment_oracle(arrays)
+    expected_moment = _observed_moment_by_hand(arrays)
 
     # The per-column assertions below need nonzero, distinct coordinates.
     assert np.all(np.abs(expected_moment) > 1e-6)
@@ -234,8 +232,8 @@ def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
     assert serial.metadata["converged"] is True
 
     # The data is rationalised by theta_true (min regret 0), so the fit should
-    # recover theta_true's sign in every coordinate; sign(0) is 0, which also
-    # rules out theta stuck at its zero cold start.
+    # recover its sign per coordinate; sign(0) is 0, which also rules out a
+    # theta stuck at the zero cold start.
     theta_true_sign = np.sign(np.asarray(arrays["theta_true"], dtype=np.float64))
     assert not np.allclose(serial.theta_hat, 0.0, atol=1e-6)
     np.testing.assert_array_equal(
@@ -298,9 +296,8 @@ def test_bootstrap_distributed_matches_serial_with_observation_weights() -> None
         (LocalCluster(4, ranks_per_node=2), np.array([0, 2, 1, 3], dtype=np.int64)),
     )
     for cluster, expected_owners in clusters:
-        # Each run only exercises the cross-rank count reduction if every expected
-        # owner rank actually owns at least one rep. Pin the real ordered owner
-        # vector so the two-node case exercises node-interleaved ownership.
+        # Every expected owner rank should own at least one rep; the two-node
+        # case interleaves ownership across nodes.
         owners = cluster.run(lambda transport: _owner_vector(_B, transport))[0]
         np.testing.assert_array_equal(owners, expected_owners)
 
@@ -318,12 +315,8 @@ def test_bootstrap_distributed_matches_serial_with_observation_weights() -> None
             )
         )
 
-        # Aggregate pricing-call oracle, independent of the certify reduction:
-        # one wave prices all _B live reps every super-step, and each super-step
-        # prices the full N*S agent set once (split across ranks). So the run-wide
-        # count is N*S * _B * iterations. `iterations` is a rank-local count that
-        # the cross-rank count reduction never touches, so a certify() that
-        # published rank-local counts (skipping the sum) would diverge from this.
+        # Each super-step prices the full N*S agent set once per live rep
+        # (split across ranks), so the run-wide count is N*S * _B * iterations.
         expected_n_priced = _N * _S * _B * int(results[0].iterations)
         for result in results:
             np.testing.assert_array_equal(result.converged, serial.converged)
@@ -359,9 +352,7 @@ def test_split_axis_fit_routes_agent_values_without_dense_scatter() -> None:
             tolerance=TOLERANCE,
             max_iterations=MAX_ITERATIONS,
         )
-        # This rank's owned shard size, derived from the src ownership map
-        # rather than a hand-inlined modulo, so the byte floor below tracks
-        # the real sharding.
+        # this rank's owned shard size, for the byte bounds below
         owned_here = owned_agent_ids(_N * _S, transport.rank, transport.size)
         return (
             result,
@@ -373,35 +364,25 @@ def test_split_axis_fit_routes_agent_values_without_dense_scatter() -> None:
     size = 2
     results = LocalCluster(size).run(run_rank)
 
-    # Contiguous observation sharding gives each rank at most
-    # ceil(N*S / size) owned agents; a dense broadcast (every source routes
-    # to every rank) moves the full N*S map and blows past this per-rank
-    # ceiling while staying under the loose global N*S bound.
+    # Contiguous sharding gives each rank at most ceil(N*S / size) owned
+    # agents; a dense broadcast would move the full N*S map to every rank.
     owned_agents = (_N * _S + size - 1) // size
     for result, counts, bytes_moved, owned_here in results:
-        # Routing that delivers nothing (empty owner bucket) leaves theta_hat
-        # coincidentally on the same LP vertex as serial for this toy, so the
-        # equivalence check alone cannot see it. Convergence can: an empty
-        # route never installs the routed u/slack values, so the fit runs to
-        # max_iterations without a certificate.
+        # An empty route never installs the routed u/slack values, so the fit
+        # would hit max_iterations without converging.
         assert result.metadata["converged"] is True
         np.testing.assert_allclose(
             result.theta_hat, serial.theta_hat, rtol=1e-10, atol=1e-10
         )
         assert counts["sum_reproducible"] == 3
         assert counts["route_agent_values"] > 0
-        # Under-routing pin (empty bucket => 0 bytes): a converging nontrivial
-        # fit must route each rank its owned shard at least once, so total
+        # A converging fit routes each rank its owned shard at least once, so
         # routed bytes are at least one owned-shard delivery (owned_here*16).
-        # This kills the empty-route regression directly, not only via
-        # convergence, and owned_here > 0 for both ranks here.
         assert owned_here > 0
         assert bytes_moved["route_agent_values"] >= owned_here * 16
-        # Sparse routing: each rank only ever receives its owned shard, so
-        # per-rank bytes stay under route_calls*owned*16. A dense broadcast
-        # (route_calls*N*S*16) would exceed this ceiling. The ceiling sits
-        # strictly below the dense-broadcast floor, so the gap is real, not
-        # slack: owned*16 < N*S*16 whenever size > 1.
+        # Sparse routing: each rank only receives its owned shard, so per-rank
+        # bytes stay under route_calls*owned*16; a dense broadcast would need
+        # route_calls*N*S*16.
         assert owned_agents < _N * _S
         assert (
             bytes_moved["route_agent_values"]
@@ -409,11 +390,8 @@ def test_split_axis_fit_routes_agent_values_without_dense_scatter() -> None:
         )
 
 
-# Observed-feature rows with distinct nonzero column sums. The shared toy
-# fixture yields a degenerate empirical moment [1.0, 0.0] (column 0 uniformly
-# 1.0, column 1 cancelling), which cannot detect a reduction error confined to
-# one coordinate. These rows give each coordinate a distinct nonzero moment so
-# the cross-rank observed reduction is pinned per column.
+# Observed-feature rows with a distinct nonzero moment in every column, so
+# the cross-rank observed reduction can be checked per coordinate.
 _REDUCTION_ROWS = np.array(
     [
         [1.0, 2.0],
@@ -453,8 +431,8 @@ class _ObservedRowSurface(cb.Oracle, cb.FeatureMap):
         raise NotImplementedError
 
 
-def _column_mean_oracle(rows: np.ndarray, n_obs: int) -> np.ndarray:
-    """Per-column mean via an explicit block loop (independent of numpy sum)."""
+def _column_mean_by_hand(rows: np.ndarray, n_obs: int) -> np.ndarray:
+    """Per-column mean via an explicit block loop."""
     k = int(rows.shape[1])
     acc = [0.0] * k
     for i in range(int(n_obs)):
@@ -466,7 +444,7 @@ def _column_mean_oracle(rows: np.ndarray, n_obs: int) -> np.ndarray:
 def test_distributed_observed_reduction_recovers_per_column_moment() -> None:
     rows = _REDUCTION_ROWS
     n_obs = int(rows.shape[0])
-    expected = _column_mean_oracle(rows, n_obs)
+    expected = _column_mean_by_hand(rows, n_obs)
 
     def _model_rows() -> cb.Model:
         surface = _ObservedRowSurface(rows)
@@ -492,13 +470,9 @@ def test_distributed_observed_reduction_recovers_per_column_moment() -> None:
             np.testing.assert_allclose(moment, expected, rtol=0.0, atol=1e-12)
 
 
-# Per-rank pricing-gap tallies with distinct nonzero worst gaps. The split-toy
-# and observed-row surfaces price only exact demands (gap 0), so the bootstrap
-# certification assertions never leave the trivial all-zero case: n_inexact and
-# the cross-rank worst_gap MAX are only exercised where every input is 0. These
-# rows give each rank a different nonzero worst gap so the SUM of inexact counts
-# and the MAX of worst gaps are both pinned to non-degenerate values that a
-# rank-local (unreduced) certify would move.
+# The toy surfaces above price only exact demands (gap 0), so certification
+# there never leaves the all-zero case; these tallies give each rank a distinct
+# nonzero worst gap to exercise the count SUM and worst-gap MAX.
 def _certify_across_ranks(
     per_rank: dict[int, tuple[int, int, float]], size: int
 ) -> list[dict[str, object]]:
@@ -514,11 +488,8 @@ def _certify_across_ranks(
 def test_distributed_certify_reduces_inexact_counts_and_worst_gap() -> None:
     size = 3
     # Each rank inexact with a distinct worst gap, so the global MAX (0.3)
-    # differs from every rank-local worst (0.1, 0.2, 0.3): a certify that
-    # skipped the cross-rank MAX would publish the rank-local worst on ranks
-    # 0 and 1.
+    # differs from the rank-local worst on ranks 0 and 1.
     per_rank = {0: (10, 1, 0.1), 1: (10, 2, 0.2), 2: (10, 3, 0.3)}
-    # Independent hand oracle over the per-rank inputs (not a combrum accessor):
     expected_priced = sum(row[0] for row in per_rank.values())  # 30
     expected_inexact = sum(row[1] for row in per_rank.values())  # 6
     expected_worst = max(row[2] for row in per_rank.values())  # 0.3
@@ -532,9 +503,8 @@ def test_distributed_certify_reduces_inexact_counts_and_worst_gap() -> None:
 
 def test_distributed_certify_propagates_unknown_gap() -> None:
     size = 3
-    # One rank reports an unknown (inf) bound; the others are exact. The inf must
-    # ride the cross-rank MAX to every rank (worst_gap_unknown True) and the lone
-    # inexact call must survive the cross-rank count SUM.
+    # One rank reports an unknown (inf) bound; it must reach every rank via
+    # the cross-rank MAX, and the lone inexact call via the count SUM.
     per_rank = {0: (5, 1, float("inf")), 1: (5, 0, 0.0), 2: (5, 0, 0.0)}
     expected_priced = sum(row[0] for row in per_rank.values())  # 15
 

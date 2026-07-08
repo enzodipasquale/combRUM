@@ -96,13 +96,9 @@ def test_no_schedule_fit_allocates_no_last_resolved(monkeypatch) -> None:
     assert outcome.diagnostics.converged
     assert outcome.diagnostics.iterations == 1
 
-    # Pin the no-penalty convergence floor to min_iterations exactly. The zero
-    # step is convergent every iteration (violation 0, pure LP), so acceptance
-    # is held off only by the floor. With min_iterations=2 the floor is 2, so
-    # the loop accepts at the iteration whose post-increment count first reaches
-    # 2: iterations lands on 2. A +/-1 drift of the floor (e.g. the no-penalty
-    # branch reading min_iterations + 1) would shift acceptance to 3, so this
-    # equality certifies the floor value the previous run cannot pin.
+    # The zero step is convergent every iteration (violation 0, pure LP), so
+    # only min_iterations holds acceptance off: with a floor of 2 the loop
+    # must accept exactly when the post-increment count reaches 2.
     floored = run_fit(
         _ctx(),
         _Oracle(),
@@ -126,9 +122,7 @@ def test_loop_config_rejects_non_integer_and_contradictory_bounds() -> None:
             "min_iterations",
         ),
         ({"max_iterations": 2, "min_iterations": 3}, ValueError, "min_iterations"),
-        # Numeric lower bounds: an empty loop (max_iterations=0) and a negative
-        # floor are both rejected. These pin the `< 1` / `< 0` guards, which the
-        # type/contradiction cases above leave free to slide to `< 0` / dropped.
+        # An empty loop and a negative floor are rejected on value, not type.
         ({"max_iterations": 0}, ValueError, "max_iterations"),
         ({"max_iterations": 1, "min_iterations": -1}, ValueError, "min_iterations"),
     ):
@@ -139,10 +133,8 @@ def test_loop_config_rejects_non_integer_and_contradictory_bounds() -> None:
     assert int(config.max_iterations) == 2
     assert int(config.min_iterations) == 1
 
-    # The min == max boundary is legal: a floor equal to the cap just forces the
-    # loop to run to the cap before accepting. Pinning this edge as valid stops
-    # the `min > max` guard from sliding to `min >= max`, which the strict
-    # min=3/max=2 case above cannot distinguish.
+    # min == max is legal: a floor equal to the cap just forces the loop to
+    # run to the cap before accepting.
     equal_bounds = LoopConfig(max_iterations=2, min_iterations=2)
     assert int(equal_bounds.min_iterations) == int(equal_bounds.max_iterations) == 2
 
@@ -167,8 +159,6 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
         def set_penalty(self, ref, weight) -> None:
             self.penalty_calls += 1
             self.weights.append(float(weight))
-            # Record the anchor theta the owner installs each iteration so the
-            # static-vs-dynamic penalty_ref branch is observable, not discarded.
             self.refs.append(tuple(np.asarray(ref, dtype=np.float64).ravel()))
 
         def solve(self) -> None:
@@ -195,12 +185,9 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     def fake_resolve_price(*args, **kwargs):  # type: ignore[no-untyped-def]
         return object()
 
-    # Every step admits CUTS_PER_STEP cuts and reports a nonzero violation, so
-    # the loop never converges early and runs the full three iterations. The
-    # nonzero, constant progress makes the non-owner `active_cuts` column a
-    # running total (CUTS_PER_STEP, 2*CUTS_PER_STEP, 3*CUTS_PER_STEP) that is
-    # distinct both from a hardcoded 0 and from the single-step progress, so the
-    # `else cuts_admitted` fallback is pinned by identity, not by collapse to 0.
+    # Every step admits CUTS_PER_STEP cuts at nonzero violation, so the loop
+    # never converges early and the non-owner active_cuts column becomes a
+    # running total (4, 8, 12) — distinct from both 0 and single-step progress.
     CUTS_PER_STEP = 4
 
     def fake_fit_step(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -213,10 +200,9 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     monkeypatch.setattr(driver_mod, "_resolve_price", fake_resolve_price)
     monkeypatch.setattr(driver_mod, "fit_step", fake_fit_step)
 
-    # A formulation whose LP solve returns a fixed nonzero theta, distinct from
-    # the static anchor below. Keeping query != static_ref is what makes the
-    # penalty_ref branch observable: with a zeros-solving formulation and no
-    # theta_init both anchors collapse to the origin and the branch is dead.
+    # solve() returns THETA_SOLVE while theta_init is THETA_INIT; keeping the
+    # two anchors distinct is what makes the static-vs-dynamic penalty_ref
+    # branch observable (with both at the origin the branch would be dead).
     THETA_SOLVE = 0.5
     THETA_INIT = 0.25
 
@@ -225,17 +211,10 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             return np.full(self.ctx.K, THETA_SOLVE, dtype=np.float64)
 
     def per_rank(transport, *, penalty_ref):
-        # Every rank gets a real spy master so the non-owner half of the
-        # "master calls only on owner rank" claim is actually observed:
-        # rank 0 (non-owner) must record zero dual/penalty/objective calls.
-        # A driver bug that dropped the `rank != owner_rank` guard in
-        # _dual_payload/_penalty_solve would tick rank 0's counters here.
-        #
-        # Activity is set to "iterations" with a capturing sink so the
-        # per-iteration objective / active_cuts read path actually runs. That
-        # path also owner-guards the master reads, so a bug that dropped the
-        # rank guard there would either tick rank 0's objective_calls or leak
-        # the owner's objective/active_cuts onto the non-owner's emitted row.
+        # Both ranks get a spy master, so rank 0 (non-owner) recording zero
+        # dual/penalty/objective calls is observed, not assumed. The
+        # "iterations" activity sink exercises the per-iteration
+        # objective/active_cuts read path, which is owner-guarded too.
         master = _Master()
         sink = _CapturingSink()
         activity = ActivityRun(
@@ -281,16 +260,11 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             tuple(master.refs),
         )
 
-    # Independent oracle for the decayed penalty schedule. With qp_weight=1.0 and
-    # decay=1 the linear-to-zero rule weight(it) = qp_weight * max(0, 1 - it/decay)
-    # gives 1.0 at it=0 and 0.0 from it=1 on, so over three iterations the owner
-    # installs exactly (1.0, 0.0): the positive QP solve, then the one necessary
-    # revert solve to restore a pure LP. Later zero-weight iterations must not
-    # keep solving an already-pure master. Recompute both from the config values
-    # here rather than reading any driver local, so a non-decaying
-    # `weight_t = qp_weight` constant (owner sees more positive weights), an
-    # off-by-one `it + 1` shift (owner sees no positive solve), and a dropped
-    # post-decay guard (owner sees an extra 0.0) all diverge from this.
+    # weight(it) = qp_weight * max(0, 1 - it/decay), recomputed here from the
+    # config values rather than read from any driver local. With qp_weight=1.0
+    # and decay=1 the owner installs exactly (1.0, 0.0): the QP solve, then
+    # one revert solve back to a pure LP — later zero-weight iterations must
+    # not keep re-solving an already-pure master.
     qp_weight, decay = 1.0, 1
     expected_weights = tuple(
         qp_weight * max(0.0, 1.0 - it / decay)
@@ -298,39 +272,21 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     )
     final_weight = expected_weights[-1]
 
-    # Independent oracle for the installed penalty anchor (ref) schedule. The
-    # driver picks ref_t = query (the LP-solved theta) when penalty_ref ==
-    # "dynamic", else static_ref = theta_init. With the fixtures above those two
-    # anchors are deliberately distinct: solve() returns THETA_SOLVE and
-    # theta_init is THETA_INIT. So on the owner the static run installs
-    # (THETA_INIT,)*2 and the dynamic run installs (THETA_SOLVE,)*2; the
-    # non-owner installs nothing. Hand-build both schedules from the fixture
-    # scalars, never from a driver local. A branch collapse -- ref_t = query
-    # always (static run drifts onto THETA_SOLVE) or ref_t = static_ref always
-    # (dynamic run drifts onto THETA_INIT) -- makes exactly one of the two runs
-    # diverge, so pinning both anchors kills the whole penalty_ref branch.
+    # The driver anchors the penalty at the LP-solved theta when penalty_ref
+    # is "dynamic" and at theta_init when "static". Hand-build both expected
+    # anchor schedules from the fixture scalars: the static run must install
+    # (THETA_INIT,)*2, the dynamic run (THETA_SOLVE,)*2, the non-owner nothing.
     static_ref_owner = tuple((THETA_INIT,) for _ in range(2))
     dynamic_ref_owner = tuple((THETA_SOLVE,) for _ in range(2))
 
-    # Three iterations run (violation stays 1.0, so the loop hits max_iterations).
-    # Rank 0 (non-owner) records no master calls; every emitted row carries
-    # objective=None (the owner-guarded read yields None off-owner) and an
-    # active_cuts that is the running cuts_admitted total: 4, 8, 12 for
-    # CUTS_PER_STEP=4. That sequence is the independent oracle -- distinct from a
-    # hardcoded (0, 0, 0) and from an `else step.progressed` fallback (4, 4, 4),
-    # so both siblings of the fallback regression die. It installs no penalty
-    # (empty weights, empty refs) and reports final_penalty_weight 0.0. Rank 1
-    # (owner) makes exactly one dual_values call: the first sweep is forced
-    # full, the second prices a QP-derived theta and is forced full again, and
-    # only the third may consult LP duals. It makes two set_penalty/solve calls
-    # (QP, then LP revert), and three objective reads (=7.5 each, the master
-    # fixture's value); every owner row carries active_cuts=9 (the master
-    # fixture's n_active_cuts, read instead of cuts_admitted); it installs the
-    # decayed weights above at the branch-picked anchor and publishes at
-    # final_weight.
-    # Dropping either owner guard would flip rank 0's objective off None or its
-    # active_cuts onto 9; dropping the owner's n_active_cuts read would slide
-    # rank 1 onto the (4, 8, 12) totals.
+    # Violation stays 1.0, so all three iterations run. Rank 0 (non-owner):
+    # no master calls, objective None on every row, active_cuts is the running
+    # cuts_admitted total (4, 8, 12), no penalty installed. Rank 1 (owner):
+    # exactly one dual_values call — the first sweep is forced full and the
+    # second reprices a QP-derived theta, so only the third consults LP duals —
+    # two set_penalty/solve calls (QP, then LP revert), three objective reads
+    # of the fixture's 7.5, and active_cuts=9 from the master rather than the
+    # cuts_admitted total.
     assert LocalCluster(2).run(lambda t: per_rank(t, penalty_ref="static")) == [
         (0, 0, 0, 0, (None, None, None), (4, 8, 12), (), 0.0, ()),
         (

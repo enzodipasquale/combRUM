@@ -1,31 +1,17 @@
 """Warm-start: the cut set a prior fit installed seeds the next fit.
 
-A row-generation fit ends holding an installed cut set — the published
-``FormulationResult.active_set``, in canonical ``(agent_id, bundle_key)``
-order. Warm-start replays it onto a fresh master before the refit prices
-anything: ``master.reinstall(prior.active_set)`` rebuilds the same
-relaxation, and because NSlack rebuilds its bookkeeping from
-``extract_cuts()``/``theta()`` at setup, the refit adopts the pre-installed
-cuts unchanged. The artifact is a deterministic,
-persistable tuple, so warm-start chains across bootstrap reps and sweep
-cells — the cut set is the checkpoint.
+A fit ends holding the published ``FormulationResult.active_set`` in
+canonical ``(agent_id, bundle_key)`` order. Warm-start replays it onto a
+fresh master before the refit prices anything: ``master.reinstall`` rebuilds
+the same relaxation, and NSlack rebuilds its bookkeeping from
+``extract_cuts()``/``theta()`` at setup, so the refit adopts the cuts
+unchanged. The artifact is a deterministic, persistable tuple — the
+checkpoint that chains bootstrap reps and sweep cells.
 
-The gates prove the win is real and survives composition:
-
-* Same-problem (the strong case): a refit warm-started from the identical
-  problem's cuts converges to the same objective in strictly fewer
-  iterations — every cut is already present, so the refit only re-certifies.
-* Sweep-cell (the realistic case): two related cells (the same agents and
-  shocks under a scaled ``theta_true``, so a genuine but partial change of
-  observed bundles) — the second cell warm-started from the first's cuts
-  reaches the same objective in fewer iterations than cold, at >= 2 sizes.
-* Determinism: two cold fits of one problem publish byte-identical
-  ``active_set`` rows — the warm-start artifact is reproducible.
-* Penalty x warm-start: a warm-started fit that also runs the decay penalty
-  converges, terminates pure-LP, and matches the cold no-penalty objective.
-* Rank-invariance: a warm-started fit is bitwise identical serial vs a fake
-  cluster — warm-start is a root-only master edit, adding no cross-rank
-  reduction.
+Covered here: same-problem and sweep-cell refits converge in strictly fewer
+iterations at the same objective (toy and QKP families, two sizes each),
+the artifact is byte-reproducible, warm-start composes with the decay
+penalty, and a warm-started fit is bitwise rank-invariant.
 """
 
 from __future__ import annotations
@@ -74,48 +60,32 @@ SIZES = ((24, 8), (40, 6))
 # cell 0's cut set still covers most of cell 1 — where warm-start pays.
 SWEEP_SCALE = 1.25
 
-# QKP fixture sizes for the same-problem warm-start leg. Reused from the
-# stripping file's churning QKP sizes (known-good, brute-force-enumerable at
-# n_items=6); same ">= 2 sizes / visibly many iterations" rationale as SIZES.
+# QKP fixture sizes for the same-problem warm-start leg: known-good and
+# brute-force-enumerable at n_items=6, same two-sizes rationale as SIZES.
 QKP_SIZES = ((20, 6), (30, 6))
 
 # A same-problem warm-start holds every cut already, so it only re-certifies:
-# at most one full re-pricing sweep to find no violation, plus one certifying
-# sweep — an absolute ceiling of 2 sweeps by construction. The walk is
-# deterministic here (SerialTransport, fixed seed, primal simplex), so the
-# observed same-problem warm count is a hard 2 at every param/backend, not a
-# jittery number needing a band. Derived from the "only re-certifies" property,
-# not from `< cold`: a reinstall that silently drops part of the seed set has
-# to re-derive the missing cuts and pushes warm to 3+ — one above this ceiling
-# — even though it still beats cold. Pinning the ceiling at the honest max (not
-# one above it) is what lets this separate a whole-seed replay from a 1-cut
-# drop; a looser 3 would wave the smallest partial-drop through.
+# at most one full re-pricing sweep that finds no violation, plus one
+# certifying sweep — a ceiling of 2 by construction (the walk is
+# deterministic: SerialTransport, fixed seed, primal simplex). A reinstall
+# that drops part of the seed must re-derive the missing cuts and pushes warm
+# to 3+, so the ceiling has to sit exactly at 2; a looser 3 would wave the
+# smallest partial drop through.
 WARM_RECERT_CEILING = 2
-
-# Guard the ceiling against a silent loosening: the recert argument only has
-# the partial-seed signal while the ceiling sits exactly at the honest
-# same-problem max (2). If a future edit bumps it to 3 the smallest
-# partial-seed-drop regression (warm=3) slips through, so pin it here.
 assert WARM_RECERT_CEILING == 2, (
-    "WARM_RECERT_CEILING must stay at the honest same-problem max (2); a higher"
-    " ceiling stops separating a whole-seed replay from a 1-cut drop"
+    "a looser ceiling stops separating a whole-seed replay from a 1-cut drop"
 )
 
-# Wall-clock is a soft guard only. Warm-start does strictly less work, yet
-# the reinstall pays an up-front solve and a single fit is milliseconds at
-# these sizes — so the timing assertion is a loose ceiling, never a tight
-# band, and the iteration-count win is the real claim.
-# The cold baseline is floored before scaling so a sub-millisecond cold fit
-# (where one scheduler hiccup on the warm side would explode the ratio)
-# cannot turn this loose ceiling into a flake.
+# Wall-clock is a soft guard: the reinstall pays an up-front solve and a
+# single fit is milliseconds at these sizes, so the ceiling is loose and the
+# cold baseline is floored so a sub-millisecond fit cannot explode the ratio.
 WALL_SANITY_FACTOR = 8.0
 WALL_FLOOR_SECONDS = 0.05
 
 # A static prox anchored at the seed with qp_weight=1.0 makes the seed the
-# unconstrained minimizer of the penalty's theta block, so a penalized priced
-# iterate sits on the seed to LP-solve precision (observed ~1e-15). This band
-# is that solve precision, not a value read from combrum: an anchor pointed
-# anywhere but the seed cannot bring any iterate within it.
+# minimizer of the penalty's theta block, so a penalized priced iterate sits
+# on the seed to solve precision (observed ~1e-15); an anchor pointed
+# anywhere else cannot bring any iterate within this band.
 STATIC_ANCHOR_LANDING = 1e-6
 
 
@@ -139,9 +109,8 @@ def _fit(arrays: dict[str, np.ndarray], backend: str, **kw) -> object:
 
 
 def _qkp_fit(arrays: dict[str, np.ndarray], backend: str, **kw) -> object:
-    # Same walk as _fit, over the QKP oracle/features: the brute-force QKP
-    # subproblem warm-starts identically (reinstall is a pure-LP cut replay,
-    # oracle-agnostic), so the iteration-win gate carries straight across.
+    # Same walk as _fit over the QKP problem; reinstall is a pure-LP cut
+    # replay, independent of the pricing subproblem.
     return run_walk(
         arrays,
         qkp_problem(arrays),
@@ -232,21 +201,17 @@ def test_same_problem_warm_start_converges_in_fewer_iterations(
         f"{backend} {n_obs}x{n_items}: warm did not save iterations"
         f" (cold={cold.iterations}, warm={warm.iterations})"
     )
-    # The stated claim is stronger than "< cold": every cut is pre-installed,
-    # so the refit only re-certifies within WARM_RECERT_CEILING sweeps. A
-    # reinstall that drops part of the seed still beats cold (it re-derives the
-    # missing cuts) but breaks this ceiling.
+    # Stronger than "< cold": every cut is pre-installed, so the refit
+    # re-certifies within the ceiling. A partial seed replay re-derives the
+    # missing cuts and breaks it.
     assert warm.iterations <= WARM_RECERT_CEILING, (
         f"{backend} {n_obs}x{n_items}: warm did not re-certify within"
         f" {WARM_RECERT_CEILING} sweeps (warm={warm.iterations}) — the seed"
         f" cut set was not fully replayed"
     )
-    # The ceiling only bites when a dropped cut is still violated and forces an
-    # extra sweep. A dropped-but-unviolated cut leaves warm re-certifying in one
-    # sweep (ceiling passes) yet permanently absent from warm's active set, so
-    # the identity oracle the sweep-cell leg uses is required here too: every cut
-    # this problem's cold fit published must survive into the warm refit's final
-    # active set, whole seed replayed, not merely "enough of it to re-certify".
+    # The ceiling misses a dropped-but-unviolated cut (warm still re-certifies
+    # in one sweep), so also require cut identity: every cut the cold fit
+    # published persists into the warm refit's final active set.
     seed_keys = _seed_keys(cold.result)
     warm_keys = _seed_keys(warm.result)
     missing = seed_keys - warm_keys
@@ -273,11 +238,10 @@ def test_same_problem_warm_start_converges_in_fewer_iterations(
 def test_sweep_cell_warm_start_beats_cold_at_equal_objective(
     backend: str, n_obs: int, n_items: int
 ) -> None:
-    # The realistic case: fit cell 0 cold, then fit a related cell 1
-    # cold vs warm-started from cell 0's cuts. The cells differ — a real
-    # subset of observed bundles moves under the scaled parameter — yet the
-    # shared cut structure lets the warm fit reach the same objective in
-    # fewer iterations. Held at two sizes so the win survives scale.
+    # The realistic case: fit cell 0 cold, then fit a related cell 1 cold vs
+    # warm-started from cell 0's cuts. A real subset of observed bundles
+    # moves under the scaled parameter, yet the shared cut structure lets the
+    # warm fit reach the same objective in fewer iterations.
     base = _toy(n_obs, n_items)
     cell0 = _scaled_cell(base, 1.0)
     cell1 = _scaled_cell(base, SWEEP_SCALE)
@@ -294,15 +258,10 @@ def test_sweep_cell_warm_start_beats_cold_at_equal_objective(
         f" (cold={cold1.iterations}, warm={warm1.iterations},"
         f" changed_obs={changed})"
     )
-    # The sweep cell can genuinely re-derive cuts for the moved bundles, so it
-    # need not re-certify within WARM_RECERT_CEILING like the same-problem legs.
-    # But the seed itself must have been replayed *whole*: NSlack installs cuts
-    # and never retires without a policy, so every cut fit0 published has to
-    # persist into warm1's final active_set. A reinstall that silently drops
-    # part of the seed still beats cold (it re-derives the violated few) but
-    # leaves the unviolated dropped cuts permanently absent from warm1's cut
-    # set, so this subset check catches the partial-drop locally, not only via
-    # the same-problem ceiling gates.
+    # The moved bundles genuinely need new cuts, so no re-certify ceiling
+    # here. But the seed must be replayed whole: NSlack never retires cuts
+    # without a policy, so every cut fit0 published persists into warm1's
+    # final active_set.
     seed_keys = _seed_keys(fit0.result)
     warm_keys = _seed_keys(warm1.result)
     missing = seed_keys - warm_keys
@@ -357,20 +316,15 @@ def test_active_set_is_a_deterministic_artifact(backend: str) -> None:
 def test_warm_start_composes_with_penalty_decay(
     n_obs: int, n_items: int
 ) -> None:
-    # Warm-start and the decay penalty compose: a warm-started fit that also
-    # runs the quadratic penalty (qp_weight>0, decay>0) still converges,
-    # still terminates on a pure LP (final weight 0, so the published duals
-    # are valid LP duals), and still reaches the cold no-penalty optimum.
-    # The two mechanisms are orthogonal: warm-start seeds the cut set, and the
-    # penalty steers within the optimal face. This Gurobi-scoped fixture keeps
-    # the historical ratification backend fixed.
+    # Warm-start seeds the cut set; the penalty steers within the optimal
+    # face. Composed, the fit must still converge, terminate on a pure LP,
+    # and reach the cold no-penalty optimum.
     decay = 3
     arrays = _toy(n_obs, n_items)
     cold = _fit(arrays, "gurobi")
     assert cold.converged
     # Both runs warm-start from the same seed, so their first priced iterate
-    # (the setup solve, penalty-free) is identical. Capture the priced-theta
-    # stream from each: the penalty must actually move an intermediate iterate.
+    # (the setup solve, penalty-free) is identical.
     warm_alone, alone_theta = _fit_capturing_priced_theta(
         arrays, warm_start=cold.result
     )
@@ -385,18 +339,16 @@ def test_warm_start_composes_with_penalty_decay(
     assert warm_pen.converged
     # The seed is the static anchor: with warm_start given and no explicit
     # theta_init, run_walk sets static_ref = theta_init = cold.result.theta_hat.
-    # It is nonzero here (a real LP vertex), so anchoring at it is observably
-    # different from anchoring at the origin.
+    # It is a nonzero LP vertex, so it is distinguishable from the origin.
     seed = np.asarray(cold.result.theta_hat, dtype=np.float64)
     assert np.max(np.abs(seed)) > 1e-3, (
         "static-anchor test needs a nonzero seed to tell the seed anchor apart"
         " from the origin"
     )
-    # Penalty EFFECT, not the tautological iteration count: the decay penalty
-    # steers theta within the optimal face, so at least one intermediate priced
-    # iterate under the penalty must differ from the corresponding pure-LP
-    # warm-alone iterate. A no-op set_penalty leaves the two streams
-    # bit-identical (both pure LP over the same seed), so this max drops to 0.
+    # The penalty must actually move the iterates: at least one penalized
+    # priced iterate has to differ from the corresponding warm-alone one.
+    # Matching the pure-LP stream bit for bit would mean set_penalty never
+    # installed the term.
     aligned = min(len(alone_theta), len(pen_theta))
     max_steer = max(
         (
@@ -410,14 +362,10 @@ def test_warm_start_composes_with_penalty_decay(
         f" intermediate iterate off the pure-LP path (max|dtheta|={max_steer:.2e})"
         f" — set_penalty had no effect"
     )
-    # WHERE the static anchor points, not just that it steers: with the prox
-    # centered on the seed at unit weight, the seed minimizes the penalty's
-    # theta block, so a penalized priced iterate must land on the seed to solve
-    # precision. This pins the anchor target independently — the expected point
-    # is cold.result.theta_hat from a distinct penalty-free fit, never read back
-    # from the penalized run. An anchor pointed at the origin (or any other
-    # point) leaves every iterate ||seed - wrong_anchor|| away and cannot reach
-    # this band, so a whole class of ref-corruption mutations dies here.
+    # And where it steers: with the prox centered on the seed at unit weight,
+    # some penalized iterate must land on the seed to solve precision. The
+    # target comes from a distinct penalty-free fit, never from the penalized
+    # run; an anchor pointed anywhere else leaves every iterate out of the band.
     dist_to_seed = [float(np.max(np.abs(t - seed))) for t in pen_theta]
     min_dist = min(dist_to_seed, default=float("inf"))
     assert min_dist <= STATIC_ANCHOR_LANDING, (
@@ -425,10 +373,9 @@ def test_warm_start_composes_with_penalty_decay(
         f" static seed anchor (min|theta-seed|={min_dist:.2e} >"
         f" {STATIC_ANCHOR_LANDING:.0e}) — the prox is not centered on the seed"
     )
-    # Contrast the anchor choice: with a dynamic ref (re-centered on the current
-    # theta each iteration) nothing pins theta to the fixed seed, so no dynamic
-    # iterate lands on it. If set_penalty ignored its ref both modes would behave
-    # the same and this separation would vanish.
+    # Under a dynamic ref (re-centered each iteration) nothing pins theta to
+    # the fixed seed, so no dynamic iterate lands on it — the static/dynamic
+    # anchor choice must separate.
     warm_dyn, dyn_theta = _fit_capturing_priced_theta(
         arrays,
         warm_start=cold.result,
@@ -472,11 +419,9 @@ def test_warm_start_rank_invariant_bitwise(backend: str, size: int) -> None:
     arrays = _toy(*SIZES[0])
     seed = _fit(arrays, backend).result
     serial = _fit(arrays, backend, warm_start=seed)
-    # Anchor: the run under test must be genuinely warm-started, else this is
-    # a rank-consistency check on two cold fits and says nothing about
-    # warm-start. A warm refit re-certifies in far fewer sweeps than the cold
-    # fit at the same size, so a reinstall that fails to replay the seed (warm
-    # collapses to a cold fit) trips this before the rank comparison.
+    # The run under test must be genuinely warm-started, else this compares
+    # two cold fits. A warm refit takes far fewer sweeps than cold, so a
+    # reinstall that failed to replay the seed trips here first.
     cold_iters = _fit(arrays, backend).iterations
     assert serial.iterations < cold_iters, (
         f"{backend}: warm-start not engaged (serial={serial.iterations},"
@@ -512,14 +457,9 @@ def test_warm_start_rank_invariant_bitwise(backend: str, size: int) -> None:
 def test_qkp_same_problem_warm_start_converges_in_fewer_iterations(
     backend: str, n_obs: int, n_items: int
 ) -> None:
-    # The strong case carried onto the QKP family: refit the identical QKP
-    # problem warm-started from its own cut set. The QKP subproblem is a
-    # different (brute-force) oracle than the toy, but warm-start is a
-    # pure-LP cut replay on the rank-0 master, so the same claim holds — the
-    # warm refit only re-certifies in a handful of iterations against the
-    # cold fit's many, at the same optimum. Held at two QKP sizes (matching
-    # the stripping file's churning sizes) so the win survives scale on this
-    # family too.
+    # Same-problem warm-start carried onto the QKP family. The QKP
+    # subproblem prices by brute force, but warm-start is a pure-LP cut
+    # replay on the rank-0 master, so the same claim holds.
     arrays = _qkp(n_obs, n_items)
     cold = _qkp_fit(arrays, backend)
     assert cold.converged and cold.result.active_set is not None
@@ -535,10 +475,9 @@ def test_qkp_same_problem_warm_start_converges_in_fewer_iterations(
         f"qkp {backend} {n_obs}x{n_items}: warm did not re-certify within"
         f" {WARM_RECERT_CEILING} sweeps (warm={warm.iterations})"
     )
-    # And the whole QKP seed must be replayed, not just enough of it to
-    # re-certify: the ceiling waves through a dropped-but-unviolated cut, so pin
-    # cut identity directly — every cut the cold QKP fit published survives into
-    # the warm refit's active set.
+    # The ceiling misses a dropped-but-unviolated cut, so also check cut
+    # identity: every cut the cold fit published persists into the warm
+    # refit's active set.
     seed_keys = _seed_keys(cold.result)
     warm_keys = _seed_keys(warm.result)
     missing = seed_keys - warm_keys
@@ -568,15 +507,10 @@ def test_qkp_same_problem_warm_start_converges_in_fewer_iterations(
 def test_warm_start_wall_clock_within_soft_sanity_ceiling(
     kind: str, n_obs: int, n_items: int
 ) -> None:
-    # soft guard: a warm-started fit must not run away — it should stay
-    # within a generous multiple of the cold fit's wall clock. The real
-    # claim is the iteration win (gated deterministically above); warm-start
-    # does strictly less row-generation work because the cut set is
-    # pre-installed, but the reinstall pays an up-front solve, so this leg
-    # asserts only the loose ceiling, never that warm is strictly faster.
-    # Deliberately loose (the suite has a known wall flake under load, so a
-    # tight millisecond-scale timing band is avoided here on purpose).
-    # Gurobi only, by the historical measurement convention.
+    # Soft guard: the warm fit stays within a generous multiple of the cold
+    # fit's wall clock. The reinstall pays an up-front solve, so this never
+    # claims warm is strictly faster — the iteration win above is the real
+    # gate. Gurobi only, by the historical measurement convention.
     fit = _qkp_fit if kind == "qkp" else _fit
     arrays = (_qkp if kind == "qkp" else _toy)(n_obs, n_items)
     cold, cold_probe = measure(lambda: fit(arrays, "gurobi"))
@@ -584,9 +518,8 @@ def test_warm_start_wall_clock_within_soft_sanity_ceiling(
     warm, warm_probe = measure(
         lambda: fit(arrays, "gurobi", warm_start=cold.result)
     )
-    # The warm leg must be fast *and* right: a warm fit that runs quickly by
-    # bailing out early (non-converged, or landing off the cold optimum) is a
-    # regression the wall ceiling alone would wave through.
+    # Fast and right: a warm fit that is quick because it bailed out early
+    # (non-converged, or off the cold optimum) must fail here.
     assert warm.converged, f"warm {kind} {n_obs}x{n_items} did not converge"
     assert abs(warm.objective - cold.objective) <= PARITY_BAND, (
         f"warm {kind} {n_obs}x{n_items} ran fast but missed the cold optimum"

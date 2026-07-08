@@ -66,12 +66,9 @@ def test_negative_rep_id_and_agent_ids_rejected() -> None:
 
 
 def test_float_rep_id_rejected_not_truncated() -> None:
-    # rep_id is replication provenance: it must go through operator.index, which
-    # rejects a non-integer, never int()-truncate it (7.9 -> 7 would mis-key a
-    # replication and silently collide with rep 7). Both the constructor and
-    # with_rep_id share the contract, so both paths are pinned. -1 alone can't
-    # distinguish operator.index from int(), since int(-1) is still rejected as
-    # negative; a fractional value is what separates them.
+    # rep_id goes through operator.index: a float must raise, never
+    # int()-truncate (7.9 -> 7 would collide with rep 7). The constructor and
+    # with_rep_id share the check.
     with pytest.raises(TypeError):
         make_dual(rep_id=7.9)
     with pytest.raises(TypeError):
@@ -86,8 +83,7 @@ def test_float_rep_id_rejected_not_truncated() -> None:
 
 
 def test_non_integer_id_arrays_rejected() -> None:
-    # Requiring an integer dtype (instead of coercing) is the contract:
-    # a silent float->int truncation would corrupt ids.
+    # Integer dtype is required, not coerced: float ids would truncate silently.
     with pytest.raises(ValueError, match="agent_ids must be a 1-D integer"):
         make_dual(agent_ids=np.array([0.0, 1.0, 1.0]))
     with pytest.raises(ValueError, match="bundle_row_ids must be a 1-D integer"):
@@ -111,12 +107,9 @@ def test_payload_arrays_read_only() -> None:
 
 
 def test_payload_owns_its_data() -> None:
-    # Ownership, not just read-only flags: construction must copy every
-    # caller array, so a view the caller took *before* construction cannot
-    # write through into the payload. A full-slice view is a distinct ndarray
-    # that keeps write=True even after the payload freezes its own buffer, so
-    # it exposes an asarray-alias (shared storage) on any of the four arrays,
-    # not just the two the old assertions touched.
+    # Construction must copy the caller's arrays, not alias them. A full-slice
+    # view taken before construction stays writeable even after the payload
+    # freezes its own buffer, so writing through it exposes shared storage.
     agent_ids = np.array([0, 1, 1], dtype=np.int64)
     pis = np.array([0.25, 0.5, 0.125])
     bundle_row_ids = np.array([0, 1, 0], dtype=np.int64)
@@ -136,8 +129,7 @@ def test_payload_owns_its_data() -> None:
         bound_duals=bound_duals,
     )
     for view, idx, value in views:
-        # A copy-on-construct payload leaves these views writeable; if a view
-        # is frozen the caller array was aliased, which the asserts below fail.
+        # A frozen view means the caller array was aliased into the payload.
         if view.flags.writeable:
             view[idx] = value
     bound_duals[5] = -1.0
@@ -165,9 +157,7 @@ def test_with_rep_id_reuses_validated_payload_storage() -> None:
     assert not restamped.bundle_table.flags.writeable
     with pytest.raises(TypeError):
         restamped.bound_duals[0] = 99.0  # type: ignore[index]
-    # The reused (not copied) arrays still price to the hand-computed moment.
-    # Pin to the external dyadic vector, not to dual.moment(), so a broken
-    # moment() can't hide by scaling both sides equally.
+    # The reused arrays still price to the moment computed by hand.
     np.testing.assert_array_equal(
         restamped.moment(), np.array([0.375, 0.5, 1.25, 0.3125])
     )
@@ -232,19 +222,14 @@ def test_rows_decode_agent_ids_and_preserve_bundle_rows() -> None:
         (row.agent_id, row.observation_id, row.simulation_id, row.pi)
         for row in rows
     ] == [(0, 0, 0, 0.25), (3, 1, 1, 0.5), (4, 0, 2, 0.125)]
-    # Pin the decoded bundle for every row against a hand-written table, not
-    # against dual.bundle_table[...]. bundle_row_ids == [0, 1, 0], so row 0 is
-    # decoded twice; a "default-when-zero" indexing bug (bundle_table[row or 1])
-    # or any constant-row substitution corrupts rows[0]/rows[2] while leaving
-    # rows[1] intact, so checking only rows[1] would miss it.
+    # bundle_row_ids == [0, 1, 0]: table row 0 decodes twice, so every decoded
+    # row is compared against a literal table, not dual.bundle_table[...].
     expected_bundles = np.array(
         [[1.0, 0.0, 2.0, 0.5], [0.0, 1.0, 1.0, 0.25], [1.0, 0.0, 2.0, 0.5]]
     )
     np.testing.assert_array_equal(
         np.array([row.generated_bundle for row in rows]), expected_bundles
     )
-    # The bundle_row_id == 0 rows must decode to a distinct bundle from the
-    # bundle_row_id == 1 row (guards against a collapse-to-one-row bug).
     assert not np.array_equal(
         rows[0].generated_bundle, rows[1].generated_bundle
     )
@@ -269,12 +254,8 @@ def test_rows_decode_agent_ids_and_preserve_bundle_rows() -> None:
 def test_rows_preserve_non_float_bundle_dtype(
     table_dtype: type, table: np.ndarray
 ) -> None:
-    # rows() must hand back each snapshot in the table's own dtype; a silent
-    # astype-to-float promotion is a no-op on the float64 default table used by
-    # the other rows() test, so it can only be caught on a bool/int8 table.
-    # bundle_row_ids == [0, 1, 0] decodes row 0 twice, so the oracle below pins
-    # every decoded row wholesale against a hand-written table rather than one
-    # element of one row.
+    # A silent astype-to-float in rows() is a no-op on the float64 default
+    # table; only a bool/int8 table shows it.
     dual = make_dual(
         agent_ids=np.array([0, 3, 4], dtype=np.int64),
         bundle_row_ids=np.array([0, 1, 0], dtype=np.int64),
@@ -286,11 +267,8 @@ def test_rows_preserve_non_float_bundle_dtype(
 
     decoded = np.array([row.generated_bundle for row in rows])
     expected = np.array([table[0], table[1], table[0]], dtype=table_dtype)
-    # Independent oracle: exact dtype AND exact values, pinned to a literal
-    # dtype (not dual.bundle_table.dtype) so a float promotion can't hide by
-    # dragging both sides along. astype(float64) on a bool/int8 table both
-    # changes the dtype and forces a writeable copy, so the two asserts below
-    # kill the promotion twice over.
+    # Compare against the literal dtype, not dual.bundle_table.dtype, which a
+    # promotion would drag along with it.
     assert decoded.dtype == np.dtype(table_dtype)
     np.testing.assert_array_equal(decoded, expected)
     for row in rows:
@@ -316,27 +294,20 @@ def test_rows_empty_payload_yields_no_rows() -> None:
 
 
 def test_moment_identical_across_store_round_trip(tmp_path: Path) -> None:
-    # Self-containedness in practice: a payload reloaded from disk, with its
-    # producing context gone, is content-bitwise identical -- every array,
-    # the bound-duals mapping, and rep_id -- not merely moment-equal (moment()
-    # ignores bound_duals and rep_id, so a dropped bound multiplier or a
-    # mis-keyed rep would slip past a moment-only check).
+    # A reload must be content-bitwise identical, not merely moment-equal:
+    # moment() ignores bound_duals and rep_id.
     dual = make_dual(rep_id=7, bound_duals={0: -0.5, 3: 1.25})
     DualStoreWriter(tmp_path).write(dual)
     loaded = DualStoreReader(tmp_path).load(dual.rep_id)
     assert equal(dual, loaded)
     assert loaded.rep_id == 7
     assert dict(loaded.bound_duals) == {0: -0.5, 3: 1.25}
-    # Supplementary: the reloaded payload prices to the hand-computed dyadic
-    # moment, bit-for-bit. Comparing to the external byte pattern (not to
-    # dual.moment()) keeps a broken moment() from passing by breaking both
-    # sides identically.
+    # The reloaded payload prices to the dyadic moment computed by hand.
     expected_bytes = np.array([0.375, 0.5, 1.25, 0.3125]).tobytes()
     assert loaded.moment().tobytes() == expected_bytes
 
 
 def test_bound_duals_mapping_is_immutable() -> None:
-    # Like the read-only arrays, the bound-duals mapping must reject in-place edits.
     dual = make_dual(bound_duals={0: 1.0, 2: -0.5})
     with pytest.raises(TypeError):
         dual.bound_duals[0] = 99.0  # type: ignore[index]

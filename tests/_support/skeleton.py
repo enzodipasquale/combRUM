@@ -386,7 +386,7 @@ def run_skeleton(
 # Skeleton-formulation contract tests.
 #
 # These cases exercise contracts that the end-to-end skeleton walk reaches but
-# does not stress: active bounds, distributed summation, bundle-key identity,
+# does not stress: active bounds, total-regret accounting, bundle-key identity,
 # and collective failure agreement.
 #
 # Support-module tests are not collected by the directory suite; run them by
@@ -436,15 +436,15 @@ def _single_step(
 
 
 def test_update_enforces_theta_bounds_clip() -> None:
-    # run_skeleton normally converges to an interior optimum, so the np.clip in
-    # update never binds. Drive a one-step case whose unconstrained iterate lands
-    # outside a deliberately tight box.
+    # run_skeleton converges to an interior optimum where the np.clip in update
+    # never binds, so drive one step whose unconstrained iterate lands outside
+    # a deliberately tight box.
     #
     # 1 agent, 2 items, r = [+1, -1], nu = [-0.5, -0.5], observed = both taken.
     # At theta_init = 0 the priced demand takes neither item (both scores
     # -0.5 < 0), so both are violated. The cut moment is
-    # (observed - chosen) * r = [(1-0)*1, (1-0)*(-1)] = [+1, -1], and one step
-    # of size 0.1 gives the unconstrained iterate [0.1, -0.1].
+    # (observed - chosen) * r = [+1, -1]; one step of size 0.1 gives the
+    # unconstrained iterate [0.1, -0.1].
     arrays = {
         "observables": np.array([[1.0, -1.0]]),
         "shocks": np.array([[[-0.5, -0.5]]]),
@@ -454,7 +454,7 @@ def test_update_enforces_theta_bounds_clip() -> None:
     theta_init = np.zeros(2)
     step = 0.1
     agg = np.array([1.0, -1.0])
-    unclipped = theta_init + step * agg  # [0.1, -0.1], hand-derived
+    unclipped = theta_init + step * agg  # [0.1, -0.1]
     lower = np.array([-10.0, -0.05])
     upper = np.array([0.05, 10.0])
     expected = np.array([0.05, -0.05])  # unclipped clipped into the tight box
@@ -466,8 +466,8 @@ def test_update_enforces_theta_bounds_clip() -> None:
         step=step,
         transport=SerialTransport(),
     )
-    # Bitwise-on-the-bound and strictly inside the unconstrained iterate: with
-    # the clip deleted, _theta would be `unclipped` and fail both checks.
+    # Both components must sit exactly on their bounds, not at the
+    # unconstrained iterate.
     assert form._theta.tobytes() == expected.tobytes()
     assert form._theta[0] == upper[0]
     assert form._theta[1] == lower[1]
@@ -475,14 +475,13 @@ def test_update_enforces_theta_bounds_clip() -> None:
 
 
 def test_best_total_regret_sums_all_violated_agents() -> None:
-    # best_total_regret is often asserted only at convergence, where every
-    # per-agent regret is already zero. Record the total at a known
-    # non-converged theta and compare to a hand-summed oracle.
+    # At convergence every per-agent regret is zero, so record the total at a
+    # non-converged theta instead.
     #
-    # 3 agents, 1 item, r = +1, nu = [-0.3, -0.7, -1.2], observed = taken.
-    # At theta_init = 0 the priced demand takes nothing (score nu < 0), so each
-    # agent's regret is payoff(empty) - payoff(observed) = 0 - nu = |nu|. The
-    # first step records best_total_regret = sum |nu| before stepping.
+    # 3 agents, 1 item, r = +1, nu = [-0.3, -0.7, -1.2], observed = taken. At
+    # theta_init = 0 the priced demand takes nothing (score nu < 0), so each
+    # agent's regret is |nu|; the first step records
+    # best_total_regret = sum |nu| = 2.2 before stepping.
     nu = np.array([-0.3, -0.7, -1.2])
     arrays = {
         "observables": np.ones((3, 1)),
@@ -490,7 +489,7 @@ def test_best_total_regret_sums_all_violated_agents() -> None:
         "observed": np.ones((3, 1), dtype=bool),
         "theta_true": np.array([3.0]),
     }
-    expected_total = float(abs(-0.3) + abs(-0.7) + abs(-1.2))  # 2.2, hand-summed
+    expected_total = float(abs(-0.3) + abs(-0.7) + abs(-1.2))
 
     form = _single_step(
         arrays,
@@ -499,67 +498,15 @@ def test_best_total_regret_sums_all_violated_agents() -> None:
         step=0.1,
         transport=SerialTransport(),
     )
-    # A reduction that dropped all but the first contribution would report only
-    # |nu[0]| = 0.3; the full canonical sum is 2.2.
     assert form._best_total == expected_total
 
 
-def test_best_total_regret_is_permutation_invariant_across_shards() -> None:
-    # The serial single-step above feeds sum_reproducible ids [0,1,2], already
-    # sorted/unique/contiguous, which takes canonical_sum's fast path. Cross the
-    # sort boundary with a magnitude-disparate fixture whose sum is
-    # order-sensitive, sharded so contributions arrive unsorted.
-    #
-    # 4 agents, 1 item, r = +1, nu = [-2**53, -1, -2, -4], observed = taken. At
-    # theta_init = 0 each agent's regret is |nu| = [2**53, 1, 2, 4]. Under a
-    # round-robin size=2 shard, rank 0 owns ids [0, 2] and rank 1 owns [1, 3], so
-    # sum_reproducible sees the concatenated ids [0, 2, 1, 3] -- unsorted -- and
-    # must sort back to ascending id before reducing.
-    big = 2.0**53  # ULP here is 2.0, so summation order changes the low bit
-    nu = np.array([-big, -1.0, -2.0, -4.0])
-    arrays = {
-        "observables": np.ones((4, 1)),
-        "shocks": nu.reshape(4, 1, 1),
-        "observed": np.ones((4, 1), dtype=bool),
-        # theta_true large enough that pricing at it reproduces every observed
-        # bundle; the walk still records best_total_regret at theta_init = 0.
-        "theta_true": np.array([big + 10.0]),
-    }
-    # Hand-derived oracle, ascending-id (canonical) accumulation with IEEE
-    # round-half-to-even at ULP 2.0:
-    #   2**53 + 1 -> 2**53   (1 is halfway; rounds to the even 2**53)
-    #   2**53 + 2 -> 2**53 + 2
-    #   (2**53 + 2) + 4 -> 2**53 + 6
-    expected_total = big + 6.0
-    # A naive arrival-order reduce over [2**53, 2, 1, 4] instead yields 2**53 + 4,
-    # one ULP off; the canonical id-sort is what recovers 2**53 + 6.
-
-    def one_step(transport: Transport) -> float:
-        result = run_skeleton(
-            arrays, transport, family="toy", max_iterations=1
-        )
-        return float(result.metadata["best_total_regret"])
-
-    serial_total = one_step(SerialTransport())
-    multi_totals = LocalCluster(size=2).run(one_step)
-
-    # Both the serial pool-of-one and the interleaved two-rank shard must land on
-    # the hand-derived canonical value bit-for-bit, and must agree with each other
-    # -- the permutation invariance that the id-sort exists to guarantee. An
-    # arrival-order sum matches on the serial (already-sorted) input but drifts by
-    # a ULP once the shard delivers ids out of order.
-    assert serial_total.hex() == expected_total.hex()
-    assert all(total.hex() == expected_total.hex() for total in multi_totals)
-    assert all(total.hex() == serial_total.hex() for total in multi_totals)
-
-
 def test_update_ships_bundle_key_packing_the_chosen_bundle() -> None:
-    # bundle_key threads through as the cut identity key, but the walk never
-    # depends on its content (agent ids stay unique, phi aggregation is
-    # commutative). Capture the shipped key and pin its content bit-for-bit.
+    # The walk itself never reads bundle_key (agent ids are unique), so capture
+    # the shipped key and check its content directly.
     #
-    # 1 agent, 5 items, r = +1, nu = [+1, -1, +1, +1, -1]. At theta_init = 0 the
-    # priced demand takes item k iff nu_k > 0, so chosen = [T, F, T, T, F].
+    # 1 agent, 5 items, r = +1, nu = [+1, -1, +1, +1, -1]. At theta_init = 0
+    # the priced demand takes item k iff nu_k > 0, so chosen = [T, F, T, T, F].
     nu = np.array([1.0, -1.0, 1.0, 1.0, -1.0])
     arrays = {
         "observables": np.ones((1, 5)),
@@ -582,22 +529,17 @@ def test_update_ships_bundle_key_packing_the_chosen_bundle() -> None:
         transport=_Capture(),
     )
     assert len(shipped) == 1
-    # chosen = [T, F, T, T, F]; packbits packs MSB-first into one byte:
-    # bits 1 0 1 1 0 0 0 0 = 0b10110000. A packing of zeros would ship 0x00.
-    # (This half is a skeleton self-check: the walk keys cuts with numpy
-    # packbits, so it only pins the skeleton's own key threading.)
+    # packbits is MSB-first: [T, F, T, T, F] -> bits 10110000.
     assert shipped[0].bundle_key == bytes([0b10110000])
 
-    # Pin combrum's production key encoder (_pack_bundle, the alias every NSlack
-    # cut ships under) and its CutRow.bundle inverse.
+    # combrum's own key encoder (_pack_bundle, what every NSlack cut ships
+    # under) and its CutRow.bundle inverse.
     from combrum.transport.base import _pack_bundle
 
     chosen = np.array([True, False, True, True, False])
     key = _pack_bundle(chosen)
-    # Round-trip: CutRow.bundle decodes via _unpack_bundle. Pin the full
-    # recovered array (values and dtype) and its read-only flag, so a decoder
-    # that dropped the dtype tag, returned a writable copy, or misdecoded the
-    # bytes fails here even though it round-trips its own broken encoder.
+    # The decode must recover values, dtype, and the read-only flag -- not
+    # merely round-trip its own encoder.
     recovered = CutRow(
         rep_id=0, agent_id=0, phi=np.array([1.0]), epsilon=1.0, bundle_key=key
     ).bundle
@@ -605,9 +547,8 @@ def test_update_ships_bundle_key_packing_the_chosen_bundle() -> None:
     assert recovered.dtype == np.bool_
     assert not recovered.flags.writeable
 
-    # And bundle_key content is order-relevant: two rows sharing (rep_id,
-    # agent_id) but differing by key must be sorted by the key, so zeroing it
-    # would silently reorder duplicates too.
+    # bundle_key also breaks delivery-order ties among rows sharing
+    # (rep_id, agent_id).
     key_hi = np.packbits([True, False, False, False, False]).tobytes()  # 0x80
     key_lo = np.packbits([False, True, False, False, False]).tobytes()  # 0x40
     row_hi = CutRow(rep_id=0, agent_id=7, phi=np.array([1.0]), epsilon=1.0,
@@ -622,9 +563,8 @@ def test_update_ships_bundle_key_packing_the_chosen_bundle() -> None:
 
 
 def test_collective_guard_agrees_a_body_failure() -> None:
-    # Exercise the failure path exactly as update() uses it: the guard must
-    # convert a body failure into a TransportError rather than letting the raw
-    # error escape on one rank.
+    # The guard, used exactly as update() uses it, must convert a body failure
+    # into a TransportError rather than let the raw error escape on one rank.
     transport = SerialTransport()
 
     def guarded_body() -> None:
@@ -634,18 +574,13 @@ def test_collective_guard_agrees_a_body_failure() -> None:
 
     with pytest.raises(TransportError) as excinfo:
         guarded_body()
-    # The guard's docstring promises the origin rank and original message
-    # survive the conversion. rank 0 is where the body raised; the message must
-    # still carry the ValueError text. A guard that dropped either (e.g. wrong
-    # origin rank or an empty message) would pass a type-only check but fail here.
+    # The conversion must keep the origin rank and the original message.
     assert excinfo.value.rank == 0
     assert "body failed on rank 0" in excinfo.value.message
     assert "body failed on rank 0" in str(excinfo.value)
 
-    # An already-guarded TransportError must pass through the re-guard branch
-    # unchanged, keeping its origin rank and message. A bare passthrough that
-    # re-wrapped it (rank 0, new text) or a passthrough deletion that let it fall
-    # into the generic conversion would corrupt one of these.
+    # An already-guarded TransportError passes through unchanged: same origin
+    # rank, same message.
     def reguarded_body() -> None:
         with transport.collective():
             raise TransportError(3, "already agreed on rank 3")
