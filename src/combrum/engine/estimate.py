@@ -76,7 +76,7 @@ def estimate(
         model: Oracle, parameter layout, feature callables, and formulation.
         data: Observed choices, shocks, and per-observation covariates.
         transport: Defaults to the serial reference.
-        master_backend: LP host (``"auto"`` / ``"gurobi"`` / ``"highs"``).
+        master_backend: Master backend (``"auto"`` / ``"gurobi"`` / ``"highs"``).
         master_params: Backend-owned solver knobs.
         tolerance, max_iterations, min_iterations: Loop bounds.
         qp_weight, decay, penalty_ref: Proximal-penalty decay (off by default).

@@ -44,9 +44,7 @@ def _load_replay_fixture() -> dict:
 
 
 def _schedule_from_fixture(spec: list[dict]) -> Schedule:
-    """Rebuild the typed Schedule from the fixture's plain-dict shape, so
-    replay drives exactly the schedule the fixture was captured under.
-    """
+    """Rebuild the typed Schedule from the fixture's plain-dict shape."""
     return Schedule(
         [
             Phase(
@@ -93,21 +91,15 @@ def n_iters() -> int:
 def test_phase_validates_at_construction() -> None:
     Phase(timeout=1.0)  # terminal, defaults fine
     Phase(timeout=2.5, iters=3, retire=True)
-    # iters=1 is the smallest legal bounded span: both sides of the `>= 1`
-    # boundary are pinned (iters=0 rejected below), and the accepted value
-    # is normalised to a plain int 1.
+    # iters=1 is the smallest legal bounded span (iters=0 rejected below)
     smallest = Phase(timeout=1.0, iters=1)
     assert smallest.iters == 1
     assert type(smallest.iters) is int
-    # A non-plain-int span must be normalised to a builtin int by
-    # operator.index; np.int64 actually crosses that boundary (a plain int 1
-    # input never would), so this pins the normalisation, not the input.
+    # np.int64 spans are normalised to builtin int via operator.index
     normalised = Phase(timeout=1.0, iters=np.int64(2))
     assert normalised.iters == 2
     assert type(normalised.iters) is int
-    # A non-integral span is rejected, not truncated: operator.index rejects a
-    # float (and a str), whereas a plain int() cast would silently accept 2.5
-    # as 2. Passing 2.5 pins that operator.index is the guard, not int().
+    # non-integral spans are rejected, not truncated (int() would accept 2.5 as 2)
     with pytest.raises((TypeError, ValueError)):
         Phase(timeout=1.0, iters=2.5)  # type: ignore[arg-type]
     with pytest.raises((TypeError, ValueError)):
@@ -118,27 +110,22 @@ def test_phase_validates_at_construction() -> None:
         Phase(timeout=math.inf)
     with pytest.raises(ValueError):
         Phase(timeout=1.0, iters=0)  # a bounded phase needs a positive span
-    # retire is bool-only: a str and a non-bool int are both rejected, so the
-    # classic bool/int conflation (accepting retire=1/0) cannot slip through.
+    # retire is bool-only: retire=1/0 is rejected, not coerced
     with pytest.raises(ValueError):
         Phase(timeout=1.0, retire="yes")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         Phase(timeout=1.0, retire=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         Phase(timeout=1.0, retire=0)  # type: ignore[arg-type]
-    # A bool retire is preserved as a bool, not coerced to something else.
     assert Phase(timeout=1.0, iters=2, retire=True).retire is True
     assert Phase(timeout=1.0, iters=2, retire=False).retire is False
 
 
 def test_smallest_bounded_span_floors_at_one() -> None:
-    # A lone iters=1 bounded phase owns exactly iteration 0; its cumulative
-    # boundary is 1, so a non-retiring floor of 1 must come back. The floor is
-    # hand-derived from the schedule (one iteration => boundary 1), not read
-    # from combrum, and it pins the boundary math for the smallest legal span.
-    # Build the span from np.int64 so a boundary floor that leaked the input's
-    # numpy type (instead of the normalised builtin int) would fail the type
-    # pin below: the returned floor must satisfy the hook's int | None.
+    # a lone iters=1 bounded phase owns exactly iteration 0, so the non-retiring
+    # floor is its cumulative boundary 1. The span is built from np.int64 so the
+    # returned floor exercises normalisation to builtin int (hook contract is
+    # int | None).
     sched = Schedule([Phase(timeout=1.0, iters=np.int64(1)), Phase(timeout=5.0)])
     for helper, terminal_floor in (
         (point_timeout_callback, None),
@@ -157,15 +144,8 @@ def test_smallest_bounded_span_floors_at_one() -> None:
 
 
 def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
-    # The advertised bootstrap contract (bootstrap_timeout_callback docstring:
-    # "mark the terminal phase retire=True when reps may retire once that phase
-    # is active"): a retiring TERMINAL phase must floor at 0 — the retire rule
-    # wins over the terminal policy for BOTH helpers, so neither the bootstrap
-    # sentinel nor the point None survives on those iterations.
-    #
-    # Whole-schedule oracle, hand-derived phase-by-phase from the contract
-    # (retiring phase -> 0; non-retiring bounded phase -> its cumulative
-    # boundary; MIPFocus 1 only at iter 0), never read back from combrum:
+    # a retiring TERMINAL phase floors at 0 for both helpers: the retire rule
+    # wins over each helper's terminal policy (bootstrap sentinel, point None).
     #   phase0 iters {0,1}   @1.0s  non-retire -> boundary 2
     #   phase1 iters {2,3,4} @5.0s  retire     -> 0
     #   terminal iters {5,6} @600s  retire     -> 0  (both helpers)
@@ -179,8 +159,6 @@ def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
     n = 7
     expected_timeout = [1.0, 1.0, 5.0, 5.0, 5.0, 600.0, 600.0]
     expected_focus = [1, 0, 0, 0, 0, 0, 0]
-    # A retiring terminal collapses the two helpers' terminal policies onto the
-    # same floor 0, so a single oracle pins both.
     expected_floor = [2, 2, 0, 0, 0, 0, 0]
 
     for helper in (point_timeout_callback, bootstrap_timeout_callback):
@@ -194,14 +172,11 @@ def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
         assert got_floor == expected_floor, helper.__name__
         assert got_timeout == expected_timeout, helper.__name__
         assert got_focus == expected_focus, helper.__name__
-        # The retiring-terminal floors (iters 5, 6) must be plain int 0, not the
-        # sentinel (bootstrap) or None (point) a dropped retire guard would leak.
+        # retiring-terminal floors are 0, not the sentinel/None
         assert callback(5, _Recorder()) == 0, helper.__name__
         assert callback(6, _Recorder()) == 0, helper.__name__
 
-    # Pin the divergence: the SAME schedule with a NON-retiring terminal must
-    # restore each helper's own terminal policy, so the two branches are not
-    # accidentally identical.
+    # with a non-retiring terminal each helper keeps its own terminal policy
     sched_nonretire = Schedule(
         [
             Phase(timeout=1.0, iters=2),
@@ -232,11 +207,8 @@ def test_schedule_requires_one_terminal_phase_last() -> None:
 def test_bootstrap_helper_matches_captured_schedule_field_by_field(
     schedule, n_iters
 ) -> None:
-    """Bootstrap replays the fixture's (settings, floor) sequence.
-
-    The floor branch coverage is the fixture's: a boundary floor, a cumulative
-    boundary floor, a retiring floor of 0, and the terminal non-retiring
-    sentinel — so a wrong bootstrap floor rule fails right here.
+    """Bootstrap replays the fixture's (settings, floor) sequence -- the
+    fixture covers boundary, retiring, and terminal-sentinel floors.
     """
     fixture = _load_replay_fixture()
     callback = bootstrap_timeout_callback(schedule)
@@ -250,10 +222,10 @@ def test_bootstrap_helper_matches_captured_schedule_field_by_field(
         settings = recorder.last
         row = expected[it]
         assert settings.time_limit_seconds == row["TimeLimit"], (
-            f"bootstrap iter {it}: TimeLimit↔time_limit_seconds mismatch"
+            f"bootstrap iter {it}: TimeLimit mismatch"
         )
         assert settings.mip_focus == row["MIPFocus"], (
-            f"bootstrap iter {it}: MIPFocus↔mip_focus mismatch"
+            f"bootstrap iter {it}: MIPFocus mismatch"
         )
         assert floor == row["min_iterations"], (
             f"bootstrap iter {it}: min_iterations floor mismatch"
@@ -267,22 +239,18 @@ def test_point_helper_uses_bounded_floors_without_terminal_sentinel(
     # non-retiring phase would block every point estimate until max_iterations.
     fixture = _load_replay_fixture()
     callback = point_timeout_callback(schedule)
-    # Read the point block, not bootstrap: the two happen to share settings,
-    # but this helper is the point helper, so it must replay the point capture.
+    # read the point block, not bootstrap (the two happen to share settings)
     expected = fixture["point"]
     assert len(expected) == n_iters
 
-    # Floors derived from the schedule, not from combrum: cumulative bounded
-    # boundaries are [2, 5, 9] (phases of iters 2, 3, 4). Non-retiring bounded
-    # phases floor at their boundary; the retiring phase (iters 5–8) floors at
-    # 0; the terminal phase (iters 9–11) gets no sentinel under point policy.
+    # cumulative bounded boundaries are [2, 5, 9] (phases of iters 2, 3, 4):
+    # non-retiring phases floor at their boundary, the retiring phase (iters
+    # 5–8) floors at 0, the terminal phase (iters 9–11) gets no sentinel.
     expected_floors = [2, 2, 5, 5, 5, 0, 0, 0, 0, None, None, None]
     assert len(expected_floors) == n_iters
 
-    # The point fixture block still records the bootstrap-style sentinel on the
-    # terminal iterations; the point helper must override it to None. Confirm
-    # the divergence is real (so this assertion has a meaningful signal) by checking the
-    # fixture carries the sentinel exactly where the helper drops it.
+    # the point fixture block still records the bootstrap-style sentinel on the
+    # terminal iterations; the point helper must override it to None.
     terminal_iters = [it for it, f in enumerate(expected_floors) if f is None]
     assert terminal_iters == [9, 10, 11]
     for it in terminal_iters:
@@ -295,17 +263,16 @@ def test_point_helper_uses_bounded_floors_without_terminal_sentinel(
         floor = callback(it, recorder)  # type: ignore[arg-type]
         row = expected[it]
         assert recorder.last.time_limit_seconds == row["TimeLimit"], (
-            f"point iter {it}: TimeLimit↔time_limit_seconds mismatch"
+            f"point iter {it}: TimeLimit mismatch"
         )
         assert recorder.last.mip_focus == row["MIPFocus"], (
-            f"point iter {it}: MIPFocus↔mip_focus mismatch"
+            f"point iter {it}: MIPFocus mismatch"
         )
         assert floor == expected_floor, (
             f"point iter {it}: floor mismatch"
         )
-        # On bounded iters the helper's floor must equal the point fixture's
-        # captured min_iterations; on terminal iters it must diverge (None vs
-        # the sentinel the fixture recorded).
+        # bounded iters match the capture; terminal iters diverge (None vs
+        # the recorded sentinel)
         if expected_floor is None:
             assert row["min_iterations"] != floor
         else:
@@ -328,13 +295,8 @@ def test_same_schedule_and_iteration_is_deterministic(schedule, n_iters) -> None
             assert floor_a == floor_b
             assert a.last.time_limit_seconds == b.last.time_limit_seconds
             assert a.last.mip_focus == b.last.mip_focus
-            # A FRESH instance invoked twice at the SAME iteration: the callback
-            # is a pure function of (schedule, iteration), so its 1st and 2nd
-            # calls must return the identical floor and re-apply identical
-            # settings. This distinguishes per-instance state a repeat call would
-            # mutate (e.g. a "seen-before" flag that bumps the floor or focus on
-            # a repeat) from the stateless contract the replay and cold-start
-            # tests each probe with a single call per instance.
+            # same instance called twice at the same iteration: no per-call
+            # state may leak (e.g. a seen-before flag bumping floor or focus)
             f3 = helper(schedule)
             c = _Recorder()
             floor_first = f3(it, c)  # type: ignore[arg-type]

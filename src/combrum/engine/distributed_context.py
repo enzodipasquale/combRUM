@@ -14,7 +14,11 @@ from combrum.context import (
     _coerce_result_publication,
 )
 from combrum.engine.agreement import agree_public_int, require_public_object_agreement
-from combrum.engine.context_builder import BuiltContext, prepare_warm_cuts
+from combrum.engine.context_builder import (
+    BuiltContext,
+    _master_params_for_backend,
+    prepare_warm_cuts,
+)
 from combrum.formulations import NSlack
 from combrum.masters import make_master
 from combrum.model import Model
@@ -273,9 +277,7 @@ def build_distributed_fit_context(
         )
 
     def _owner_master() -> object:
-        params = master_params
-        if params is None and master_backend == "gurobi":
-            params = {"Method": 0, "LPWarmStart": 2}
+        params = _master_params_for_backend(master_backend, master_params)
         master_obj = make_master(
             prep.K,
             model.parameters.bounds(),

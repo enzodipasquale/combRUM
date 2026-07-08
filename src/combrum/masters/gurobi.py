@@ -127,6 +127,9 @@ class GurobiMaster(MasterBackend):
         )
         self._theta_vars = self._theta_mvar.tolist()
         self._theta_eye = None
+        self._linear_mvar = None
+        self._linear_coeffs_base = None
+        self._linear_coeffs_work = None
         self._model = model
         self._installed: dict[tuple[int, bytes], CutRow] = {}
         self._constrs: dict[tuple[int, bytes], object] = {}
@@ -207,6 +210,7 @@ class GurobiMaster(MasterBackend):
                 raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
             u_var = self._model.addVar(lb=self._u_lb(), obj=coef)
             self._u_vars[row.agent_id] = u_var
+            self._invalidate_objective_cache()
         expr = self._gp.LinExpr([1.0, *(-row.phi)], [u_var, *self._theta_vars])
         self._constrs[(row.agent_id, row.bundle_key)] = self._model.addConstr(
             expr >= row.epsilon
@@ -292,8 +296,8 @@ class GurobiMaster(MasterBackend):
                 if var.VBasis in (grb.NONBASIC_LOWER, grb.NONBASIC_UPPER):
                     out[k] = float(var.RC)
             return out
-        # An active penalty makes this a barrier QP with no simplex basis, so
-        # VBasis is unavailable; use bound proximity within FeasibilityTol.
+        # An active penalty is not an LP certificate even when Gurobi solves it
+        # by a simplex-capable path; report bound signals by primal proximity.
         tol = float(self._model.Params.FeasibilityTol)
         for k, var in enumerate(self._theta_vars):
             at_lower = float(theta[k]) - float(self._lower[k]) <= tol
@@ -379,6 +383,11 @@ class GurobiMaster(MasterBackend):
 
     # -- objective shaping ---------------------------------------------------
 
+    def _invalidate_objective_cache(self) -> None:
+        self._linear_mvar = None
+        self._linear_coeffs_base = None
+        self._linear_coeffs_work = None
+
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.array(ref, dtype=np.float64)
         if ref.shape != (self._K,):
@@ -396,22 +405,55 @@ class GurobiMaster(MasterBackend):
         ref.setflags(write=False)
         self._penalty = (ref, float(weight))
 
-    def _linear_variables(self) -> list[object]:
-        return [*self._theta_vars, *self._u_vars.values()]
+    def _linear_terms(self) -> tuple[object, np.ndarray]:
+        if self._linear_mvar is not None and self._linear_coeffs_base is not None:
+            return self._linear_mvar, self._linear_coeffs_base
+        if self._u_mvar is not None:
+            variables = self._gp.concatenate([self._theta_mvar, self._u_mvar])
+            coeffs = np.empty(self._K + self._n_agents, dtype=np.float64)
+            coeffs[: self._K] = self._c
+            coeffs[self._K :] = np.fromiter(
+                (self._u_obj[agent_id] for agent_id in range(self._n_agents)),
+                dtype=np.float64,
+                count=self._n_agents,
+            )
+        elif self._u_vars:
+            u_mvar = self._gp.MVar.fromlist(list(self._u_vars.values()))
+            variables = self._gp.concatenate([self._theta_mvar, u_mvar])
+            coeffs = np.empty(self._K + len(self._u_vars), dtype=np.float64)
+            coeffs[: self._K] = self._c
+            for offset, agent_id in enumerate(self._u_vars, start=self._K):
+                coeffs[offset] = self._u_obj[agent_id]
+        else:
+            variables = self._theta_mvar
+            coeffs = np.array(self._c, dtype=np.float64, copy=True)
+        coeffs.setflags(write=False)
+        self._linear_mvar = variables
+        self._linear_coeffs_base = coeffs
+        return variables, coeffs
 
-    def _linear_coefficients(self, theta_delta: np.ndarray | None = None) -> np.ndarray:
-        coeffs = np.empty(self._K + len(self._u_vars), dtype=np.float64)
-        coeffs[: self._K] = self._c if theta_delta is None else self._c + theta_delta
-        for offset, agent_id in enumerate(self._u_vars, start=self._K):
-            coeffs[offset] = self._u_obj[agent_id]
-        return coeffs
+    def _linear_coefficients(
+        self, theta_delta: np.ndarray | None = None
+    ) -> tuple[object, np.ndarray]:
+        variables, base = self._linear_terms()
+        if theta_delta is None:
+            return variables, base
+        work = self._linear_coeffs_work
+        if work is None or work.shape != base.shape:
+            work = np.array(base, dtype=np.float64, copy=True)
+            self._linear_coeffs_work = work
+        else:
+            np.copyto(work, base)
+        work[: self._K] += theta_delta
+        return variables, work
 
     def _set_linear_objective(self) -> None:
+        variables, coeffs = self._linear_coefficients()
         self._model.setMObjective(
             None,
-            self._linear_coefficients(),
+            coeffs,
             0.0,
-            xc=self._linear_variables(),
+            xc=variables,
             sense=self._gp.GRB.MINIMIZE,
         )
 
@@ -420,13 +462,14 @@ class GurobiMaster(MasterBackend):
         # warm state across changing proximal objectives.
         theta_linear = -2.0 * weight * ref
         constant = weight * float(ref @ ref)
+        variables, coeffs = self._linear_coefficients(theta_linear)
         self._model.setMObjective(
             self._quadratic_eye() * weight,
-            self._linear_coefficients(theta_linear),
+            coeffs,
             constant,
             xQ_L=self._theta_mvar,
             xQ_R=self._theta_mvar,
-            xc=self._linear_variables(),
+            xc=variables,
             sense=self._gp.GRB.MINIMIZE,
         )
 

@@ -1,9 +1,4 @@
-"""HiGHS-hosted master problem: the license-free, LP-only backend.
-
-No native quadratic support, so :meth:`HighsMaster.set_penalty` with
-``weight > 0`` is a hard error: an approximated penalty would make every
-reported dual a multiplier of a different problem than the one solved.
-"""
+"""HiGHS-hosted master problem: the license-free LP backend."""
 
 from __future__ import annotations
 
@@ -85,21 +80,34 @@ class HighsMaster(MasterBackend):
         self._highspy = highspy
         self._build()
 
+    def _invalidate_solution(self) -> None:
+        self._solution = None
+
     def _build(self) -> None:
         solver = self._highspy.Highs()
         solver.setOptionValue("output_flag", False)
+        if "solver" not in self._params:
+            self._check_status(
+                solver.setOptionValue("solver", "simplex"),
+                "setOptionValue(solver)",
+            )
         for key, value in self._params.items():
-            solver.setOptionValue(key, value)
+            self._check_status(
+                solver.setOptionValue(key, value), f"setOptionValue({key})"
+            )
         no_index = np.array([], dtype=np.int32)
         no_value = np.array([], dtype=np.float64)
         for k in range(self._K):
-            solver.addCol(
-                float(self._c[k]),
-                float(self._lower[k]),
-                float(self._upper[k]),
-                0,
-                no_index,
-                no_value,
+            self._check_status(
+                solver.addCol(
+                    float(self._c[k]),
+                    float(self._lower[k]),
+                    float(self._upper[k]),
+                    0,
+                    no_index,
+                    no_value,
+                ),
+                f"addCol(theta[{k}])",
             )
         self._h = solver
         self._n_cols = self._K
@@ -107,6 +115,7 @@ class HighsMaster(MasterBackend):
         self._row_index: dict[tuple[int, bytes], int] = {}
         self._row_keys: list[tuple[int, bytes]] = []
         self._u_cols: dict[int, int] = {}
+        self._u_upper: dict[int, float] = {}
         self._solution: _Solution | None = None
         if self._n_agents is not None:
             # Pre-declare all u-columns in agent order: a fixed column structure
@@ -117,76 +126,108 @@ class HighsMaster(MasterBackend):
                 coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
                 if not np.isfinite(coef):
                     raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
-                solver.addCol(
-                    coef,
-                    self._u_lb(),
-                    self._highspy.kHighsInf,
-                    0,
-                    np.array([], dtype=np.int32),
-                    np.array([], dtype=np.float64),
+                self._check_status(
+                    solver.addCol(
+                        coef,
+                        self._u_lb(),
+                        self._highspy.kHighsInf,
+                        0,
+                        np.array([], dtype=np.int32),
+                        np.array([], dtype=np.float64),
+                    ),
+                    f"addCol(u[{agent_id}])",
                 )
                 self._u_cols[agent_id] = self._n_cols
+                self._u_upper[agent_id] = float(self._highspy.kHighsInf)
                 self._n_cols += 1
 
     # -- cut management ----------------------------------------------------
 
     def add_cuts(self, rows: Sequence[CutRow]) -> int:
-        fresh: list[CutRow] = []
+        fresh: dict[tuple[int, bytes], CutRow] = {}
         for row in rows:
             key = (row.agent_id, row.bundle_key)
-            if key not in self._installed:
-                # First occurrence wins; duplicates absorbed.
-                self._installed[key] = row
-                fresh.append(row)
+            if key in self._installed or key in fresh:
+                continue
+            self._validate_row(row)
+            # First occurrence wins; duplicates absorbed.
+            fresh[key] = row
+        # Invalidate before the installs so a mid-batch solver error cannot
+        # leave accessors reporting pre-add results.
+        if fresh:
+            self._invalidate_solution()
         # Install in canonical key order so equal row sets build identical
         # models regardless of in-batch arrival permutation.
-        for row in sorted(fresh, key=lambda r: (r.agent_id, r.bundle_key)):
+        for row in sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key)):
             self._install(row)
+            self._installed[(row.agent_id, row.bundle_key)] = row
         return len(fresh)
 
     def _install(self, row: CutRow) -> None:
         u_col = self._u_cols.get(row.agent_id)
+        created_u_col = False
         if u_col is None:
             coef = self._u_obj.setdefault(
                 row.agent_id, float(self._u_coef(row.agent_id))
             )
             if not np.isfinite(coef):
                 raise ValueError(f"u_coef({row.agent_id}) must be finite; got {coef!r}")
-            self._add_u_columns(row.agent_id, coef)
+            self._add_u_columns(row.agent_id, coef, self._initial_u_upper(row, coef))
             u_col = self._u_cols[row.agent_id]
+            created_u_col = True
+        else:
+            self._update_u_upper(row)
         # Pass only nonzero theta entries to the sparse interface.
         nonzero = np.flatnonzero(row.phi)
         indices = np.append(nonzero, u_col).astype(np.int32)
         values = np.append(-row.phi[nonzero], 1.0)
-        self._h.addRow(
-            float(row.epsilon),
-            self._highspy.kHighsInf,
-            indices.size,
-            indices,
-            values,
+        status = self._h.addRow(
+            float(row.epsilon), self._highspy.kHighsInf, indices.size, indices, values
         )
+        try:
+            self._check_status(status, f"addRow({(row.agent_id, row.bundle_key)!r})")
+        except Exception:
+            if created_u_col:
+                self._remove_new_u_column(row.agent_id)
+            raise
         key = (row.agent_id, row.bundle_key)
         self._row_index[key] = len(self._row_keys)
         self._row_keys.append(key)
 
-    def _add_u_columns(self, agent_id: int, coef: float) -> None:
+    def _add_u_columns(self, agent_id: int, coef: float, upper: float) -> None:
         no_index = np.array([], dtype=np.int32)
         no_value = np.array([], dtype=np.float64)
-        self._h.addCol(
-            coef,
-            self._u_lb(),
-            self._highspy.kHighsInf,
-            0,
-            no_index,
-            no_value,
+        self._check_status(
+            self._h.addCol(coef, self._u_lb(), upper, 0, no_index, no_value),
+            f"addCol(u[{agent_id}])",
         )
         self._u_cols[agent_id] = self._n_cols
+        self._u_upper[agent_id] = upper
         self._n_cols += 1
+
+    def _remove_new_u_column(self, agent_id: int) -> None:
+        col = self._u_cols[agent_id]
+        status = self._h.deleteCols(1, np.array([col], dtype=np.int32))
+        self._check_status(status, f"deleteCols(u[{agent_id}])")
+        del self._u_cols[agent_id]
+        del self._u_upper[agent_id]
+        del self._u_obj[agent_id]
+        self._n_cols -= 1
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
             return -float(self._highspy.kHighsInf)
         return float(self._u_lower_bound)
+
+    def _validate_row(self, row: CutRow) -> None:
+        if row.phi.shape != (self._K,):
+            raise ValueError(
+                f"cut phi must have shape ({self._K},); got {row.phi.shape}"
+            )
+        if not np.isfinite(row.phi).all():
+            raise ValueError("cut phi must be finite everywhere")
+        if not np.isfinite(row.epsilon):
+            raise ValueError(f"cut epsilon must be finite; got {row.epsilon!r}")
 
     def extract_cuts(self) -> tuple[CutRow, ...]:
         return tuple(self._installed[key] for key in sorted(self._installed))
@@ -211,7 +252,8 @@ class HighsMaster(MasterBackend):
         if not retired:
             return 0
         idx = np.array(sorted(self._row_index[k] for k in retired), dtype=np.int32)
-        self._h.deleteRows(idx.size, idx)
+        status = self._h.deleteRows(idx.size, idx)
+        self._check_status(status, "deleteRows")
         for k in retired:
             del self._installed[k]
             del self._row_index[k]
@@ -219,7 +261,7 @@ class HighsMaster(MasterBackend):
         for new_i, k in enumerate(sorted(self._row_index, key=self._row_index.get)):
             self._row_index[k] = new_i
         self._row_keys = sorted(self._row_index, key=self._row_index.get)
-        self._solution = None  # cached solve is stale after removal
+        self._invalidate_solution()
         return len(retired)
 
     def set_rhs(self, updates: Mapping[tuple[int, bytes], float]) -> None:
@@ -231,7 +273,7 @@ class HighsMaster(MasterBackend):
                 raise KeyError(key)
         # Invalidate the cached solve before the writes so a mid-loop solver
         # error cannot leave accessors reporting pre-edit results.
-        self._solution = None
+        self._invalidate_solution()
         for key, new_eps in updates.items():
             idx = self._row_index[key]
             # Cut is `>=`: only the lower bound is the RHS; upper stays at
@@ -246,7 +288,35 @@ class HighsMaster(MasterBackend):
                 )
             # Keep the installed-row mirror exact so extract_cuts/reinstall see
             # the new RHS; phi is untouched.
-            self._installed[key] = replace(self._installed[key], epsilon=float(new_eps))
+            row = replace(self._installed[key], epsilon=float(new_eps))
+            self._installed[key] = row
+            self._update_u_upper(row)
+
+    def _initial_u_upper(self, row: CutRow, coef: float) -> float:
+        if self._u_lower_bound is None or coef < 0.0:
+            return float(self._highspy.kHighsInf)
+        return self._finite_u_upper(row)
+
+    def _finite_u_upper(self, row: CutRow) -> float:
+        rhs_max = float(row.epsilon) + float(
+            np.where(row.phi >= 0.0, row.phi * self._upper, row.phi * self._lower).sum()
+        )
+        return max(self._u_lb(), rhs_max)
+
+    def _update_u_upper(self, row: CutRow) -> None:
+        if self._u_lower_bound is None:
+            return
+        coef = self._u_obj[row.agent_id]
+        if coef < 0.0:
+            return
+        current = self._u_upper.get(row.agent_id, float(self._highspy.kHighsInf))
+        candidate = self._finite_u_upper(row)
+        if current < self._highspy.kHighsInf and candidate <= current:
+            return
+        col = self._u_cols[row.agent_id]
+        status = self._h.changeColBounds(col, self._u_lb(), candidate)
+        self._check_status(status, f"changeColBounds(u[{row.agent_id}])")
+        self._u_upper[row.agent_id] = candidate
 
     # -- solving and reporting ----------------------------------------------
 
@@ -291,8 +361,6 @@ class HighsMaster(MasterBackend):
         return out
 
     def _bound_duals_now(self, solution: object) -> dict[int, float]:
-        # Basis status flags which coordinates sit on a bound; the matching
-        # column dual is that bound's reduced cost.
         at_bound = (
             self._highspy.HighsBasisStatus.kLower,
             self._highspy.HighsBasisStatus.kUpper,
@@ -378,18 +446,22 @@ class HighsMaster(MasterBackend):
     # -- objective shaping ---------------------------------------------------
 
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
-        ref = np.asarray(ref, dtype=np.float64)
+        ref = np.array(ref, dtype=np.float64)
         if ref.shape != (self._K,):
             raise ValueError(f"ref must have shape ({self._K},); got {ref.shape}")
         if weight <= 0:
-            # Nothing to revert: this backend never holds a penalty.
             return
         raise NotImplementedError(
-            "the highs backend has no native quadratic support and will"
-            " not approximate the penalty: duals of an approximated"
-            " objective would be duals of the wrong problem; use a"
-            " quadratic-capable backend for penalized solves"
+            "the highs backend does not expose quadratic penalties: native"
+            " HiGHS QP solves stalled on full-size combRUM masters; use a"
+            " quadratic-capable backend such as gurobi"
         )
+
+    def _check_status(self, status: object, operation: str) -> None:
+        # kWarning is success with a note (e.g. addRow drops |value| <= 1e-9
+        # matrix entries); only kError means the edit did not take effect.
+        if status == self._highspy.HighsStatus.kError:
+            raise RuntimeError(f"{operation} returned kError")
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -398,6 +470,7 @@ class HighsMaster(MasterBackend):
         if self._h is not None:
             self._h.clear()
             self._h = None
+        self._solution = None
 
     def __enter__(self) -> HighsMaster:
         return self

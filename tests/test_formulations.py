@@ -31,10 +31,10 @@ import combrum.formulations.nslack as nslack_mod
 from combrum.interface_resolution import Mode, Resolution
 from _support.commprobe import _ROW_HEADER_BYTES, CountingTransport
 from _support.families import DEFAULT_SEED, load_family, toy_family
-from combrum.master import MasterBackend
+from combrum.master import CutReadings, MasterBackend
 from combrum.masters import gurobi as gurobi_backend
 from combrum.masters import highs as highs_backend
-from combrum.policies import CutPolicy
+from combrum.policies import CutPolicy, CutPolicyProfile
 from combrum.transport import (
     CutRow,
     LocalCluster,
@@ -297,10 +297,11 @@ def test_nslack_mapping_contribute_rejects_nonfinite_payoff(
 def test_nslack_received_violations_bound_dense_transient(monkeypatch) -> None:
     class _Master:
         def theta(self) -> np.ndarray:
-            return np.array([2.0, 3.0], dtype=np.float64)
+            raise AssertionError("_received_violations must use cached theta")
 
     formulation = _nslack_for_contribute(tolerance=0.0)
     formulation._master = _Master()
+    formulation._theta = np.array([2.0, 3.0], dtype=np.float64)
     formulation._u = {0: 0.5, 1: 1.5, 2: 2.5}
     rows = (
         CutRow(0, 0, np.array([1.0, 0.0]), 0.25, b"a"),
@@ -631,6 +632,186 @@ def test_oneslack_state_reads_master_epigraph_variable() -> None:
     assert state.n_installed == 1
     assert state.progressed == 7
     assert master.u_reads == 1
+
+
+class _PenaltyOrderMaster(MasterBackend):
+    def __init__(self, K: int) -> None:
+        self.K = int(K)
+        self.log: list[str] = []
+        self._installed: dict[tuple[int, bytes], CutRow] = {}
+
+    def add_cuts(self, rows: Sequence[CutRow]) -> int:
+        fresh = 0
+        for row in rows:
+            key = (row.agent_id, row.bundle_key)
+            if key not in self._installed:
+                self._installed[key] = row
+                fresh += 1
+        self.log.append(f"add_cuts:{fresh}")
+        return fresh
+
+    def solve(self) -> None:
+        self.log.append("solve")
+
+    def theta(self) -> np.ndarray:
+        return np.zeros(self.K, dtype=np.float64)
+
+    def objective(self) -> float:
+        return 0.0
+
+    def u_values(self) -> dict[int, float]:
+        return {int(agent_id): 0.0 for agent_id, _key in self._installed}
+
+    def dual_values(self) -> dict[tuple[int, bytes], float]:
+        return {}
+
+    def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
+        self.log.append(f"cut_readings:{int(dual)}:{int(slack)}")
+        return CutReadings(
+            keys=tuple(sorted(self._installed)),
+            dual=np.zeros(len(self._installed), dtype=np.float64) if dual else None,
+            slack=np.zeros(len(self._installed), dtype=np.float64) if slack else None,
+        )
+
+    def set_penalty(self, ref: np.ndarray, weight: float) -> None:
+        self.log.append(f"set_penalty:{float(weight):.1f}")
+
+    def extract_cuts(self) -> tuple[CutRow, ...]:
+        return tuple(self._installed[key] for key in sorted(self._installed))
+
+    def reinstall(self, rows: Sequence[CutRow]) -> None:
+        self._installed = {(row.agent_id, row.bundle_key): row for row in rows}
+
+    def bound_duals(self) -> dict[int, float]:
+        return {}
+
+
+def _penalty_order_ctx(master: MasterBackend, K: int = 1) -> FitContext:
+    return FitContext(
+        K=K,
+        N=2,
+        S=1,
+        theta_bounds=(
+            np.full(K, -1.0, dtype=np.float64),
+            np.full(K, 1.0, dtype=np.float64),
+        ),
+        theta_coef=np.ones(2, dtype=np.float64),
+        agent_weights=np.ones(2, dtype=np.float64),
+        local_ids=np.arange(2, dtype=np.int64),
+        transport=SerialTransport(),
+        tolerance=1e-8,
+        master_backend=master,
+    )
+
+
+def test_nslack_penalty_shares_the_post_install_solve() -> None:
+    master = _PenaltyOrderMaster(K=1)
+    formulation = NSlack(_publication_features)
+    formulation.setup(_penalty_order_ctx(master))
+    master.log.clear()
+
+    row = CutRow(
+        rep_id=0,
+        agent_id=0,
+        phi=np.array([1.0], dtype=np.float64),
+        epsilon=1.0,
+        bundle_key=pack_bundle(np.array([True])),
+    )
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 1.0)
+    progressed = formulation.apply_step((row,))
+
+    assert progressed == 1
+    assert master.log == ["add_cuts:1", "set_penalty:1.0", "solve"]
+
+
+def test_nslack_penalty_revert_solves_without_new_cuts() -> None:
+    master = _PenaltyOrderMaster(K=1)
+    formulation = NSlack(_publication_features)
+    formulation.setup(_penalty_order_ctx(master))
+    master.log.clear()
+
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 1.0)
+    formulation.apply_step(())
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 0.0)
+    formulation.apply_step(())
+
+    assert master.log == [
+        "add_cuts:0",
+        "set_penalty:1.0",
+        "solve",
+        "add_cuts:0",
+        "set_penalty:0.0",
+        "solve",
+    ]
+
+
+class _RecordingDualPurge(CutPolicy):
+    profile = CutPolicyProfile(
+        needs_admit_violations=False,
+        retires_cuts=True,
+        needs_purge_duals=True,
+        needs_purge_slacks=False,
+    )
+
+    def __init__(self) -> None:
+        self.dual_args: list[Mapping[tuple[int, bytes], float] | None] = []
+
+    def admit(
+        self,
+        candidates: Sequence[CutRow],
+        violations: np.ndarray,
+        iteration: int,
+    ) -> tuple[CutRow, ...]:
+        return tuple(candidates)
+
+    def purge(
+        self,
+        installed: Sequence[CutRow],
+        dual: Mapping[tuple[int, bytes], float] | None,
+        slack: Mapping[tuple[int, bytes], float] | None,
+        iteration: int,
+    ) -> tuple[CutRow, ...]:
+        self.dual_args.append(dual)
+        return ()
+
+
+def test_nslack_dual_purge_skips_qp_duals() -> None:
+    master = _PenaltyOrderMaster(K=1)
+    policy = _RecordingDualPurge()
+    ctx = _penalty_order_ctx(master)
+    object.__setattr__(ctx, "cut_policy", policy)
+    formulation = NSlack(_publication_features)
+    formulation.setup(ctx)
+
+    row = CutRow(
+        rep_id=0,
+        agent_id=0,
+        phi=np.array([1.0], dtype=np.float64),
+        epsilon=1.0,
+        bundle_key=pack_bundle(np.array([True])),
+    )
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 1.0)
+    formulation.apply_step((row,))
+    master.log.clear()
+
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 0.0)
+    formulation.apply_step(())
+
+    assert policy.dual_args[-1] is None
+    assert "cut_readings:1:0" not in master.log
+
+
+def test_oneslack_penalty_shares_the_post_install_solve() -> None:
+    master = _PenaltyOrderMaster(K=1)
+    formulation = OneSlack(_publication_features)
+    formulation.setup(_penalty_order_ctx(master))
+    master.log.clear()
+
+    formulation.prepare_penalty_solve(np.array([0.25], dtype=np.float64), 1.0)
+    progressed = formulation.apply_step((np.array([0.0], dtype=np.float64), 1.0))
+
+    assert progressed == 1
+    assert master.log == ["add_cuts:1", "set_penalty:1.0", "solve"]
 
 
 class _ResultPublicationMaster(MasterBackend):

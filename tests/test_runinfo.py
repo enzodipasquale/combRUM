@@ -667,16 +667,17 @@ def test_normalize_maxrss_rejects_unknown_platform(monkeypatch, fake_platform) -
 
 
 def test_peak_rss_bytes_rises_after_large_allocation(tmp_path: Path) -> None:
-    """peak_rss_bytes must report a monotone, unit-correct peak.
+    """peak_rss_bytes must report a real, unit-correct peak in bytes.
 
-    ru_maxrss is a per-process high-water mark, so this can only be checked in a
-    FRESH subprocess: within the shared pytest process an earlier test may have
-    already pushed the mark far above current usage, and a new 64 MiB allocation
-    would then not raise it at all. The child samples the peak, faults in a large
-    buffer page by page, and requires the reported peak to rise by well over half
-    the allocation. A unit bug (returning kibibytes on darwin, i.e. dropping the
-    ×1024 scaling) would report ~1024x too small and fall under the floor; a
-    zeroed-out implementation fails outright.
+    Checked in a FRESH subprocess so the reading is independent of whatever the
+    parent pytest process already pushed the per-process high-water mark to. The
+    child faults in a large buffer page by page, then requires the reported peak
+    to be at least the buffer size. Anchoring to the buffer -- not to a rise over
+    the pre-allocation reading -- is robust to the interpreter's own import
+    footprint (on Linux importing numpy alone can peak ru_maxrss above a small
+    allocation, so a rise-based check is flaky). A kibibyte mis-scale (~1024x too
+    small), a zeroed reading, and a stale pre-allocation reading all land below
+    the buffer size and fail.
     """
     src = Path(__file__).resolve().parents[1] / "src"
     probe = textwrap.dedent(
@@ -685,17 +686,17 @@ def test_peak_rss_bytes_rises_after_large_allocation(tmp_path: Path) -> None:
         from combrum.runinfo import peak_rss_bytes, normalize_maxrss
 
         before = normalize_maxrss(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        n_bytes = 64 * 1024 * 1024
+        n_bytes = 256 * 1024 * 1024
         buf = bytearray(n_bytes)
         for i in range(0, n_bytes, 4096):
             buf[i] = 1
         reported = peak_rss_bytes()
-        # Rose by well over half of what we faulted in (headroom for the OS not
-        # backing every page), and ~1024x above a mis-scaled darwin path.
-        floor = before + 32 * 1024 * 1024
-        assert reported > floor, (before, reported, floor)
-        # Bytes, not kibibytes: the peak must be at least the buffer we allocated.
-        assert reported >= n_bytes, (reported, n_bytes)
+        # The peak must be at least the buffer we faulted in. Anchoring to the
+        # buffer size catches all three failure modes at once and does not depend
+        # on beating the import-time high-water mark: a zeroed reading (0), a
+        # kibibyte mis-scale (~1024x too small), and a stale pre-allocation
+        # reading all fall below n_bytes.
+        assert reported >= n_bytes, (before, reported, n_bytes)
         print("OK")
         """
     )

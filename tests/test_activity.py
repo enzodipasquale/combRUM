@@ -28,8 +28,7 @@ def test_activity_config_defaults_off_and_coerces_level() -> None:
     assert summary.enabled
     assert summary.level is ActivityLevel.SUMMARY
 
-    # enabled depends on level alone, not stdout: check the full level x stdout
-    # cross product against the public rule "level is not off".
+    # enabled depends on level alone, not stdout.
     for level in ("off", "summary", "iterations", "diagnostic"):
         expected = level != "off"
         for stdout in (True, False):
@@ -100,11 +99,10 @@ def test_root_table_formatter_uses_stable_rowgen_delta_columns() -> None:
 
 
 def test_root_table_formatter_obj_min_width_pads_short_positive_objective() -> None:
-    # A positive objective formats to 9 chars ("1.000e+00"); the "obj" header is
-    # 3 chars. Both are narrower than the reserved obj/dobj min-width of 10, so
-    # that constant is load-bearing here: lowering it left-shifts the obj/dobj
-    # columns. Negative objectives are 10 chars and mask the constant, so the
-    # first row carries a positive objective to force the padding to matter.
+    # A positive objective formats to 9 chars ("1.000e+00") and the "obj"
+    # header to 3, both padded to the obj/dobj min-width of 10. Negative
+    # objectives fill all 10 chars and would mask the padding, so the first
+    # row carries a positive objective.
     stream = io.StringIO()
     formatter = RootTableFormatter(stream=stream)
 
@@ -119,10 +117,6 @@ def test_root_table_formatter_obj_min_width_pads_short_positive_objective() -> N
         )
     )
 
-    # Expected lines hand-derived from _MIN_COLUMN_WIDTHS (obj/dobj = 10) and
-    # _fmt_sci: the 9-char "1.000e+00" and the 3-char header are both padded to
-    # width 10, so the obj column starts one space further right than it would
-    # if obj's min-width were lowered to the header length.
     assert stream.getvalue().splitlines() == [
         "[toy] iter         gap        dgap         obj        dobj  +cuts",
         "[toy]    0   2.500e-01           -   1.000e+00           -      3",
@@ -143,8 +137,7 @@ def test_root_table_formatter_reprints_header_when_columns_change() -> None:
         )
     )
 
-    # Expected lines hand-derived from the min-column widths and _fmt_sci
-    # (dobj is "-" because the first row carried no objective to diff against).
+    # dobj is "-" because the first row carried no objective to diff against.
     assert stream.getvalue().splitlines() == [
         "[toy] iter         gap        dgap",
         "[toy]    0   2.500e-01           -",
@@ -238,8 +231,6 @@ def test_root_table_formatter_bootstrap_header_rep_and_final_rows() -> None:
 
 
 def test_root_table_formatter_renders_nonconverged_rowgen_final() -> None:
-    # A run that did NOT converge must log converged=no. Every other formatter
-    # test passes converged=True, so this covers the "no" branch directly.
     stream = io.StringIO()
     formatter = RootTableFormatter(stream=stream)
 
@@ -255,9 +246,6 @@ def test_root_table_formatter_renders_nonconverged_rowgen_final() -> None:
         )
     )
 
-    # Full "done" line hand-derived from _named_values + _fmt_sci + _fmt_time.
-    # Only converged flips relative to the converged=True case, so this pins the
-    # "no" branch specifically.
     assert stream.getvalue().splitlines()[-1] == (
         "[toy] done converged=no iters=2 gap=0.000e+00 obj=-1.000e+00 wall=3.00s"
     )

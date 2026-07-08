@@ -141,6 +141,20 @@ class DualSolution:
         # the proxy makes it read-only.
         object.__setattr__(self, "bound_duals", MappingProxyType(bound_duals))
 
+    def __getstate__(self) -> dict[str, object]:
+        # mappingproxy has no pickle/deepcopy support; ship a plain dict.
+        state = dict(self.__dict__)
+        state["bound_duals"] = dict(self.bound_duals)
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        self.__dict__.update(state)
+        # Restore what the round trip drops: the read-only proxy and
+        # numpy's WRITEABLE=False flags.
+        object.__setattr__(self, "bound_duals", MappingProxyType(self.bound_duals))
+        for name in ("agent_ids", "bundle_row_ids", "pis", "bundle_table"):
+            _frozen(self.__dict__[name])
+
     def with_rep_id(self, rep_id: int) -> "DualSolution":
         """Return this validated payload re-keyed to ``rep_id`` without copies."""
         rep = operator.index(rep_id)

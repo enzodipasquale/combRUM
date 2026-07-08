@@ -213,6 +213,25 @@ class NSlack(Formulation):
         self._trace_sink: TraceSink | None = None
         self._pending: _Pending | None = None
 
+    def prepare_penalty_solve(self, ref: np.ndarray, weight: float) -> None:
+        """Stage the next proximal objective change for ``apply_step``.
+
+        The owner applies the objective after admitting cuts and before the
+        single master solve, so a penalty iteration does not solve the old
+        relaxation and then immediately solve the cut-augmented one again.
+        """
+        ref_arr = np.asarray(ref, dtype=np.float64)
+        if ref_arr.shape != (self._ctx.K,):
+            raise ValueError(
+                f"ref must have shape ({self._ctx.K},); got {ref_arr.shape}"
+            )
+        weight_value = float(weight)
+        if not np.isfinite(weight_value):
+            raise ValueError(f"weight must be finite; got {weight!r}")
+        staged_ref = np.array(ref_arr, dtype=np.float64, copy=True)
+        staged_ref.setflags(write=False)
+        self._pending_penalty = (staged_ref, weight_value)
+
     def set_trace_sink(self, sink: TraceSink | None) -> None:
         """Attach (or detach) the capture sink; default detached.
 
@@ -237,6 +256,8 @@ class NSlack(Formulation):
         self._is_owner = ctx.transport.rank == self._owner_rank
         self._master: MasterBackend | None = ctx.master_backend
         self._iteration = 0
+        self._pending_penalty: tuple[np.ndarray, float] | None = None
+        self._last_penalty_weight = 0.0
         # Resolve the features path once, identically on every rank, before
         # any data-dependent branch; agreement token rides the setup bcast.
         self._features_res: Resolution = resolve_features(self._features_arg)
@@ -455,6 +476,8 @@ class NSlack(Formulation):
         # Pending record opened in contribute (None with no sink or no prior
         # contribute). Root fills admit/purge/install fields below.
         pending = self._pending
+        pending_penalty = self._pending_penalty
+        self._pending_penalty = None
         packet: _MasterState | None = None
         full_u: dict[int, float] | None = None
         if self._is_owner:
@@ -498,7 +521,14 @@ class NSlack(Formulation):
                         (row.agent_id, row.bundle_key) for row in admitted
                     ),
                 )
-            if n_new or retired_keys:
+            must_solve = bool(n_new or retired_keys)
+            if pending_penalty is not None:
+                ref, weight = pending_penalty
+                penalty_changed = weight > 0.0 or self._last_penalty_weight > 0.0
+                self._master.set_penalty(ref, weight)
+                self._last_penalty_weight = weight
+                must_solve = must_solve or penalty_changed
+            if must_solve:
                 self._master.solve()
             packet, full_u = self._state(progressed=n_new)
         return packet, full_u
@@ -546,7 +576,7 @@ class NSlack(Formulation):
     def _received_violations(self, rows: tuple[CutRow, ...]) -> np.ndarray:
         if not rows:
             return np.empty(0, dtype=np.float64)
-        theta = self._master.theta()
+        theta = self._theta
         out = np.empty(len(rows), dtype=np.float64)
         block_rows = max(
             1,
@@ -605,14 +635,20 @@ class NSlack(Formulation):
             if pending is not None:
                 pending.purge_inputs = []
             return set()
-        readings = self._master.cut_readings(
-            dual=profile.needs_purge_duals,
-            slack=profile.needs_purge_slacks,
-        )
-        duals = readings.dual_map() if profile.needs_purge_duals else None
-        # Row slack over the last solved relaxation. Newly admitted rows are
-        # installed after purge, so rows without last-solve readings stay absent.
-        slack = readings.slack_map() if profile.needs_purge_slacks else None
+        read_duals = profile.needs_purge_duals and self._last_penalty_weight <= 0.0
+        read_slacks = profile.needs_purge_slacks
+        if read_duals or read_slacks:
+            readings = self._master.cut_readings(
+                dual=read_duals,
+                slack=read_slacks,
+            )
+            duals = readings.dual_map() if read_duals else None
+            # Row slack over the last solved relaxation. Newly admitted rows are
+            # installed after purge, so rows without last-solve readings stay absent.
+            slack = readings.slack_map() if read_slacks else None
+        else:
+            duals = None
+            slack = None
         if pending is not None:
             # Pre-retirement dual/slack the policy.purge reads next; None
             # where the last solve held no reading.

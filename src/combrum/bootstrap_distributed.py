@@ -695,7 +695,10 @@ def _run_replica_wave(
                         next_worsts, next_rows = _guarded_price(next_slot)
                         block_slots.extend(int(slot) for slot in next_slot)
                         worst_parts.append(next_worsts)
-                        rows.extend(next_rows)
+                        # The single-slot probe stamped its rows at position 0;
+                        # re-key them to the slot's position in the block the
+                        # batched exchange routes by.
+                        rows.extend(_restamp(next_rows, len(block_slots) - 1))
                         observed_row_nbytes = _observed_cut_row_nbytes(
                             next_rows, transport=transport
                         )

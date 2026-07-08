@@ -133,8 +133,9 @@ def fit_step(
     finalise.
 
     ``before_apply`` is an optional hook run after finalise and before
-    apply_step. The penalty path uses it to re-solve the master so the install
-    adopts the penalized iterate. ``None`` on the pure-LP path.
+    apply_step. The penalty path uses it for formulations without
+    ``prepare_penalty_solve``, re-solving the master so the install adopts
+    the penalized iterate. ``None`` otherwise.
 
     ``demand_sink`` is an optional read-only observer called with the
     ``{id: Demand}`` mapping after pricing and before contribute. Read-only:

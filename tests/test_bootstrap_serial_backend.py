@@ -28,11 +28,10 @@ class _Formulation:
 def _run_fake_bootstrap(monkeypatch, model, data, *, n_bootstrap=4):
     """Drive ``bootstrap`` with mocked engine hooks.
 
-    ``fake_run_fit`` returns a per-rep-distinguishable outcome: replication ``b``
-    reports ``theta_hat = full(K, b)`` and converges on every rep except rep 1.
-    That lets callers assert the per-rep loop places each outcome in its own row
-    (a homogeneous mock would let a mis-indexed write survive). ``captured``
-    records the ``weights`` and ``observed_cache`` each ``build_fit_context`` saw.
+    Replication ``b`` reports ``theta_hat = full(K, b)`` and converges on every
+    rep except rep 1, so per-rep outcomes are distinguishable. The returned
+    namespace records the ``weights`` and ``observed_cache`` each
+    ``build_fit_context`` saw.
     """
     bootstrap_mod = importlib.import_module("combrum.bootstrap")
     resolved_calls: list[str] = []
@@ -107,21 +106,18 @@ def test_serial_bootstrap_resolves_backend_once(monkeypatch) -> None:
     data = _zeros_data()
     run = _run_fake_bootstrap(monkeypatch, model, data)
 
-    # rep 1 alone reports nonconvergence; the mask pins that outcome b lands in
-    # row b (a hardcoded all-True mask or a write that only touches row 0 fails).
+    # rep 1 alone reports nonconvergence; rep b's theta lands in row b
     assert run.result.converged.tolist() == [True, False, True, True]
-    # thetas[b] == b: forces the per-rep result into its own row.
     assert run.result.thetas.tolist() == [[0.0], [1.0], [2.0], [3.0]]
     assert run.resolved_calls == ["auto"]
     assert run.build_resolved == ["highs", "highs", "highs", "highs"]
 
-    # Independent per-rep weight oracle (same seed, distinct RNG substream per b).
+    # same base_seed as the run; weights_for(b) is rep b's RNG substream
     oracle = NativeDraws(n_obs=len(data.observables), base_seed=7)
     assert len(run.captured_weights) == 4
     for b, seen in enumerate(run.captured_weights):
         assert np.array_equal(seen, oracle.weights_for(b))
-    # Consecutive reps must receive DISTINCT weight rows; reusing rep 0's row
-    # (a broken bootstrap with zero between-rep variance) collapses this.
+    # consecutive reps draw distinct weight rows
     for b in range(3):
         assert not np.array_equal(
             run.captured_weights[b], run.captured_weights[b + 1]
@@ -143,14 +139,10 @@ def test_serial_bootstrap_rejects_non_integer_replication_count(monkeypatch) -> 
 
     run = _run_fake_bootstrap(monkeypatch, model, data, n_bootstrap=np.int64(2))
     assert run.result.thetas.shape == (2, 1)
-    # Per-rep placement: outcome b in row b, not all collapsed into row 0.
     assert run.result.thetas.tolist() == [[0.0], [1.0]]
     assert run.result.converged.tolist() == [True, False]
 
-    # The documented minimum n_bootstrap=1 must be ACCEPTED, not rejected: this
-    # pins the lower-bound boundary so `out < 2`/`out <= 1` off-by-ones die. rep 0
-    # reports theta_hat=full(K, 0)=[0.0] and converges, so the full one-row result
-    # is fully determined.
+    # n_bootstrap=1 is the documented minimum and must be accepted
     run_one = _run_fake_bootstrap(monkeypatch, model, data, n_bootstrap=1)
     assert run_one.result.thetas.shape == (1, 1)
     assert run_one.result.thetas.tolist() == [[0.0]]
@@ -186,8 +178,7 @@ def test_serial_bootstrap_rejects_multirank_dense_transport() -> None:
             return str(exc)
         return None
 
-    # The message should name the entry point, the release, and the distributed
-    # alternative. Pin the whole string so the wording remains actionable.
+    # full message: entry point, release, and the distributed alternative
     expected = (
         f"bootstrap does not support non-serial transport in combRUM {combrum.__version__};"
         " use bootstrap_distributed for distributed runs"
@@ -224,11 +215,8 @@ def test_serial_bootstrap_reuses_observed_rows_for_materialized_path(
     parameters = Parameters({"theta": (-1.0, 1.0, 1)})
     calls: list[tuple[int, float]] = []
 
-    # phi row depends on BOTH the bundle and the agent id, so agents 2, 3 (which
-    # share bundle rows with agents 0, 1 via a % N) produce DISTINCT rows. That
-    # breaks the row/divisor symmetry that let an N=n_agents confusion or a
-    # `local_ids < N` -> `<= N` off-by-one hide: the included set and the divisor
-    # no longer scale together, so each is pinned separately below.
+    # phi depends on both the bundle and the agent id, so agents 2, 3 (which
+    # reuse bundle rows 0, 1 via a % N) still get distinct phi rows
     def features(agent_id, bundle):  # type: ignore[no-untyped-def]
         calls.append((int(agent_id), float(np.asarray(bundle)[0])))
         value = float(np.asarray(bundle)[0]) + 10.0 * int(agent_id)
@@ -253,22 +241,16 @@ def test_serial_bootstrap_reuses_observed_rows_for_materialized_path(
     cache = run.build_caches[0]
     assert cache is not None
 
-    # Independently derived cache content. shocks shape (2, 2, 1) => n_sim=2,
-    # n_agents = N * n_sim = 4, local_ids = [0, 1, 2, 3]. bundle of agent a is
-    # observed_bundles[a % N]; phi row = bundle + 10*a, so the four rows are all
-    # distinct and none of them repeat.
+    # shocks (2, 2, 1) => n_sim=2, n_agents = N * n_sim = 4; bundle of agent a
+    # is observed_bundles[a % N] and phi row = bundle + 10*a
     N = 2
     expected_phi = np.array([[1.0], [12.0], [21.0], [32.0]])
     assert np.array_equal(cache.phi_local, expected_phi)
-    # empirical_moment pins BOTH the a < N mask and the /N divisor independently:
-    # only rows 0, 1 are observed and the divisor is the literal n_obs, not
-    # len(local_ids). Including agents 2, 3 (N=n_agents confusion) would give
-    # (1+12+21+32)/4 = 16.5; the `<= N` off-by-one would give (1+12+21)/2 = 17.0.
+    # only rows 0, 1 are observed; the divisor is n_obs, not len(local_ids)
     expected_empirical = (expected_phi[0] + expected_phi[1]) / float(N)
     assert np.array_equal(cache.empirical_moment, expected_empirical)
     assert np.array_equal(cache.empirical_moment, np.array([6.5]))
-    # Guard the symmetry that hid the regression: the correct moment must differ from the
-    # sum-over-all-rows / n_agents value a confused reduction would produce.
+    # differs from the all-rows / n_agents mean
     assert not np.allclose(
         cache.empirical_moment, expected_phi.sum(axis=0) / float(len(expected_phi))
     )
@@ -336,12 +318,9 @@ def test_serial_bootstrap_keeps_aggregate_features_per_rep(
 
     run = _run_fake_bootstrap(monkeypatch, model, data, n_bootstrap=3)
 
-    # Independent oracle for the skip decision: this map satisfies every clause of
-    # the cache-skip gate (serial transport, OPTIMIZED resolution, and advertised
-    # aggregate support), so bootstrap must decline to build a shared cache and
-    # leave each rep to recompute. The companion _PlainBatch test pins the
-    # converse -- an OPTIMIZED map WITHOUT aggregate support is cached -- so the
-    # pair pins the aggregate-support clause in both directions.
+    # this map satisfies every clause of the cache-skip gate (serial transport,
+    # OPTIMIZED resolution, aggregate support), so no shared cache is built and
+    # each rep recomputes; the _PlainBatch test below covers the converse
     from combrum.interface_resolution import (
         resolve_features,
         supports_feature_batch_aggregate,
@@ -356,12 +335,9 @@ def test_serial_bootstrap_keeps_aggregate_features_per_rep(
 def test_serial_bootstrap_caches_optimized_batch_without_aggregate(
     monkeypatch,
 ) -> None:
-    # Companion to the aggregate case: a plain OPTIMIZED FeatureMap whose
-    # features_batch takes only (ids, bundles) -- no weights/aggregate kwargs, so
-    # supports_feature_batch_aggregate is False. The cache-skip gate must keep
-    # ALL THREE clauses (size==1 and OPTIMIZED and aggregate-support); dropping
-    # the aggregate-support clause would wrongly skip the cache here and force
-    # per-rep recomputation.
+    # OPTIMIZED FeatureMap whose features_batch takes only (ids, bundles) -- no
+    # weights/aggregate kwargs, so supports_feature_batch_aggregate is False and
+    # the shared cache must still be built
     class _PlainBatch(FeatureMap):
         def features_batch(self, ids, bundles):  # type: ignore[no-untyped-def]
             ids = np.asarray(ids)
@@ -376,9 +352,8 @@ def test_serial_bootstrap_caches_optimized_batch_without_aggregate(
         formulation=_Formulation,
     )
     data = Data(
-        # shocks (2, 2, 1) => n_sim=2, n_agents=4: agents 2, 3 cross the observed
-        # boundary so the `local_ids < N` mask and the /N divisor are exercised,
-        # not the degenerate n_local_ids == N case.
+        # shocks (2, 2, 1) => n_sim=2, n_agents=4: agents 2, 3 fall outside the
+        # observed rows
         observed_bundles=np.array([[3.0], [5.0]], dtype=np.float64),
         shocks=np.zeros((2, 2, 1), dtype=np.float64),
         observables=np.arange(2),
@@ -389,14 +364,11 @@ def test_serial_bootstrap_caches_optimized_batch_without_aggregate(
     cache = run.build_caches[0]
     assert cache is not None
     assert all(c is cache for c in run.build_caches)
-    # Independently derived content. n_agents=4, local_ids=[0, 1, 2, 3]; bundle of
-    # agent a is observed_bundles[a % N] and phi row = bundle + 10*a, giving four
-    # distinct rows.
+    # n_agents=4; bundle of agent a is observed_bundles[a % N] and
+    # phi row = bundle + 10*a
     expected_phi = np.array([[3.0], [15.0], [23.0], [35.0]])
     assert np.array_equal(cache.phi_local, expected_phi)
-    # empirical_moment sums ONLY the observed rows (local_ids < N = [0, 1]) and
-    # divides by the literal n_obs=2. Including agents 2, 3 (`<= N` off-by-one or
-    # N=n_agents) would change both the sum and the answer, so both are pinned.
+    # only the observed rows (local_ids < N) enter the moment, divided by n_obs=2
     N = 2
     expected_empirical = (expected_phi[0] + expected_phi[1]) / float(N)
     assert np.array_equal(cache.empirical_moment, expected_empirical)

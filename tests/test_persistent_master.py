@@ -501,9 +501,8 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
 
     def fake_resolve(requested, **kwargs):  # type: ignore[no-untyped-def]
         captured.append(bool(kwargs["require_quadratic"]))
-        # A quadratic backend is demanded exactly when require_quadratic is True;
-        # mirror resolve_master_backend's own contract so the raise arm is only
-        # reached in that case.
+        # Raise only on the live-penalty branch so this test can prove the
+        # driver passes the exact require_quadratic truth table into resolution.
         if kwargs["require_quadratic"]:
             raise RuntimeError("quadratic backend required")
         return "highs"

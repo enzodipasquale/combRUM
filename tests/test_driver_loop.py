@@ -154,6 +154,7 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
         def __init__(self) -> None:
             self.dual_calls = 0
             self.penalty_calls = 0
+            self.solve_calls = 0
             self.objective_calls = 0
             self.n_active_cuts = 9
             self.weights: list[float] = []
@@ -171,7 +172,7 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             self.refs.append(tuple(np.asarray(ref, dtype=np.float64).ravel()))
 
         def solve(self) -> None:
-            pass
+            self.solve_calls += 1
 
         def objective(self) -> float:
             self.objective_calls += 1
@@ -271,6 +272,7 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
         return (
             master.dual_calls,
             master.penalty_calls,
+            master.solve_calls,
             master.objective_calls,
             tuple(row.objective for row in rows),
             tuple(row.active_cuts for row in rows),
@@ -282,15 +284,17 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     # Independent oracle for the decayed penalty schedule. With qp_weight=1.0 and
     # decay=1 the linear-to-zero rule weight(it) = qp_weight * max(0, 1 - it/decay)
     # gives 1.0 at it=0 and 0.0 from it=1 on, so over three iterations the owner
-    # installs exactly (1.0, 0.0, 0.0) and the published theta rides the final
-    # weight 0.0 (a pure LP). Recompute both from the config values here rather
-    # than reading any driver local, so a non-decaying `weight_t = qp_weight`
-    # constant (owner sees (1.0, 1.0, 1.0), final weight 1.0), an off-by-one
-    # `it + 1` shift (owner sees (0.0, 0.0, 0.0)), and a dropped max() clamp
-    # (owner sees (1.0, 0.0, -1.0), final weight -1.0) all diverge from this.
+    # installs exactly (1.0, 0.0): the positive QP solve, then the one necessary
+    # revert solve to restore a pure LP. Later zero-weight iterations must not
+    # keep solving an already-pure master. Recompute both from the config values
+    # here rather than reading any driver local, so a non-decaying
+    # `weight_t = qp_weight` constant (owner sees more positive weights), an
+    # off-by-one `it + 1` shift (owner sees no positive solve), and a dropped
+    # post-decay guard (owner sees an extra 0.0) all diverge from this.
     qp_weight, decay = 1.0, 1
     expected_weights = tuple(
-        qp_weight * max(0.0, 1.0 - it / decay) for it in range(3)
+        qp_weight * max(0.0, 1.0 - it / decay)
+        for it in range(2)
     )
     final_weight = expected_weights[-1]
 
@@ -299,14 +303,14 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     # "dynamic", else static_ref = theta_init. With the fixtures above those two
     # anchors are deliberately distinct: solve() returns THETA_SOLVE and
     # theta_init is THETA_INIT. So on the owner the static run installs
-    # (THETA_INIT,)*3 and the dynamic run installs (THETA_SOLVE,)*3; the
+    # (THETA_INIT,)*2 and the dynamic run installs (THETA_SOLVE,)*2; the
     # non-owner installs nothing. Hand-build both schedules from the fixture
     # scalars, never from a driver local. A branch collapse -- ref_t = query
     # always (static run drifts onto THETA_SOLVE) or ref_t = static_ref always
     # (dynamic run drifts onto THETA_INIT) -- makes exactly one of the two runs
     # diverge, so pinning both anchors kills the whole penalty_ref branch.
-    static_ref_owner = tuple((THETA_INIT,) for _ in range(3))
-    dynamic_ref_owner = tuple((THETA_SOLVE,) for _ in range(3))
+    static_ref_owner = tuple((THETA_INIT,) for _ in range(2))
+    dynamic_ref_owner = tuple((THETA_SOLVE,) for _ in range(2))
 
     # Three iterations run (violation stays 1.0, so the loop hits max_iterations).
     # Rank 0 (non-owner) records no master calls; every emitted row carries
@@ -316,18 +320,23 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     # hardcoded (0, 0, 0) and from an `else step.progressed` fallback (4, 4, 4),
     # so both siblings of the fallback regression die. It installs no penalty
     # (empty weights, empty refs) and reports final_penalty_weight 0.0. Rank 1
-    # (owner) makes exactly three dual_values, three set_penalty, and three
-    # objective reads (=7.5 each, the master fixture's value); every owner row
-    # carries active_cuts=9 (the master fixture's n_active_cuts, read instead of
-    # cuts_admitted); it installs the decayed weights above at the branch-picked
-    # anchor and publishes at final_weight. Dropping either owner guard would flip
-    # rank 0's objective off None or its active_cuts onto 9; dropping the owner's
-    # n_active_cuts read would slide rank 1 onto the (4, 8, 12) totals.
+    # (owner) makes exactly one dual_values call: the first sweep is forced
+    # full, the second prices a QP-derived theta and is forced full again, and
+    # only the third may consult LP duals. It makes two set_penalty/solve calls
+    # (QP, then LP revert), and three objective reads (=7.5 each, the master
+    # fixture's value); every owner row carries active_cuts=9 (the master
+    # fixture's n_active_cuts, read instead of cuts_admitted); it installs the
+    # decayed weights above at the branch-picked anchor and publishes at
+    # final_weight.
+    # Dropping either owner guard would flip rank 0's objective off None or its
+    # active_cuts onto 9; dropping the owner's n_active_cuts read would slide
+    # rank 1 onto the (4, 8, 12) totals.
     assert LocalCluster(2).run(lambda t: per_rank(t, penalty_ref="static")) == [
-        (0, 0, 0, (None, None, None), (4, 8, 12), (), 0.0, ()),
+        (0, 0, 0, 0, (None, None, None), (4, 8, 12), (), 0.0, ()),
         (
-            3,
-            3,
+            1,
+            2,
+            2,
             3,
             (7.5, 7.5, 7.5),
             (9, 9, 9),
@@ -337,10 +346,11 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
         ),
     ]
     assert LocalCluster(2).run(lambda t: per_rank(t, penalty_ref="dynamic")) == [
-        (0, 0, 0, (None, None, None), (4, 8, 12), (), 0.0, ()),
+        (0, 0, 0, 0, (None, None, None), (4, 8, 12), (), 0.0, ()),
         (
-            3,
-            3,
+            1,
+            2,
+            2,
             3,
             (7.5, 7.5, 7.5),
             (9, 9, 9),
@@ -349,3 +359,48 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             dynamic_ref_owner,
         ),
     ]
+
+
+def test_driver_stages_penalty_on_formulation_when_supported(monkeypatch) -> None:
+    driver_mod = importlib.import_module("combrum.engine.driver")
+
+    def fake_resolve_price(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return object()
+
+    before_apply_values: list[object] = []
+
+    def fake_fit_step(*args, **kwargs):  # type: ignore[no-untyped-def]
+        before_apply_values.append(kwargs["before_apply"])
+        return replace(_zero_step(), violation=1.0)
+
+    monkeypatch.setattr(driver_mod, "_resolve_price", fake_resolve_price)
+    monkeypatch.setattr(driver_mod, "fit_step", fake_fit_step)
+
+    class _StagingFormulation(_Formulation):
+        def __init__(self) -> None:
+            self.prepared: list[tuple[tuple[float, ...], float]] = []
+
+        def solve(self) -> np.ndarray:
+            return np.array([0.25], dtype=np.float64)
+
+        def prepare_penalty_solve(self, ref, weight) -> None:  # type: ignore[no-untyped-def]
+            self.prepared.append(
+                (tuple(np.asarray(ref, dtype=np.float64).ravel()), float(weight))
+            )
+
+    formulation = _StagingFormulation()
+    outcome = run_fit(
+        _ctx(),
+        _Oracle(),
+        formulation,
+        LoopConfig(
+            max_iterations=2,
+            qp_weight=1.0,
+            decay=1,
+            penalty_ref="dynamic",
+        ),
+    )
+
+    assert before_apply_values == [None, None]
+    assert formulation.prepared == [((0.25,), 1.0), ((0.25,), 0.0)]
+    assert outcome.diagnostics.final_penalty_weight == 0.0

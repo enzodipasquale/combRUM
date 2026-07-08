@@ -47,7 +47,7 @@ HIGHS_AVAILABLE = highs_backend.available()
 
 # Both LP backends warm-start identically (reinstall is a pure-LP rebuild),
 # so the cut-replay gates run on each available backend; only the penalty
-# composition gate is gurobi-only (HiGHS has no quadratic term).
+# composition gate is gurobi-only (HiGHS does not expose quadratic support).
 needs_gurobi = pytest.mark.skipif(
     not GUROBI_AVAILABLE, reason="gurobipy missing or no environment starts"
 )
@@ -361,9 +361,9 @@ def test_warm_start_composes_with_penalty_decay(
     # runs the quadratic penalty (qp_weight>0, decay>0) still converges,
     # still terminates on a pure LP (final weight 0, so the published duals
     # are valid LP duals), and still reaches the cold no-penalty optimum.
-    # The two seams are orthogonal — warm-start seeds the cut set, the
-    # penalty steers within the optimal face — so their combination adds no
-    # new failure mode. (gurobi only: HiGHS cannot host the quadratic term.)
+    # The two mechanisms are orthogonal: warm-start seeds the cut set, and the
+    # penalty steers within the optimal face. This Gurobi-scoped fixture keeps
+    # the historical ratification backend fixed.
     decay = 3
     arrays = _toy(n_obs, n_items)
     cold = _fit(arrays, "gurobi")
@@ -456,7 +456,6 @@ def test_warm_start_composes_with_penalty_decay(
         f" dyn_min_dist={dyn_min_dist:.2e}"
         f" dobj={warm_pen.objective - cold.objective:+.2e}"
     )
-
 
 # --------------------------------------------------------------------------
 # (e): a warm-started fit is bitwise rank-invariant
@@ -577,7 +576,7 @@ def test_warm_start_wall_clock_within_soft_sanity_ceiling(
     # asserts only the loose ceiling, never that warm is strictly faster.
     # Deliberately loose (the suite has a known wall flake under load, so a
     # tight millisecond-scale timing band is avoided here on purpose).
-    # gurobi only, by the penalty/QP measurement convention.
+    # Gurobi only, by the historical measurement convention.
     fit = _qkp_fit if kind == "qkp" else _fit
     arrays = (_qkp if kind == "qkp" else _toy)(n_obs, n_items)
     cold, cold_probe = measure(lambda: fit(arrays, "gurobi"))

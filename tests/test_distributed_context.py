@@ -669,6 +669,62 @@ def test_build_distributed_fit_context_supports_nonzero_owner(
     assert LocalCluster(2).run(run) == [(1, False, True), (1, True, True)]
 
 
+def test_build_distributed_fit_context_keeps_gurobi_warm_start_defaults(
+    monkeypatch,
+) -> None:
+    import combrum.engine.distributed_context as dc
+
+    captured: list[dict[str, object] | None] = []
+
+    class _Master:
+        def reinstall(self, rows) -> None:
+            raise AssertionError("warm cuts are not part of this test")
+
+    def fake_make_master(
+        K,
+        bounds,
+        c_theta,
+        u_coef,
+        *,
+        backend,
+        params,
+        n_agents,
+    ):
+        captured.append(None if params is None else dict(params))
+        return _Master()
+
+    monkeypatch.setattr(dc, "make_master", fake_make_master)
+    transport = SerialTransport()
+    prep = prepare_distributed_observed(
+        _model(_ObservedSurface(3)),
+        n_observations=3,
+        n_simulations=2,
+        transport=transport,
+    )
+    c_theta = distributed_c_theta(
+        prep,
+        obs_weights_local=np.ones(prep.owned_obs.size, dtype=np.float64),
+        transport=transport,
+    )
+    user_params = {"TimeLimit": 3.0, "LPWarmStart": 1}
+
+    build_distributed_fit_context(
+        prep,
+        model=_model(_ObservedSurface(3)),
+        c_theta=c_theta,
+        slack_coef=lambda gid: float(gid + 1),
+        transport=transport,
+        owner_rank=0,
+        master_backend="gurobi",
+        master_params=user_params,
+        tolerance=1e-6,
+        result_publication="summary",
+    )
+
+    assert user_params == {"TimeLimit": 3.0, "LPWarmStart": 1}
+    assert captured == [{"Method": 0, "LPWarmStart": 1, "TimeLimit": 3.0}]
+
+
 def _cut_row(agent_id: int, bundle_key: bytes) -> CutRow:
     return CutRow(
         rep_id=0,

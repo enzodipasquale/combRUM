@@ -28,11 +28,9 @@ _N = 6
 _K = 2
 _S = 2
 _FAMILY_SEED = 20260629
-# The shared 20260629 fixture yields a degenerate observed moment [1.0, 0.0]:
-# column 0 is uniformly 1.0 and column 1 cancels to exactly 0.0. A moment on a
-# zeroed coordinate can never catch a reduction error confined to that column
-# (any scale/sign of 0.0 stays 0.0), so the full-fit equivalence needs a seed
-# whose observed features sum to a distinct nonzero value in *every* coordinate.
+# The shared 20260629 fixture yields a degenerate observed moment [1.0, 0.0];
+# a zero coordinate hides any reduction error confined to it, so the full-fit
+# test uses a seed with a distinct nonzero moment in every coordinate.
 _MOMENT_SEED = 20260630
 _BOOT_SEED = 99
 _B = 4
@@ -171,13 +169,7 @@ def _data(arrays: Mapping[str, np.ndarray]) -> cb.Data:
 
 
 def _observed_moment_oracle(arrays: Mapping[str, np.ndarray]) -> np.ndarray:
-    """Per-column observed moment ``(1/N) sum_i observed[i,k] * r[i,k]``.
-
-    Plain-Python block loop over the fixture arrays, structurally distinct from
-    the vectorised ``observed_features_batch`` and the transport reduction it
-    feeds, so it is an independent oracle for ``result.empirical_moment`` — not
-    a copy of any combrum accessor.
-    """
+    """Per-column observed moment ``(1/N) sum_i observed[i,k] * r[i,k]``."""
     r = np.asarray(arrays["observables"], dtype=np.float64)
     observed = np.asarray(arrays["observed"], dtype=bool)
     n_obs, n_items = r.shape
@@ -203,10 +195,8 @@ def test_surface_uses_distinct_simulation_ids() -> None:
     assert demand0.payoff != demand1.payoff
     assert eps0 != eps1
 
-    # The two agents the surface distinguishes above (obs 0, sims 0 and 1) are
-    # only distinct because the flattened global-agent axis contains both
-    # simulation slots. Pin the full one-rank ownership array against a
-    # structurally distinct nested sim/obs loop.
+    # The flattened agent axis lays out agent_id = sim * N + obs; check the
+    # full one-rank ownership array against that layout.
     agent_ids = owned_agent_ids(_N * _S, 0, 1)
     expected_agent_ids = [
         sim * _N + obs_id
@@ -217,23 +207,18 @@ def test_surface_uses_distinct_simulation_ids() -> None:
     np.testing.assert_array_equal(
         agent_ids, np.array(expected_agent_ids, dtype=np.int64)
     )
-    # The specific agents priced above (obs 0 on sims 0 and 1) must land on their
-    # distinct fan-out slots 0 and _N.
+    # The agents priced above (obs 0 on sims 0 and 1) sit at slots 0 and _N.
     assert expected_agent_ids[0] == 0 and expected_agent_ids[_N] == _N
 
 
 @needs_highs
 def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
-    # Fit on the non-degenerate moment seed so the observed reduction is pinned
-    # per column: the shared seed's [1.0, 0.0] moment leaves coordinate 1 blind
-    # to any reduction error confined to it. These arrays give every coordinate
-    # a distinct nonzero observed moment.
+    # non-degenerate moment seed (see _MOMENT_SEED above), so the observed
+    # reduction can be checked per column
     arrays = toy_family(_N, _K, _MOMENT_SEED)
     expected_moment = _observed_moment_oracle(arrays)
 
-    # Guard against a silent regression to a degenerate fixture: both coordinates
-    # must be nonzero and distinct, otherwise the per-column assertions below
-    # cannot separate a coordinate-confined reduction bug from the true value.
+    # The per-column assertions below need nonzero, distinct coordinates.
     assert np.all(np.abs(expected_moment) > 1e-6)
     assert abs(abs(expected_moment[0]) - abs(expected_moment[1])) > 1e-6
 
@@ -248,21 +233,15 @@ def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
 
     assert serial.metadata["converged"] is True
 
-    # theta anchor, independent of the serial==distributed equivalence below.
-    # The data is rationalised by theta_true (min regret 0), so the identified
-    # optimum recovers theta_true's sign in every coordinate. Pin the full sign
-    # vector against theta_true and require a non-trivial magnitude: a fit that
-    # converged on theta stuck at its cold-start zero (theta_init is [0, 0]
-    # here) or flipped/collapsed a coordinate would pass the equivalence check
-    # (both sides identically wrong) but breaks the sign pin. sign(0) is 0, so
-    # the stuck-at-init case fails both the non-triviality and sign asserts.
+    # The data is rationalised by theta_true (min regret 0), so the fit should
+    # recover theta_true's sign in every coordinate; sign(0) is 0, which also
+    # rules out theta stuck at its zero cold start.
     theta_true_sign = np.sign(np.asarray(arrays["theta_true"], dtype=np.float64))
     assert not np.allclose(serial.theta_hat, 0.0, atol=1e-6)
     np.testing.assert_array_equal(
         np.sign(serial.theta_hat), theta_true_sign
     )
 
-    # Independent oracle, not serial's own moment: pins serial's reduction too.
     np.testing.assert_allclose(
         serial.empirical_moment, expected_moment, rtol=0.0, atol=1e-12
     )
@@ -284,9 +263,6 @@ def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
             np.testing.assert_allclose(
                 result.theta_hat, serial.theta_hat, rtol=1e-10, atol=1e-10
             )
-            # Compare the distributed moment to the hand-derived oracle (a
-            # reduction bug confined to one coordinate moves a nonzero entry),
-            # not only to serial's identically-degenerate moment.
             np.testing.assert_allclose(
                 result.empirical_moment,
                 expected_moment,

@@ -434,18 +434,16 @@ def test_set_penalty_installs_then_reverts_exactly(
     assert master.dual_values() == pytest.approx(duals_lp, abs=1e-9)
 
 
-@pytest.mark.skipif(
-    not HIGHS_AVAILABLE, reason="highspy missing or broken"
-)
+@pytest.mark.skipif(not HIGHS_AVAILABLE, reason="highspy missing or broken")
 def test_set_penalty_unsupported_backend_is_a_hard_error() -> None:
     # The asymmetric leg of the penalty contract: a backend without
-    # native quadratic support must refuse weight > 0 loudly and treat
-    # weight <= 0 as the no-op it is — never approximate.
+    # scalable native quadratic support must refuse weight > 0 loudly and treat
+    # weight <= 0 as the no-op it is; never approximate.
     with _make_real("highs", -10.0, 10.0, (-1.0, -1.5), _default_u) as master:
         master.add_cuts([make_row(1, b"a", [1.0, 2.0], epsilon=0.5)])
         master.solve()
         theta_before = master.theta()
-        with pytest.raises(NotImplementedError, match="approximate"):
+        with pytest.raises(NotImplementedError, match="does not expose quadratic"):
             master.set_penalty(np.zeros(K), weight=1.0)
         master.set_penalty(np.zeros(K), weight=0.0)
         master.set_penalty(np.zeros(K), weight=-2.0)

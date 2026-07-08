@@ -483,18 +483,23 @@ def counter_scenario(t: MpiTransport) -> dict[str, dict[str, int]]:
 
 
 def _emit(transport: MpiTransport, record: dict[str, Any]) -> None:
-    """Print one record per rank in rank order.
+    """Gather every rank's record to root and print them from one writer.
 
-    Rank k writes only after rank k-1's round completes, so the
-    launcher's forwarding sees whole lines instead of interleaved
-    multi-kilobyte writes.
+    Rank-ordered writes are not enough on their own: the launcher forwards each
+    rank's stdout pipe asynchronously, so multi-kilobyte JSON lines from
+    different ranks still interleave (and fail to parse) once ranks are
+    oversubscribed onto fewer cores than there are of them. Gathering to a
+    single writer removes the cross-rank concurrency on stdout entirely.
     """
-    line = json.dumps(record, sort_keys=True)
-    for r in range(transport.size):
-        if transport.rank == r:
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-        transport.allreduce_max(float(r))
+    from mpi4py import MPI
+
+    records = MPI.COMM_WORLD.gather(record, root=0)
+    if transport.rank == 0 and records is not None:
+        payload = "".join(
+            json.dumps(rec, sort_keys=True) + "\n" for rec in records
+        )
+        sys.stdout.write(payload)
+        sys.stdout.flush()
 
 
 def main() -> int:

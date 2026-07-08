@@ -85,24 +85,19 @@ def test_most_violated_fraction_rounds_and_keeps_at_least_one() -> None:
     got = policy.admit(rows, np.array([1.0, 3.0, 0.5, 9.0]), 0)
     assert got == (rows[1], rows[3])
 
-    # Floor-biting regime: with a single positive candidate, int(0.5*1)==0,
-    # so the max(1, ...) clamp must still admit that one row rather than
-    # dropping everything. Only row 2 (idx) has positive violation.
+    # Single positive candidate: int(0.5*1)==0, so the max(1, ...) clamp must
+    # still admit that one row (idx 2) rather than dropping everything.
     single = policy.admit(rows, np.array([-1.0, 0.0, 4.0, -2.0]), 0)
     assert single == (rows[2],)
 
-    # A slightly-larger fraction below the two-candidate boundary also floors
-    # to one when only one candidate is positive: int(0.75*1)==0 -> clamped 1.
+    # fraction=0.75 also floors to zero with one candidate: clamped back to 1.
     floored = MostViolated(fraction=0.75).admit(
         rows, np.array([0.0, 7.0, -3.0, -1.0]), 0
     )
     assert floored == (rows[1],)
 
-    # Fractional-count regime where floor differs observably from round/ceil:
-    # 0.5 * 3 positive candidates = 1.5. `int()` floors to 1, so only the
-    # single largest is admitted; round or ceil would take 2. Give three rows
-    # positive violations (largest at idx 0, next at idx 2) so the count, not
-    # a max(1,...) clamp, decides.
+    # 0.5 * 3 positive candidates = 1.5: `int()` floors to 1, so only the
+    # largest (idx 0) is admitted; round or ceil would take 2.
     three = [_row(i, bytes([10 + i])) for i in range(3)]
     floor_one = MostViolated(fraction=0.5).admit(
         three, np.array([9.0, 3.0, 7.0]), 0
@@ -126,14 +121,9 @@ def test_most_violated_breaks_cutoff_ties_toward_earlier() -> None:
 
 
 def test_most_violated_ties_in_large_group_keep_earliest() -> None:
-    # The "earlier candidate wins" rule rests on the stable sort at the cutoff.
-    # A tiny 3-way tie doesn't separate stable from numpy's default argsort
-    # (introselect) — both return input order — so it only catches a heapsort
-    # swap, not the natural regression of dropping kind="stable". A 20-wide
-    # equal-violation top group DOES separate them: introselect surfaces a late
-    # index (e.g. 19) into the top-k while stable keeps the earliest. With rows
-    # 0..19 tied at 5.0 above a lower tail (20, 21), k=2 must keep rows 0,1 and
-    # k=3 rows 0,1,2 — never a later tied row and never the tail.
+    # Cutoff ties rely on the stable sort. Small tie groups come back in input
+    # order even under numpy's default introselect, so use a 20-wide tie group:
+    # only kind="stable" is guaranteed to keep the earliest tied indices.
     rows = [_row(i, bytes([i])) for i in range(22)]
     viol = np.array([5.0] * 20 + [1.0, 0.5])
     assert MostViolated(k=2).admit(rows, viol, 0) == (rows[0], rows[1])
@@ -152,11 +142,7 @@ def test_most_violated_validates_exactly_one_knob() -> None:
     with pytest.raises(ValueError, match="fraction must"):
         MostViolated(fraction=1.5)
 
-    # The inclusive upper boundary is a VALID input, not a rejected one:
-    # fraction=1.0 means "admit every positive candidate". A guard tightened to
-    # `0 < fraction < 1` (rejecting 1.0) or a max(1, int(1.0 * n)) that dropped
-    # a row would flip this. Pin the whole admitted tuple, not just its size:
-    # all three positive rows in input order, none of the negatives.
+    # fraction=1.0 is valid: admit every positive candidate, in input order.
     rows = [_row(i, bytes([i])) for i in range(4)]
     admitted = MostViolated(fraction=1.0).admit(
         rows, np.array([1.0, -1.0, 2.0, 3.0]), 0
@@ -207,33 +193,20 @@ def test_slack_threshold_validates_epsilon() -> None:
 def _compose_admit_oracle(
     rows: Sequence[CutRow], viol: Sequence[float], *, k: int, epsilon: float
 ) -> tuple[CutRow, ...]:
-    """Independent two-stage admit chain: MostViolated(k) then SlackThreshold.
-
-    Structurally distinct from Compose.admit (plain-Python loops, no numpy
-    argsort, explicit realignment): pick the k positive rows with the largest
-    violations keeping input order, then keep those whose realigned violation
-    strictly exceeds epsilon. Used as the oracle so the composed output is
-    pinned wholesale rather than at a single index.
-    """
-    # Stage 1: rank positive rows by violation (desc), stable on input order,
-    # keep the top k, then restore input order.
+    """MostViolated(k) then SlackThreshold(epsilon), in plain Python."""
+    # top k positive rows by violation, ties toward earlier, back in input order
     positive = [i for i, v in enumerate(viol) if v > 0.0]
     top = sorted(positive, key=lambda i: (-viol[i], i))[:k]
     stage1 = sorted(top)
-    # Stage 2: among survivors, keep viol > epsilon (violations travel with
-    # their rows, so the realigned reading is each row's own original value).
+    # survivors are filtered on their own original violation
     stage2 = [i for i in stage1 if viol[i] > epsilon]
     return tuple(rows[i] for i in stage2)
 
 
 def test_compose_admit_chains_and_keeps_violations_parallel() -> None:
-    # MostViolated(k=3) then SlackThreshold(2.0): the threshold stage sees
-    # violations realigned to the top-3 rows and strips a top-3 survivor that
-    # sits below the floor, so both stages provably do work. Choose violations
-    # so the top-3 set (idx 1,2,3) contains a row (idx 3, viol 1.5) that fails
-    # the 2.0 floor: MostViolated alone keeps (1,2,3) but the composed chain
-    # must strip idx 3 down to (1,2). A regression that no-ops the final admit
-    # stage would leave idx 3 in and flip this.
+    # Top-3 is (1, 2, 3); idx 3 (viol 1.5) fails the 2.0 floor, so both stages
+    # do work and the threshold stage must see violations realigned to the
+    # top-3 rows.
     k, epsilon = 3, 2.0
     policy = Compose(
         admit_chain=[MostViolated(k=k), SlackThreshold(epsilon=epsilon)],

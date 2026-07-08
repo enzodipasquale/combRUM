@@ -36,8 +36,8 @@ def make_row(
 def spread_magnitudes(
     rng: np.random.Generator, shape: tuple[int, ...]
 ) -> np.ndarray:
-    # Values spanning many orders of magnitude: the regime where summation
-    # order changes a float result, so bitwise checks have a meaningful signal.
+    # values spanning many orders of magnitude, where summation order
+    # changes the float result
     magnitude = rng.uniform(-10.0, 10.0, size=shape)
     sign = rng.choice([-1.0, 1.0], size=shape)
     return sign * 10.0**magnitude
@@ -72,11 +72,7 @@ def test_counting_transport_implements_full_abc() -> None:
 def test_bytes_moved_matches_nbytes_arithmetic() -> None:
     probe = CountingTransport(SerialTransport())
     values = np.arange(5.0)  # 5 float64 = 40 bytes
-    # int32 ids (20 bytes) deliberately differ in width from the 40-byte
-    # values so the value and id terms in sum_reproducible are separable. With
-    # equal-width int64 ids a faulty implementation that dropped global_ids and doubled the
-    # value term would still land on 40 + 40 == 2 * 40; here correct = 40 + 20
-    # = 60 while that faulty implementation reports 80.
+    # int32 ids so the value (40 B) and id (20 B) terms differ in width
     ids = np.arange(5, dtype=np.int32)  # 5 int32 = 20 bytes
     probe.sum_reproducible(values, ids)
     aggregate = np.ones((2, 4))  # 8 float64 = 64 bytes
@@ -96,13 +92,8 @@ def test_bytes_moved_matches_nbytes_arithmetic() -> None:
     probe.scatter_by_agent(full, shard_ids)
     probe.node_shared({"a": np.zeros(6)})  # 6 float64 = 48 bytes
     probe.bcast({"payload": "opaque"})
-    # Single-rank max is the identity, so the wrapper must hand back 1.5
-    # untouched. Any offset/scale of the reduced scalar (a non-transparent
-    # wrapper) fails this without referencing combrum's own reduction.
+    # single-rank max is the identity: 1.5 comes back untouched
     assert probe.allreduce_max(1.5) == 1.5
-    # Every value is hand-computed from the fixture widths above, never read
-    # back through .nbytes, so a faulty implementation that drops, doubles, or swaps any term
-    # of any per-method byte rule fails against the fixed integer.
     assert probe.bytes_moved() == {
         "sum_reproducible": 40 + 20,  # values (40) + int32 ids (20)
         "sum_vectors_reproducible": 64,  # (2, 4) float64

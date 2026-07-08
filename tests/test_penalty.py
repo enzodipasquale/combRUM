@@ -4,8 +4,8 @@ fewer-iterations priority win it exists for.
 Both legs drive the penalty through the test-local walk's decay schedule
 (``qp_weight``/``decay``/``penalty_ref``): the weight decays linearly to
 exactly zero over ``decay`` iterations, so the terminating solve is always
-a pure LP whose duals are true LP duals. The schedule lives in the walk —
-not in a shipped driver — because the production penalty driver does not
+a pure LP whose duals are true LP duals. The schedule lives in the walk -
+not in a shipped driver - because the production penalty driver does not
 exist yet; ``MasterBackend.set_penalty`` is the only contract surface it
 touches.
 
@@ -13,11 +13,11 @@ The correctness leg uses a deliberately degenerate fixture (one theta
 coordinate is unpinned at the optimum, so the optimal face is a flat
 continuum): the penalty selects a determinate point on that face at no
 change to the unpenalised objective, the terminating solve is a verified
-pure LP, and HiGHS — which has no quadratic support — hard-errors rather
-than approximate. The priority leg pins why the penalty exists: on a
-slow-converging fixture it reaches the same objective in strictly fewer
-row-generation iterations. That iteration count is the deterministic primary
-signal; wall-clock and RSS are soft, generously banded guards.
+pure LP, and HiGHS - which is not exposed as a scalable quadratic backend -
+hard-errors rather than approximate. The priority leg pins why the penalty
+exists: on a slow-converging fixture it reaches the same objective in strictly
+fewer row-generation iterations. That iteration count is the deterministic
+primary signal; wall-clock and RSS are soft, generously banded guards.
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ GUROBI_AVAILABLE = gurobi_backend.available()
 HIGHS_AVAILABLE = highs_backend.available()
 
 # The penalty is a quadratic objective term, so every penalty gate needs a
-# backend with native quadratic support: gurobi runs them, highs is only
-# ever exercised for its by-design hard error.
+# backend with scalable native quadratic support: Gurobi runs them, HiGHS is
+# only ever exercised for its by-design hard error.
 needs_gurobi = pytest.mark.skipif(
     not GUROBI_AVAILABLE, reason="gurobipy missing or no environment starts"
 )
@@ -427,16 +427,15 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
 
 
 # --------------------------------------------------------------------------
-# (d): HiGHS has no quadratic support — set_penalty(weight>0) hard-errors
+# (d): HiGHS has no exposed quadratic support - set_penalty(weight>0) hard-errors
 # --------------------------------------------------------------------------
 
 
 @needs_highs
 def test_highs_penalty_hard_errors_no_silent_approximation() -> None:
-    # HiGHS cannot host the quadratic term, so the walk's first
-    # set_penalty(weight>0) must raise NotImplementedError rather than
-    # silently approximate — an approximated objective would report duals of
-    # a different problem than the caller thinks was solved.
+    # HiGHS cannot host the quadratic term at native combRUM scale, so the
+    # walk's first set_penalty(weight>0) must raise NotImplementedError rather
+    # than silently approximate.
     arrays = flat_face_arrays()
     with pytest.raises(NotImplementedError):
         run_walk(

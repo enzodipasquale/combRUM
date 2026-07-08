@@ -65,9 +65,8 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
 
     monkeypatch.setattr(estimate_module, "build_fit_context", fail_serial_builder)
     monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
-    # qp_weight>0 makes require_quadratic true, which HiGHS refuses in
-    # resolve_master_backend; pin the resolved backend so the loop-control
-    # propagation is what's under test, not backend selection.
+    # qp_weight>0 makes require_quadratic true; pin the resolved backend so the
+    # loop-control propagation is what's under test, not backend selection.
     monkeypatch.setattr(
         estimate_module, "resolve_master_backend", lambda *args, **kwargs: "highs"
     )

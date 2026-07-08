@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -341,3 +343,25 @@ def test_bound_duals_mapping_is_immutable() -> None:
     with pytest.raises(TypeError):
         del dual.bound_duals[2]  # type: ignore[attr-defined]
     assert dual.bound_duals == {0: 1.0, 2: -0.5}
+
+
+def test_pickle_and_deepcopy_round_trip() -> None:
+    # The bound-duals proxy and the read-only array flags do not survive a
+    # default round trip; both invariants must be restored on the clone.
+    dual = make_dual(bound_duals={0: 1.5, 2: -0.75})
+    for clone in (pickle.loads(pickle.dumps(dual)), copy.deepcopy(dual)):
+        assert clone.rep_id == dual.rep_id
+        np.testing.assert_array_equal(clone.agent_ids, dual.agent_ids)
+        np.testing.assert_array_equal(clone.bundle_row_ids, dual.bundle_row_ids)
+        np.testing.assert_array_equal(clone.pis, dual.pis)
+        np.testing.assert_array_equal(clone.bundle_table, dual.bundle_table)
+        assert clone.bound_duals == {0: 1.5, 2: -0.75}
+        with pytest.raises(TypeError):
+            clone.bound_duals[0] = 99.0  # type: ignore[index]
+        for arr in (
+            clone.agent_ids,
+            clone.bundle_row_ids,
+            clone.pis,
+            clone.bundle_table,
+        ):
+            assert not arr.flags.writeable

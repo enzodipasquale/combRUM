@@ -273,8 +273,9 @@ def run_fit(
     master = ctx.master_backend  # root-only; None elsewhere
 
     # Floor convergence at decay+1 so the weight has fully decayed to 0 before
-    # acceptance. The real guard is the priced_weight==0 check at the stop rule,
-    # which refuses any convergence whose theta did not come from a pure-LP solve.
+    # acceptance. The real guard is the priced_weight==0 check at the stop rule:
+    # it certifies the theta that was actually priced, so acceptance may wait
+    # one more iteration after the weight is reverted to zero.
     base_convergence_floor = (
         max(config.min_iterations, config.decay + 1)
         if penalty_on
@@ -353,28 +354,30 @@ def run_fit(
                 this_full = True
                 scheduled_local_ids = local_ids
             else:
-                # Condense the master's per-cut duals into the O(support)
-                # payload on the owner, broadcast it (O(support), never an
-                # n_agents mask bcast), and let every rank derive the identical
-                # mask.
-                def _dual_payload() -> DualConcentration | None:
-                    if transport.rank != owner_rank:
-                        return None
-                    assert master is not None
-                    return DualConcentration.from_cut_duals(master.dual_values())
+                if force_full or priced_weight > 0.0:
+                    mask = np.ones(n_agents, dtype=bool)
+                else:
+                    # Condense the master's per-cut LP duals into the
+                    # O(support) payload on the owner, broadcast it
+                    # (O(support), never an n_agents mask bcast), and let every
+                    # rank derive the identical mask. A positive priced_weight
+                    # means the last priced theta came from a QP, whose duals
+                    # are not LP dual certificates, so that case takes the
+                    # full-sweep branch above.
+                    def _dual_payload() -> DualConcentration | None:
+                        if transport.rank != owner_rank:
+                            return None
+                        assert master is not None
+                        return DualConcentration.from_cut_duals(master.dual_values())
 
-                payload = collective_call(transport, _dual_payload)
-                payload = transport.bcast(payload, root=owner_rank)
-                mask = (
-                    np.ones(n_agents, dtype=bool)
-                    if force_full
-                    else schedule.select(
+                    payload = collective_call(transport, _dual_payload)
+                    payload = transport.bcast(payload, root=owner_rank)
+                    mask = schedule.select(
                         it,
                         n_agents,
                         dual=payload,
                         last_resolved=last_resolved,
                     )
-                )
                 this_full = bool(mask.all())
                 # This rank's owned ids that the global mask selected this iteration.
                 # Keep the hot path array-backed; converting large full sweeps to
@@ -384,43 +387,48 @@ def run_fit(
                 )
 
             # Decayed penalty weight for this iteration; hits exactly 0 at
-            # it >= decay (pure LP from then on). The price phase prices the
-            # pre-penalty theta solved above; the penalty solve runs between
-            # finalise and apply_step (via before_apply) so the install adopts
-            # the penalized iterate. It must run there, not in apply_step's
-            # cut-gated solve: a penalized iterate re-prices installed bundles,
-            # so apply_step would admit no cut, never re-solve, and freeze theta
-            # at a stale weight.
+            # it >= decay (pure LP from then on). The driver stages objective
+            # changes on formulations that support it, and the formulation
+            # applies the pending penalty immediately before its one owner-side
+            # solve. Thus cut installs and objective changes share a warm
+            # re-solve instead of solving the old relaxation and then the
+            # cut-augmented one.
             weight_t = (
                 config.qp_weight * max(0.0, 1.0 - it / config.decay)
                 if penalty_on
                 else 0.0
             )
 
-            def _penalty_solve(
-                weight: float = weight_t,
-                query: np.ndarray = theta,
-            ) -> None:
-                # Penalty solve on root between finalise and apply_step. ref is
-                # the current theta (dynamic) or the fixed anchor (static).
-                nonlocal last_solve_weight
-                if transport.rank != owner_rank:
-                    return
-                ref_t = query if config.penalty_ref == "dynamic" else static_ref
-                assert master is not None
-                master.set_penalty(ref_t, weight)
-                master.solve()
-                last_solve_weight = weight
+            needs_penalty_solve = penalty_on and (
+                weight_t > 0.0 or last_solve_weight > 0.0
+            )
+            before_apply = None
+            if needs_penalty_solve:
+                ref_t = theta if config.penalty_ref == "dynamic" else static_ref
+                prepare_penalty = getattr(formulation, "prepare_penalty_solve", None)
+                if callable(prepare_penalty):
+                    prepare_penalty(ref_t, weight_t)
+                else:
 
-            def _before_apply() -> None:
-                collective_call(transport, _penalty_solve)
+                    def _penalty_solve(
+                        weight: float = weight_t,
+                        ref: np.ndarray = ref_t,
+                    ) -> None:
+                        if transport.rank != owner_rank:
+                            return
+                        assert master is not None
+                        master.set_penalty(ref, weight)
+                        master.solve()
 
-            before_apply = _before_apply if penalty_on else None
+                    def _before_apply() -> None:
+                        collective_call(transport, _penalty_solve)
+
+                    before_apply = _before_apply
 
             # Engine fit-step: price the scheduled shard, contribute,
-            # reduce+exchange, finalise, [penalty solve], apply_step. The
-            # reductions and owners vector match the bundled path, so on the
-            # pure-LP path the published answer is byte-equal to it.
+            # reduce+exchange, finalise, apply_step. The reductions and owners
+            # vector match the bundled path, so on the pure-LP path the
+            # published answer is byte-equal to it.
             step = fit_step(
                 formulation,
                 transport=transport,
@@ -431,6 +439,8 @@ def run_fit(
                 before_apply=before_apply,
                 demand_sink=demand_sink,
             )
+            if needs_penalty_solve:
+                last_solve_weight = weight_t
             cuts_admitted += step.progressed
             if schedule is not None:
                 last_resolved[mask] = it

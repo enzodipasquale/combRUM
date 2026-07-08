@@ -26,9 +26,8 @@ needs_highs = pytest.mark.skipif(
     not highs_backend.available(), reason="highspy missing or broken"
 )
 
-# The JSON-ready key set of FitResult.to_dict(), hand-transcribed from the
-# result.py literal. The exact-set check rejects accidental cut payloads under
-# any key, both when duals are unset and when they are populated.
+# Key set of FitResult.to_dict(); the exact-set checks below reject cut
+# payloads leaking in under any key.
 _EXPECTED_TO_DICT_KEYS = frozenset(
     {
         "theta_hat",
@@ -101,16 +100,10 @@ def test_return_cut_duals_publishes_compact_payload_without_cuts() -> None:
     for arr in (dual.agent_ids, dual.bundle_row_ids, dual.pis, dual.bundle_table):
         assert not arr.flags.writeable
 
-    # Pin the published dual VALUES against a fixture-derived oracle, not just
-    # their shape/finiteness. The toy family has one observed choice per agent
-    # (unit weight), so each agent's epigraph variable carries objective
-    # coefficient 1.0; LP duality forces the active epigraph cuts of a given
-    # agent to split exactly that unit of dual mass. Hence: total mass n_obs,
-    # every agent sums to 1.0, and (this fixture is degenerate to a single
-    # binding cut per agent) exactly n_obs rows carry the full unit each. The
-    # per-agent aggregation below is a plain-Python loop keyed off agent_ids,
-    # so it catches mis-assigned mass (e.g. reversed pis) that a bare sum would
-    # not.
+    # One observed choice per agent (unit epigraph coefficient), so LP duality
+    # splits exactly one unit of dual mass across each agent's active cuts; on
+    # this fixture a single cut binds per agent, so exactly n_obs rows carry
+    # the full unit.
     observed = np.asarray(load_family("toy", FAMILY_DIR)["observed"])
     n_obs = observed.shape[0]
     assert dual.pis.sum() == pytest.approx(float(n_obs))
@@ -123,14 +116,8 @@ def test_return_cut_duals_publishes_compact_payload_without_cuts() -> None:
     unit_rows = sum(1 for pi in dual.pis.tolist() if abs(pi - 1.0) < 1e-9)
     assert unit_rows == n_obs
 
-    # The aggregate checks above are invariant to any within-agent reshuffle
-    # of pis, so they never pin which bundle_row each pi belongs to. Tie every
-    # unit of mass to its bundle: the data is rationalised by theta_true, so at
-    # convergence each agent's priced optimum is its observed choice, and the
-    # single binding epigraph cut (pi==1.0) must therefore index that observed
-    # bundle. `observed` is read from the fixture, not from combrum, so this is
-    # an independent oracle; a pi<->bundle_row swap (e.g. reversed pis within an
-    # agent) moves the unit row to a non-observed bundle and fails here.
+    # The data is rationalised by theta_true, so at convergence each agent's
+    # binding cut (pi == 1.0) must index its observed bundle.
     rows_by_agent: dict[int, list[int]] = defaultdict(list)
     for r, agent_id in enumerate(dual.agent_ids.tolist()):
         rows_by_agent[int(agent_id)].append(r)
@@ -146,12 +133,8 @@ def test_return_cut_duals_publishes_compact_payload_without_cuts() -> None:
     rows = list(dual.rows(n_obs=n_obs))
     assert len(rows) == fit.n_active_cuts
     assert rows
-    # Pin the rows() accessor row-for-row against the payload arrays it decodes
-    # from -- read directly, never back through rows(). The toy payload spans
-    # many distinct bundle_row_ids (most != 0), so a per-row decode bug (e.g.
-    # every row returning bundle_table[0], an off-by-one, or a reversed index)
-    # cannot survive: it would move some row's generated_bundle off the table
-    # row its bundle_row_id names.
+    # rows() decodes the payload arrays; compare row-for-row against the
+    # arrays read directly.
     assert [r.agent_id for r in rows] == dual.agent_ids.tolist()
     assert [r.pi for r in rows] == dual.pis.tolist()
     for r, row in enumerate(rows):
@@ -159,19 +142,15 @@ def test_return_cut_duals_publishes_compact_payload_without_cuts() -> None:
             row.generated_bundle,
             dual.bundle_table[int(dual.bundle_row_ids[r])],
         )
-    # The (observation_id, simulation_id) split of every agent id must follow
-    # the documented convention a = simulation_id*n_obs + observation_id.
-    # Expected values are the modular decomposition, not the fields' own output.
+    # Agent id convention: a = simulation_id*n_obs + observation_id.
     for row in rows:
         assert row.observation_id == row.agent_id % n_obs
         assert row.simulation_id == row.agent_id // n_obs
 
 
 def test_dual_rows_decompose_agent_id_by_n_obs() -> None:
-    # rows(n_obs) is a pure function of agent_ids and n_obs. Pin the split with
-    # agent ids that exceed n_obs (n_sims > 1) so a swapped %/// or a wrong
-    # divisor is caught -- the toy fit above has n_sims == 1, where the split is
-    # degenerate. Expected pairs are hand-derived for n_obs=3.
+    # Use agent ids above n_obs (n_sims > 1) so a swapped % / // shows up; the
+    # toy fit has n_sims == 1, where the split is degenerate.
     dual = DualSolution(
         rep_id=0,
         agent_ids=np.array([0, 2, 3, 5, 7], dtype=np.int64),
@@ -202,15 +181,10 @@ def test_return_slack_and_cut_duals_leaves_cuts_unset() -> None:
     dual = fit.cut_duals
     assert isinstance(dual, DualSolution)
 
-    # `slack is not None` alone lets an all-zeros (or otherwise corrupted)
-    # vector through. Pin the published slack against a fixture-feature oracle
-    # that never touches combrum's slack path: agent a's epigraph value u_a is
-    # the payoff of its binding generated bundle d*, phi_a(d*).theta + eps_a(d*)
-    # (NSlack docstring: u_a >= phi_a(d).theta + eps_a(d), tight at the optimum
-    # under the unit epigraph coefficient). d* is the pi==1 row in cut_duals;
-    # phi/eps come from the fixture oracle and theta from the LP estimate, so the
-    # expected values are recomputed on a distinct code path, not read back off
-    # fit.slack. A zero-slack or reordered vector fails the elementwise compare.
+    # NSlack: u_a >= phi_a(d).theta + eps_a(d), tight at the optimum under the
+    # unit epigraph coefficient, so slack[a] equals the payoff of the binding
+    # bundle d* -- the pi == 1 row in cut_duals. Recompute it from the fixture
+    # features and theta_hat.
     arrays = load_family("toy", FAMILY_DIR)
     problem = toy_problem(arrays)
     observed = np.asarray(arrays["observed"])
@@ -231,8 +205,8 @@ def test_return_slack_and_cut_duals_leaves_cuts_unset() -> None:
         phi, eps = problem.features(agent_id, bundle)
         expected_slack[agent_id] = float(np.asarray(phi) @ theta + float(eps))
 
-    # Epigraph values are >= 0 by construction; the oracle here is strictly
-    # positive on the toy data, so the all-zeros regression cannot match.
+    # Epigraph values are >= 0 by construction and strictly positive on the
+    # toy data.
     assert (expected_slack > 1e-9).any()
     assert (np.asarray(fit.slack) >= -1e-9).all()
     np.testing.assert_allclose(np.asarray(fit.slack), expected_slack, atol=1e-6)
@@ -262,13 +236,9 @@ def test_return_cuts_and_cut_duals_rows_align() -> None:
         )
 
 
-# Expected message is read straight from the f-string in
-# reject_multirank_dense_transport (agreement.py) with name="estimate"; it is
-# NOT captured from a live estimate() call. The publication kwargs are
-# deliberately varied to pin that the serial-only guard fires *before* any
-# cut-dual / slack / cut publication and is unaffected by those flags: the
-# top-level guard runs at estimate.py:120, ahead of the return_cut_duals check
-# and all artifact assembly.
+# Matches the f-string in reject_multirank_dense_transport (agreement.py) with
+# name="estimate". The guard runs before any cut-dual / slack / cut
+# publication, so the message does not depend on those flags.
 _EXPECTED_MULTIRANK_MESSAGE = (
     f"estimate does not support non-serial transport in combRUM {combrum.__version__};"
     " use estimate_distributed for distributed runs"
@@ -296,11 +266,6 @@ _EXPECTED_MULTIRANK_MESSAGE = (
 def test_dense_estimate_rejects_multirank_regardless_of_publication(
     publication_kwargs: dict[str, bool],
 ) -> None:
-    # The no-flags case is the control: it proves the raise is driven by the
-    # blanket serial-only guard, not by any publication path. The remaining
-    # cases pin that adding cut-dual / slack / cut flags neither bypasses the
-    # guard nor changes the message, so no publication branch can leak a
-    # multirank run past the serial gate.
     with pytest.raises(ValueError) as excinfo:
         LocalCluster(2).run(
             lambda transport: _toy_fit(transport, **publication_kwargs)

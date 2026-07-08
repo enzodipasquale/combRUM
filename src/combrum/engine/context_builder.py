@@ -55,6 +55,17 @@ def prepare_warm_cuts(formulation: Any, rows: Sequence[CutRow]) -> tuple[CutRow,
     return tuple(prepare(cut_rows))
 
 
+def _master_params_for_backend(
+    backend: str, master_params: dict[str, object] | None
+) -> dict[str, object] | None:
+    if backend != "gurobi":
+        return master_params
+    params: dict[str, object] = {"Method": 0, "LPWarmStart": 2}
+    if master_params is not None:
+        params.update(master_params)
+    return params
+
+
 def build_fit_context(
     parameters: Parameters,
     *,
@@ -174,10 +185,8 @@ def build_fit_context(
         )
         # On a degenerate optimal face the published vertex depends on the
         # simplex config, so Gurobi defaults to warm-started primal simplex.
-        # Caller-supplied master_params override verbatim.
-        params = master_params
-        if params is None and backend_for_master == "gurobi":
-            params = {"Method": 0, "LPWarmStart": 2}
+        # Caller-supplied master_params override these defaults key by key.
+        params = _master_params_for_backend(backend_for_master, master_params)
         master_obj = make_master(
             K,
             parameters.bounds(),

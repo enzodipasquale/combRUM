@@ -784,6 +784,79 @@ def test_bound_duals_under_active_penalty_then_revert() -> None:
         assert master.bound_duals() == pytest.approx(duals_lp, abs=1e-9)
 
 
+@needs_highs
+def test_highs_slack_upper_bound_is_exact_theta_box_envelope() -> None:
+    with make_master(
+        K,
+        (np.array([-1.0, -2.0]), np.array([3.0, 4.0])),
+        np.zeros(K, dtype=np.float64),
+        lambda _agent_id: 1.0,
+        backend="highs",
+        n_agents=1,
+    ) as master:
+        assert isinstance(master, HighsMaster)
+        master.add_cuts((make_row(0, b"a", (2.0, -1.0), 5.0),))
+        lp = master._h.getLp()
+        assert lp.col_upper_[K] == pytest.approx(13.0, abs=1e-12)
+
+        master.set_rhs({(0, b"a"): 7.0})
+        lp = master._h.getLp()
+        assert lp.col_upper_[K] == pytest.approx(15.0, abs=1e-12)
+
+
+@needs_highs
+def test_highs_free_slack_keeps_solver_native_infinite_upper_bound() -> None:
+    with make_master(
+        K,
+        LP_BOUNDS,
+        np.zeros(K, dtype=np.float64),
+        lambda _agent_id: 1.0,
+        backend="highs",
+        params={"u_lower_bound": None},
+    ) as master:
+        assert isinstance(master, HighsMaster)
+        master.add_cuts((make_row(0, b"a", (1.0, 0.0), 1.0),))
+
+        lp = master._h.getLp()
+        assert lp.col_upper_[K] == pytest.approx(master._highspy.kHighsInf)
+
+
+@needs_highs
+def test_highs_rejects_nonfinite_cut_without_solver_mirror_drift() -> None:
+    with make_master(
+        K,
+        LP_BOUNDS,
+        np.zeros(K, dtype=np.float64),
+        lambda _agent_id: 1.0,
+        backend="highs",
+        params={"u_lower_bound": None},
+    ) as master:
+        assert isinstance(master, HighsMaster)
+        bad = CutRow(0, 7, np.array([np.nan, 0.0]), 1.0, b"bad")
+
+        with pytest.raises(ValueError, match="phi must be finite"):
+            master.add_cuts((bad,))
+
+        assert master.extract_cuts() == ()
+        assert master.n_active_cuts == 0
+        assert master._h.getNumRow() == 0
+        assert master._h.getNumCol() == K
+
+
+@needs_highs
+def test_highs_rejects_nonfinite_cut_without_lazy_column_leak() -> None:
+    with lp_master("highs") as master:
+        assert isinstance(master, HighsMaster)
+        bad = CutRow(0, 7, np.array([1.0, 0.0]), np.inf, b"bad")
+
+        with pytest.raises(ValueError, match="epsilon must be finite"):
+            master.add_cuts((bad,))
+
+        assert master.extract_cuts() == ()
+        assert master._h.getNumRow() == 0
+        assert master._h.getNumCol() == K
+
+
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_penalty_validates_ref_shape(backend: str) -> None:
     with lp_master(backend) as master:
@@ -823,6 +896,30 @@ def test_factory_explicit_gurobi() -> None:
 def test_factory_explicit_highs() -> None:
     with lp_master("highs") as master:
         assert isinstance(master, HighsMaster)
+
+
+@needs_highs
+def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
+    with lp_master("highs") as master:
+        assert isinstance(master, HighsMaster)
+        assert master._h is not None
+        status, value = master._h.getOptionValue("solver")
+        assert status == master._highspy.HighsStatus.kOk
+        assert value == "simplex"
+
+    with make_master(
+        K,
+        LP_BOUNDS,
+        LP_C_THETA,
+        LP_U_COEF.__getitem__,
+        backend="highs",
+        params={"solver": "choose"},
+    ) as master:
+        assert isinstance(master, HighsMaster)
+        assert master._h is not None
+        status, value = master._h.getOptionValue("solver")
+        assert status == master._highspy.HighsStatus.kOk
+        assert value == "choose"
 
 
 @pytest.mark.skipif(

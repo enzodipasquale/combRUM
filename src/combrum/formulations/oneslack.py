@@ -115,6 +115,20 @@ class OneSlack(Formulation):
         self._pending: _Pending | None = None
         self._iteration = 0
 
+    def prepare_penalty_solve(self, ref: np.ndarray, weight: float) -> None:
+        """Stage the next proximal objective change for ``apply_step``."""
+        ref_arr = np.asarray(ref, dtype=np.float64)
+        if ref_arr.shape != (self._ctx.K,):
+            raise ValueError(
+                f"ref must have shape ({self._ctx.K},); got {ref_arr.shape}"
+            )
+        weight_value = float(weight)
+        if not np.isfinite(weight_value):
+            raise ValueError(f"weight must be finite; got {weight!r}")
+        staged_ref = np.array(ref_arr, dtype=np.float64, copy=True)
+        staged_ref.setflags(write=False)
+        self._pending_penalty = (staged_ref, weight_value)
+
     def set_trace_sink(self, sink: TraceSink | None) -> None:
         """Attach (or detach) the capture sink; default is detached.
 
@@ -133,6 +147,8 @@ class OneSlack(Formulation):
         self._owner_rank = ctx.owner_rank
         self._is_owner = ctx.transport.rank == self._owner_rank
         self._master: MasterBackend | None = ctx.master_backend
+        self._pending_penalty: tuple[np.ndarray, float] | None = None
+        self._last_penalty_weight = 0.0
         # Resolve the active features path once, identically on every rank;
         # the rank-agreement token rides the setup broadcast below.
         self._features_res: Resolution = resolve_features(self._features_arg)
@@ -315,6 +331,8 @@ class OneSlack(Formulation):
         # one master-state bcast. The install gate is recomputed from the
         # payload exactly as finalise computed the violation, so a converged
         # step installs nothing.
+        pending_penalty = self._pending_penalty
+        self._pending_penalty = None
         phi_agg, eps_agg = install_payload  # type: ignore[misc]
         raw = self._violation_raw(phi_agg, eps_agg)
         violation = raw if raw > 0.0 else 0.0
@@ -332,8 +350,15 @@ class OneSlack(Formulation):
                         bundle_key=_aggregate_key(phi_agg, eps_agg),
                     )
                     progressed = self._master.add_cuts((row,))
-                    if progressed:
-                        self._master.solve()
+                must_solve = bool(progressed)
+                if pending_penalty is not None:
+                    ref, weight = pending_penalty
+                    penalty_changed = weight > 0.0 or self._last_penalty_weight > 0.0
+                    self._master.set_penalty(ref, weight)
+                    self._last_penalty_weight = weight
+                    must_solve = must_solve or penalty_changed
+                if must_solve:
+                    self._master.solve()
                 packet = self._state(progressed=progressed)
         state = self._transport.bcast(packet, root=self._owner_rank)
         self._adopt(state)

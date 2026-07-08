@@ -116,9 +116,7 @@ def test_demand_batch_unsorted_unique_ids_lookup_correctly() -> None:
     np.testing.assert_array_equal(demand.bundle, np.array([1.0, 0.0]))
     assert demand.payoff == 1.25
 
-    # A miss on the dict path must raise, not silently fall back to a row.
-    # Without the `index is None -> raise KeyError` branch, an unknown id
-    # would return row 0's demand (payoff 2.5) instead.
+    # a miss on the dict path must raise, not fall back to a row
     with pytest.raises(KeyError):
         batch[999]
 
@@ -134,9 +132,8 @@ def test_demand_batch_sorted_missing_id_raises_without_lookup_dict() -> None:
     # so this hits the `ids[row] != agent` half of the guard.
     with pytest.raises(KeyError):
         batch[5]
-    # id 9 is past max(ids) (searchsorted -> row 2, past the end): only the
-    # `row >= self.ids.size` bounds half turns this into a KeyError. Drop that
-    # half and batch[9] indexes ids[2] and raises IndexError instead.
+    # id 9 is past max(ids) (searchsorted -> row 2, past the end), so only
+    # the `row >= self.ids.size` bounds half can turn this into a KeyError.
     with pytest.raises(KeyError):
         batch[9]
     # id 1 is below min(ids) (searchsorted -> row 0), the other end of the range.
@@ -151,22 +148,15 @@ def test_demand_batch_rejects_nonfinite_gaps() -> None:
     payoffs = np.array([1.25, 2.5])
     with pytest.raises(ValueError, match="finite"):
         DemandBatch(ids, bundles, payoffs, np.array([0.0, math.inf]))
-    # A negative gap is finite, so the isfinite half never fires; only the
-    # `gaps < 0.0` half can reject it. Drop that half and this stops raising.
-    # (The guard emits one shared message for both halves, so match= cannot
-    # tell which arm fired -- the raise itself is what carries a meaningful signal here.)
+    # a negative gap is finite, so only the `gaps < 0.0` half can reject it;
+    # the guard shares one message for both halves
     with pytest.raises(ValueError, match=">= 0"):
         DemandBatch(ids, bundles, payoffs, np.array([0.0, -1.0]))
-    # A NaN gap is non-finite, so it must trip the isfinite half. Both inf and
-    # NaN failing pins that np.isfinite (not e.g. np.isinf) backs that arm.
+    # NaN is non-finite too: the check is np.isfinite, not an inf-only test
     with pytest.raises(ValueError, match="finite"):
         DemandBatch(ids, bundles, payoffs, np.array([0.0, math.nan]))
-    # Pin the accepting side of the boundary so the reject/accept sense is
-    # load-bearing, not just the reject side. A zero gap (exact) and a strictly
-    # positive finite gap must both be admitted and stored verbatim. This kills
-    # the sibling mutations that flip the comparison (`< 0.0` -> `<= 0.0` would
-    # reject the exact gap; `> 0.0` would reject the positive gap), which the
-    # reject-only assertions above cannot see.
+    # accepting side: a zero gap (exact) and a strictly positive gap are
+    # both admitted and stored verbatim
     ok = DemandBatch(ids, bundles, payoffs, np.array([0.0, 0.5]))
     np.testing.assert_array_equal(ok.gaps, np.array([0.0, 0.5]))
     assert ok[3].gap == 0.0 and ok[7].gap == 0.5
@@ -222,12 +212,7 @@ def test_oracle_setup_defaults_to_no_op_but_pricing_is_required() -> None:
 
 
 class _TableOracle(Oracle):
-    """Minimal Oracle that prices from a node-shared payoff table.
-
-    Shows the contract is implementable as documented: setup loads
-    read-only structure through node_shared, and price is then a
-    deterministic function of (theta, agent_id) over it.
-    """
+    """Minimal Oracle that prices from a node-shared payoff table."""
 
     def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
         self._shared = transport.node_shared(
@@ -261,8 +246,7 @@ def test_certification_all_exact() -> None:
 def test_certification_some_inexact() -> None:
     report = Certification(n_priced=5, n_inexact=2, worst_gap=1e-3)
     assert report.worst_gap == 1e-3
-    # Pin the whole metadata dict, not just the unknown flag: the finite
-    # branch must carry the numeric worst_gap through.
+    # the finite branch must carry the numeric worst_gap through to metadata
     assert certification_metadata(report) == {
         "n_priced": 5,
         "n_inexact": 2,
@@ -272,13 +256,8 @@ def test_certification_some_inexact() -> None:
 
 
 def test_gap_tally_counts_only_positive_gaps_with_finite_worst() -> None:
-    # Independent oracle: 5 priced, three gaps > 0 and two exact (gap == 0.0),
-    # so n_inexact == 3 and the exact demands are not counted inexact (pins
-    # the > 0 boundary). The three gaps are ordered so the MAX (0.9) is the
-    # middle one: first-positive is 0.5, last-positive is 0.3, min-positive is
-    # 0.3. Only a true MAX reduction reports 0.9, so worst_gap == 0.9
-    # distinguishes MAX from first/last/min selection, not just from a scaled
-    # or infinite value.
+    # the max gap (0.9) sits in the middle, so first/last/min selection would
+    # each report a different worst_gap; exact demands do not count as inexact
     tally = GapTally()
     tally.observe(
         {
@@ -322,21 +301,15 @@ def test_unknown_gap_certification_metadata_is_strict_json_safe() -> None:
 
 
 def test_certification_zero_calls_valid() -> None:
-    # Aggregation identity: nothing priced, nothing inexact, no gap. Pin all
-    # three stored fields, not just n_priced -- validation runs against local
-    # variables, so a wrong final store of n_inexact or worst_gap would slip
-    # past a single-field check.
+    # validation runs against local variables, so check all three stored
+    # fields, not just n_priced
     report = Certification(n_priced=0, n_inexact=0, worst_gap=0.0)
     assert (report.n_priced, report.n_inexact, report.worst_gap) == (0, 0, 0.0)
 
 
 def test_certification_rejects_invalid_field_combinations() -> None:
-    # Each case is paired with the guard message it must trip, so a bad
-    # combination cannot pass by raising for the wrong reason. In particular
-    # the worst_gap=-1.0 / nan cases (with n_inexact=1) must hit the
-    # >=0 guard, not the downstream "inexact yet gapless" guard: dropping the
-    # >=0 guard reroutes them to "must be > 0 when some call was inexact",
-    # which this match= would catch.
+    # each case is paired with the message its guard must raise; the -1.0/nan
+    # cases must hit the >= 0 guard, not the downstream inexact-gap one
     bad = [
         (dict(n_priced=-1, n_inexact=0, worst_gap=0.0), "n_priced must be an integer >= 0"),
         (dict(n_priced=2.0, n_inexact=0, worst_gap=0.0), "n_priced must be an integer >= 0"),
