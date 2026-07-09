@@ -1,9 +1,9 @@
 """Proximal penalty: decay-to-pure-LP correctness and the iteration win.
 
-Both legs drive the penalty through the test-local walk's decay schedule
-(``qp_weight``/``decay``/``penalty_ref``): the weight decays linearly to
-exactly zero over ``decay`` iterations, so the terminating solve is always
-a pure LP whose duals are true LP duals. The walk mirrors the production
+Both legs drive the penalty through the test-local walk's schedule
+(``qp_weight``/``decay``/``penalty_ref``): the weight is held at
+``qp_weight`` for ``decay`` iterations and then drops to exactly zero, so
+the terminating solve is always a pure LP whose duals are true LP duals. The walk mirrors the production
 driver's objective-staging path, with ``MasterBackend.set_penalty`` as the
 backend contract surface.
 
@@ -51,8 +51,8 @@ pytestmark = pytest.mark.slow
 PARITY_BAND = 1e-9
 FLAT_FACE_RAW_OBJECTIVE = -1.0
 
-# Decay schedule for the flat-face fixture: weight 10 at the start, decaying
-# linearly to 0 over `decay` iterations, so the terminating solve is a pure LP.
+# Penalty schedule for the flat-face fixture: weight 10 held for `decay`
+# iterations, then 0, so the terminating solve is a pure LP.
 FLAT_QP_WEIGHT = 10.0
 FLAT_DECAY = 3
 FLAT_REF = "static"

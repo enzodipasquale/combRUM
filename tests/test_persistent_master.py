@@ -923,9 +923,10 @@ def test_persistent_penalty_decay_fit_then_reevaluate_runs_end_to_end() -> None:
 
     ``require_quadratic`` resolves to True (qp_weight>0 and decay>0 at
     persistent.py:169-170), so the driver builds a gurobi master. The proximal
-    weight decays linearly to exactly zero over ``decay`` iterations, so the
-    terminating solve is a pure LP and a dual is published. Both the cold fit
-    and a valid shocks-only reevaluate run end-to-end over the carried master.
+    weight holds at ``qp_weight`` for ``decay`` iterations and then drops to
+    exactly zero, so the terminating solve is a pure LP and a dual is
+    published. Both the cold fit and a valid shocks-only reevaluate run
+    end-to-end over the carried master.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     penalty_config = LoopConfig(

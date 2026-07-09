@@ -498,8 +498,19 @@ class GurobiMaster(MasterBackend):
         )
 
     def _set_quadratic_objective(self, ref: np.ndarray, weight: float) -> None:
-        # Matrix objective form mutates the same model in place, preserving
-        # warm state across changing proximal objectives.
+        installed = self._penalty
+        if installed is not None and weight == installed[1]:
+            # Q = weight*I is already installed: rewrite only the theta
+            # objective coefficients and the constant. setMObjective replaces
+            # the whole objective and drops the simplex warm basis, so the
+            # equal-weight re-anchor must never route through it; this path
+            # is what keeps penalty re-solves warm across iterations.
+            self._theta_mvar.Obj = self._c - 2.0 * weight * ref
+            self._model.ObjCon = weight * float(ref @ ref)
+            return
+        # Weight change or first install: gurobipy has no in-place edit of
+        # the quadratic term, so re-setting Q takes the full matrix-objective
+        # push (and the next solve starts cold).
         theta_linear = -2.0 * weight * ref
         constant = weight * float(ref @ ref)
         variables, coeffs = self._linear_coefficients(theta_linear)

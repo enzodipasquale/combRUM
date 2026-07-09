@@ -1,7 +1,7 @@
 """The B=1 convergence loop over the engine phase path.
 
 The driver runs the per-rank iterate loop (setup, schedule mask, static-anchor
-penalty decay, full-sweep + pure-LP convergence, warm-start) and drives the
+penalty schedule, full-sweep + pure-LP convergence, warm-start) and drives the
 engine phases ``contribute`` -> reduce+exchange -> ``finalise`` ->
 ``apply_step``. A live-set mask over the replication set lets a converged
 replication retire independently.
@@ -138,8 +138,10 @@ class LoopConfig:
 
     ``max_iterations`` bounds the walk; ``schedule`` is the optional re-pricing
     schedule (None = full sweep every iteration). ``qp_weight > 0`` with
-    ``decay >= 1`` decays a proximal penalty linearly to exactly zero over
-    ``decay`` iterations so the terminating solve is a pure LP; ``penalty_ref``
+    ``decay >= 1`` holds a proximal penalty at ``qp_weight`` for ``decay``
+    iterations, then drops it to exactly zero so the terminating solve is a
+    pure LP (a constant weight keeps the master's quadratic term unchanged,
+    so penalty re-solves stay warm-started); ``penalty_ref``
     picks the anchor (``"static"`` = fixed seed/origin; ``"dynamic"`` = current
     theta). ``min_iterations`` floors convergence. ``iteration_callback`` is an
     optional per-iteration hook that may update oracle-owned solver settings and
@@ -227,9 +229,9 @@ def run_fit(
         result()
 
     with the live-set mask over the replication set, the driver-owned
-    ``DualConcentration`` schedule branch, the static-anchor penalty decay to
-    a pure-LP terminating solve, and warm-start (the prior fit's published
-    theta carried on ``ctx.theta_init``).
+    ``DualConcentration`` schedule branch, the static-anchor penalty phase
+    ending in a pure-LP terminating solve, and warm-start (the prior fit's
+    published theta carried on ``ctx.theta_init``).
 
     ``demand_sink`` is an optional read-only observer of every iteration's
     priced demands. ``None`` by default. When present it only reads the demands
@@ -272,7 +274,7 @@ def run_fit(
     penalty_on = config.qp_weight > 0.0 and config.decay > 0
     master = ctx.master_backend  # root-only; None elsewhere
 
-    # Floor convergence at decay+1 so the weight has fully decayed to 0 before
+    # Floor convergence at decay+1 so the weight has already dropped to 0 before
     # acceptance. The real guard is the priced_weight==0 check at the stop rule:
     # it certifies the theta that was actually priced, so acceptance may wait
     # one more iteration after the weight is reverted to zero.
@@ -386,17 +388,19 @@ def run_fit(
                     local_ids if this_full else local_ids[mask[local_ids]]
                 )
 
-            # Decayed penalty weight for this iteration; hits exactly 0 at
-            # it >= decay (pure LP from then on). The driver stages objective
-            # changes on formulations that support it, and the formulation
-            # applies the pending penalty immediately before its one owner-side
-            # solve. Thus cut installs and objective changes share a warm
-            # re-solve instead of solving the old relaxation and then the
-            # cut-augmented one.
+            # Penalty weight for this iteration: qp_weight while it < decay,
+            # exactly 0 from then on (pure LP). The weight is held constant
+            # across the proximal phase because any weight change forces the
+            # backend to re-push the whole quadratic objective and cold-start
+            # the next solve; at a fixed weight a penalty re-solve is a
+            # theta-only linear edit on a warm basis. The driver stages
+            # objective changes on formulations that support it, and the
+            # formulation applies the pending penalty immediately before its
+            # one owner-side solve. Thus cut installs and objective changes
+            # share a warm re-solve instead of solving the old relaxation and
+            # then the cut-augmented one.
             weight_t = (
-                config.qp_weight * max(0.0, 1.0 - it / config.decay)
-                if penalty_on
-                else 0.0
+                config.qp_weight if penalty_on and it < config.decay else 0.0
             )
 
             needs_penalty_solve = penalty_on and (
@@ -499,7 +503,7 @@ def run_fit(
                 # A violation<=tol certificate is honest only when the priced
                 # theta came from a pure-LP solve, so gate on priced_weight==0
                 # (and the decay floor); otherwise keep re-pricing the full
-                # sweep and decaying until both hold.
+                # sweep until both hold.
                 if (
                     this_full
                     and iterations >= convergence_floor

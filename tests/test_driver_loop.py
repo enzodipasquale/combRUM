@@ -260,15 +260,14 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             tuple(master.refs),
         )
 
-    # weight(it) = qp_weight * max(0, 1 - it/decay), recomputed here from the
-    # config values rather than read from any driver local. With qp_weight=1.0
-    # and decay=1 the owner installs exactly (1.0, 0.0): the QP solve, then
-    # one revert solve back to a pure LP — later zero-weight iterations must
-    # not keep re-solving an already-pure master.
+    # weight(it) = qp_weight while it < decay, else exactly 0, recomputed here
+    # from the config values rather than read from any driver local. With
+    # qp_weight=1.0 and decay=1 the owner installs exactly (1.0, 0.0): the QP
+    # solve, then one revert solve back to a pure LP — later zero-weight
+    # iterations must not keep re-solving an already-pure master.
     qp_weight, decay = 1.0, 1
     expected_weights = tuple(
-        qp_weight * max(0.0, 1.0 - it / decay)
-        for it in range(2)
+        qp_weight if it < decay else 0.0 for it in range(2)
     )
     final_weight = expected_weights[-1]
 

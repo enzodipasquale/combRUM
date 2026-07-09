@@ -249,7 +249,7 @@ _REQUIRE_QUADRATIC_CASES = [
 
 def _expected_require_quadratic(qp_weight: float, decay: int) -> bool:
     # A quadratic-capable backend is needed exactly when the proximal penalty
-    # is live: a positive weight that decays over at least one iteration.
+    # is live: a positive weight held for at least one iteration.
     penalty_live = {
         (0.0, 0): False,
         (0.0, 1): False,

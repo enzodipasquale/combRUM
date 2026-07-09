@@ -209,10 +209,11 @@ def run_walk(
     # a full sweep before the walk stops (the unpriced agents may still be
     # violated). force_full carries that "certify next" obligation.
     force_full = True
-    # Quadratic-penalty decay schedule. qp_weight == 0 disables it entirely
-    # (no set_penalty call is ever made); when active, the weight decays
-    # linearly to exactly zero over `decay` iterations, so the terminating
-    # solve is a pure LP with valid LP duals.
+    # Quadratic-penalty schedule. qp_weight == 0 disables it entirely
+    # (no set_penalty call is ever made); when active, the weight is held at
+    # qp_weight for `decay` iterations and then drops to exactly zero, so the
+    # terminating solve is a pure LP with valid LP duals. Mirrors the
+    # production driver's fixed-then-off schedule.
     penalty_on = qp_weight > 0.0 and decay > 0
     if qp_weight > 0.0 and decay <= 0:
         raise ValueError(
@@ -233,7 +234,7 @@ def run_walk(
         else np.asarray(theta_init, dtype=np.float64)
     )
     # The decay floor enforces effective_min_iters >= decay+1: the
-    # walk may not accept convergence before the weight has fully decayed
+    # walk may not accept convergence before the weight has dropped
     # to 0. The real correctness guard, though, is the priced_weight==0
     # check at the stop rule (below) — it refuses any convergence whose
     # theta did not come from a pure-LP solve, whatever the floor constant.
@@ -292,7 +293,7 @@ def run_walk(
             pricing_calls += int(mask.sum())
             evaluated = formulation.evaluate(demands)
             weight_t = (
-                qp_weight * max(0.0, 1.0 - it / decay) if penalty_on else 0.0
+                qp_weight if penalty_on and it < decay else 0.0
             )
             needs_penalty_solve = penalty_on and (
                 weight_t > 0.0 or last_solve_weight > 0.0
@@ -324,7 +325,7 @@ def run_walk(
                 # A violation<=tol certificate is honest only when the priced
                 # theta came from a pure-LP solve; the decay floor and the
                 # priced_weight==0 gate refuse convergence until the weight
-                # has fully decayed. The theta published on break equals the
+                # has dropped to 0. The theta published on break equals the
                 # validated one: a converged step ships no cut, so re-solving
                 # the unchanged cut set at weight 0 gives the same vertex.
                 if (

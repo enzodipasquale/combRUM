@@ -92,7 +92,9 @@ def estimate(
         master_backend: Master backend (``"auto"`` / ``"gurobi"`` / ``"highs"``).
         master_params: Backend-owned solver knobs.
         tolerance, max_iterations, min_iterations: Loop bounds.
-        qp_weight, decay, penalty_ref: Proximal-penalty decay (off by default).
+        qp_weight, decay, penalty_ref: Proximal penalty (off by default):
+            weight ``qp_weight`` for the first ``decay`` iterations, then
+            exactly zero so the terminating solve is a pure LP.
         schedule: Optional re-pricing schedule.
         iteration_callback: Per-iteration hook; may update oracle-owned
             settings and return an additional convergence floor.
