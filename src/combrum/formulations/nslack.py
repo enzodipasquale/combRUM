@@ -398,11 +398,15 @@ class NSlack(Formulation):
             if rc.size:
                 worst = max(0.0, float(rc.max()))
             if pending is not None:
-                for agent_id, bundle, value in zip(ids, bundles, rc):
+                # Pack every priced bundle key in one vectorized call rather
+                # than one per agent (bundles is 2-D, so this hits the batched
+                # codec path); keys[i] is byte-identical to bundle_key(bundle).
+                keys = _pack_bundles(bundles)
+                for i, (agent_id, value) in enumerate(zip(ids, rc)):
                     pending.priced_reduced_costs.append(
                         PricedReducedCost(
                             agent_id=int(agent_id),
-                            bundle_key=bundle_key(bundle),
+                            bundle_key=keys[i],
                             rc=float(value),
                         )
                     )

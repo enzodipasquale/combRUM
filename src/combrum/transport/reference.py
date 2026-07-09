@@ -253,6 +253,10 @@ def _combine_batched_route_agent_values(
         owners,
         n_agents=n_agents,
     )
+    if size == 1:
+        # Rank 0 owns every agent, so per-rank bucketing is the identity; the
+        # normalized dict is already the answer, minus empty reps.
+        return {int(rep): values for rep, values in by_rep.items() if values}
     out: dict[int, dict[int, float]] = {}
     for rep, values in by_rep.items():
         bucket = _route_bucket_for_rank(

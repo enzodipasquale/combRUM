@@ -334,24 +334,49 @@ class HighsMaster(MasterBackend):
         # Invalidate the cached solve before the writes so a mid-loop solver
         # error cannot leave accessors reporting pre-edit results.
         self._invalidate_solution()
-        for key, new_eps in updates.items():
-            idx = self._row_index[key]
-            # Cut is `>=`: only the lower bound is the RHS; upper stays at
-            # infinity to keep the row one-sided.
-            status = self._h.changeRowBounds(
-                idx, float(new_eps), self._highspy.kHighsInf
+        keys = list(updates)
+        # Cut is `>=`: only the lower bound is the RHS; upper stays at infinity
+        # to keep the row one-sided. One batched changeRowsBounds crosses the
+        # pybind boundary once for the whole set instead of once per cut.
+        indices = np.fromiter(
+            (self._row_index[key] for key in keys), dtype=np.int32, count=len(keys)
+        )
+        lowers = np.fromiter(
+            (float(updates[key]) for key in keys), dtype=np.float64, count=len(keys)
+        )
+        uppers = np.full(len(keys), self._highspy.kHighsInf, dtype=np.float64)
+        status = self._h.changeRowsBounds(len(keys), indices, lowers, uppers)
+        if status != self._highspy.HighsStatus.kOk:
+            raise RuntimeError(
+                f"changeRowsBounds returned {status.name}; expected kOk"
             )
-            if status != self._highspy.HighsStatus.kOk:
-                raise RuntimeError(
-                    f"changeRowBounds for cut {key!r} returned"
-                    f" {status.name}; expected kOk"
-                )
-            # Keep the installed-row mirror exact so extract_cuts/reinstall see
-            # the new RHS; the epsilon-only _replace shares phi and the
-            # decoded-bundle memo with the old row.
-            row = self._installed[key]._replace(epsilon=float(new_eps))
+        # Mirror the new RHS into the installed rows (no solver call): the
+        # epsilon-only _replace shares phi and the decoded-bundle memo with the
+        # old row.
+        rows = [
+            self._installed[key]._replace(epsilon=new_eps)
+            for key, new_eps in zip(keys, lowers.tolist())
+        ]
+        for key, row in zip(keys, rows):
             self._installed[key] = row
-            self._update_u_upper(row)
+        # Refresh finite u-upper bounds. The candidate for every updated cut is
+        # one O(K) reduction; compute them all in a single vectorized pass (as
+        # _install_batch does) rather than a per-row _finite_u_upper, which
+        # re-runs np.where once per cut and dominates set_rhs at large cut
+        # counts. The per-agent loosen-only guard stays per-key inside
+        # _update_u_upper (it may issue a changeColBounds, but only when a slack
+        # upper actually loosens, not in steady state).
+        if self._u_lower_bound is not None:
+            phi = np.vstack([row.phi for row in rows])
+            candidates = np.maximum(
+                self._u_lb(),
+                lowers
+                + np.where(phi >= 0.0, phi * self._upper, phi * self._lower).sum(
+                    axis=1
+                ),
+            )
+            for row, candidate in zip(rows, candidates.tolist()):
+                self._update_u_upper(row, candidate)
 
     def _initial_u_upper(self, row: CutRow, coef: float) -> float:
         if self._u_lower_bound is None or coef < 0.0:
