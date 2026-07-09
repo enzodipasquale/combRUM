@@ -10,6 +10,7 @@ from _support.commprobe import CountingTransport
 from _support.constants import MAX_ITERATIONS, THETA_BOUND, TOLERANCE
 from _support.families import toy_family
 from combrum.bootstrap_distributed import _owner_vector
+from combrum.dual import DualSolution
 from combrum.engine.certify import GapTally, certification_metadata
 from combrum.engine.distributed_context import (
     owned_agent_ids,
@@ -258,6 +259,10 @@ def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
 
         for result in results:
             assert result.metadata["converged"] is True
+            # Summary-only default: no rank carries optional artifacts.
+            assert result.slack is None
+            assert result.cuts is None
+            assert result.cut_duals is None
             np.testing.assert_allclose(
                 result.theta_hat, serial.theta_hat, rtol=1e-10, atol=1e-10
             )
@@ -273,6 +278,67 @@ def test_estimate_distributed_matches_serial_split_axis_fit() -> None:
                 rtol=1e-12,
                 atol=1e-12,
             )
+
+
+def _dual_mass(dual: DualSolution) -> dict[tuple[int, bytes], float]:
+    """Per-(agent, bundle) dual mass; row order is master-owned, so compare on this."""
+    mass: dict[tuple[int, bytes], float] = {}
+    for agent_id, row_id, pi in zip(
+        dual.agent_ids.tolist(), dual.bundle_row_ids.tolist(), dual.pis.tolist()
+    ):
+        key = (int(agent_id), dual.bundle_table[int(row_id)].tobytes())
+        mass[key] = mass.get(key, 0.0) + float(pi)
+    return mass
+
+
+@needs_highs
+def test_estimate_distributed_gathers_requested_artifacts_to_root() -> None:
+    arrays = toy_family(_N, _K, _MOMENT_SEED)
+    flags = {"return_slack": True, "return_cuts": True, "return_cut_duals": True}
+
+    serial = cb.estimate(
+        _model(arrays),
+        _data(arrays),
+        transport=cb.SerialTransport(),
+        master_backend="highs",
+        tolerance=TOLERANCE,
+        max_iterations=MAX_ITERATIONS,
+        **flags,
+    )
+    assert serial.metadata["converged"] is True
+    assert serial.slack is not None and serial.cuts is not None
+
+    root, worker = LocalCluster(2).run(
+        lambda transport: cb.estimate_distributed(
+            _model(arrays),
+            n_observations=_N,
+            n_simulations=_S,
+            transport=transport,
+            master_backend="highs",
+            tolerance=TOLERANCE,
+            max_iterations=MAX_ITERATIONS,
+            **flags,
+        )
+    )
+
+    # Root-gathered artifacts must reproduce the equivalent serial fit's.
+    np.testing.assert_allclose(root.slack, serial.slack, rtol=0.0, atol=1e-9)
+    assert len(root.cuts) == root.n_active_cuts == serial.n_active_cuts
+    assert {(cut.agent_id, cut.bundle_key) for cut in root.cuts} == {
+        (cut.agent_id, cut.bundle_key) for cut in serial.cuts
+    }
+    assert isinstance(root.cut_duals, DualSolution)
+    assert root.cut_duals.pis.shape == (root.n_active_cuts,)
+    serial_mass = _dual_mass(serial.cut_duals)
+    root_mass = _dual_mass(root.cut_duals)
+    assert set(root_mass) == set(serial_mass)
+    for key, pi in serial_mass.items():
+        assert root_mass[key] == pytest.approx(pi, abs=1e-9)
+
+    # Non-root ranks stay summary-only.
+    assert worker.slack is None
+    assert worker.cuts is None
+    assert worker.cut_duals is None
 
 
 @needs_highs

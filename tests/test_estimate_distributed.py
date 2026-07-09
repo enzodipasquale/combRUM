@@ -10,6 +10,7 @@ from combrum.engine.driver import LoopDiagnostics, LoopOutcome
 from combrum.formulation import FormulationResult
 import pytest
 
+from combrum.context import ResultPublication
 from combrum.cut_policies import AddAll, PurgeInactive
 from combrum.formulations import NSlack, OneSlack
 from combrum.model import Model
@@ -132,6 +133,108 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
     )
     # setup_observed receives the owned observation shard; serial owns all five.
     assert surface.setup_ids == tuple(range(5))
+
+
+def test_estimate_distributed_defaults_to_summary_publication(monkeypatch) -> None:
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+    surface = _ObservedSurface()
+    seen = {}
+
+    def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
+        seen["ctx"] = ctx
+        return _converged_outcome(ctx.K)
+
+    monkeypatch.setattr(estimate_module, "build_fit_context", _fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
+
+    result = estimate_distributed(
+        Model(
+            _Oracle(),
+            Parameters({"theta": (-2.0, 2.0, 2)}),
+            features=surface,
+            observed_features=surface,
+            formulation=NSlack,
+        ),
+        n_observations=5,
+        n_simulations=4,
+        transport=SerialTransport(),
+        master_backend="highs",
+        max_iterations=1,
+    )
+
+    assert seen["ctx"].result_publication is ResultPublication.SUMMARY
+    assert result.slack is None
+    assert result.cuts is None
+    assert result.cut_duals is None
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({"return_slack": True}, ResultPublication.SLACK),
+        ({"return_cuts": True}, ResultPublication.ACTIVE_SET),
+        ({"return_cut_duals": True}, ResultPublication.DUAL),
+        (
+            {"return_slack": True, "return_cuts": True, "return_cut_duals": True},
+            ResultPublication.SLACK
+            | ResultPublication.ACTIVE_SET
+            | ResultPublication.DUAL,
+        ),
+    ],
+)
+def test_estimate_distributed_publication_flags_reach_result(
+    monkeypatch, flags: dict[str, bool], expected: ResultPublication
+) -> None:
+    estimate_module = importlib.import_module("combrum.engine.estimate")
+    surface = _ObservedSurface()
+    seen = {}
+    # The formulation owns artifact gating, so whatever it publishes must
+    # reach the FitResult untouched.
+    slack = np.arange(20, dtype=np.float64)
+    active_set = object()
+    dual = object()
+
+    def fake_run_fit(ctx, oracle, formulation, config, *, demand_sink=None):  # type: ignore[no-untyped-def]
+        seen["ctx"] = ctx
+        return LoopOutcome(
+            result=FormulationResult(
+                theta_hat=np.zeros(ctx.K, dtype=np.float64),
+                objective=0.0,
+                n_active_cuts=1,
+                slack=slack,
+                active_set=active_set,
+                dual=dual,
+            ),
+            diagnostics=LoopDiagnostics(
+                converged=True,
+                iterations=0,
+                cuts_admitted=0,
+            ),
+        )
+
+    monkeypatch.setattr(estimate_module, "build_fit_context", _fail_serial_builder)
+    monkeypatch.setattr(estimate_module, "run_fit", fake_run_fit)
+
+    result = estimate_distributed(
+        Model(
+            _Oracle(),
+            Parameters({"theta": (-2.0, 2.0, 2)}),
+            features=surface,
+            observed_features=surface,
+            formulation=NSlack,
+        ),
+        n_observations=5,
+        n_simulations=4,
+        transport=SerialTransport(),
+        master_backend="highs",
+        max_iterations=1,
+        **flags,
+    )
+
+    assert seen["ctx"].result_publication == expected
+    np.testing.assert_array_equal(result.slack, slack)
+    assert result.cuts is active_set
+    assert result.cut_duals is dual
 
 
 def test_estimate_distributed_empirical_moment_divides_by_global_n(
@@ -306,6 +409,39 @@ def test_estimate_distributed_requires_rank_uniform_master_backend() -> None:
     assert all(
         "master_backend must match" in message
         for message in LocalCluster(2).run(run)
+    )
+
+
+@pytest.mark.parametrize(
+    "flag", ["return_slack", "return_cuts", "return_cut_duals"]
+)
+def test_estimate_distributed_requires_rank_uniform_publication_flags(
+    flag: str,
+) -> None:
+    def run(transport):
+        surface = _ObservedSurface()
+        try:
+            estimate_distributed(
+                Model(
+                    _Oracle(),
+                    Parameters({"theta": (-2.0, 2.0, 2)}),
+                    features=surface,
+                    observed_features=surface,
+                    formulation=NSlack,
+                ),
+                n_observations=5,
+                n_simulations=4,
+                transport=transport,
+                master_backend="highs",
+                max_iterations=1,
+                **{flag: transport.rank == 0},
+            )
+        except TransportError as exc:
+            return exc.message
+        return "no error"
+
+    assert all(
+        f"{flag} must match" in message for message in LocalCluster(2).run(run)
     )
 
 

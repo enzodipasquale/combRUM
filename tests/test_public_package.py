@@ -176,9 +176,6 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "data",
         "weights",
         "schedule",
-        "return_slack",
-        "return_cuts",
-        "return_cut_duals",
         "result_publication",
     ):
         assert removed not in est_params
@@ -216,6 +213,9 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "warm_start": None,
         "warm_cuts": None,
         "cut_policy": None,
+        "return_slack": False,
+        "return_cuts": False,
+        "return_cut_duals": False,
         "activity": None,
         "level": RIL.DEFAULT,
     }
@@ -608,6 +608,9 @@ def test_public_type_hints_resolve() -> None:
             "warm_start": (combrum.FitResult | None),
             "warm_cuts": (Sequence[CutRow] | None),
             "cut_policy": (CutPolicy | None),
+            "return_slack": bool,
+            "return_cuts": bool,
+            "return_cut_duals": bool,
             "activity": (combrum.ActivityConfig | None),
             "level": combrum.RunInfoLevel,
             "return": combrum.FitResult,

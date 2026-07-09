@@ -45,6 +45,19 @@ from combrum.transport import SerialTransport
 from combrum.transport.base import CutRow, Transport
 
 
+def _requested_publication(
+    return_slack: bool, return_cuts: bool, return_cut_duals: bool
+) -> ResultPublication:
+    publication = ResultPublication.SUMMARY
+    if return_slack:
+        publication |= ResultPublication.SLACK
+    if return_cuts:
+        publication |= ResultPublication.ACTIVE_SET
+    if return_cut_duals:
+        publication |= ResultPublication.DUAL
+    return publication
+
+
 def estimate(
     model: Model,
     data: Data,
@@ -138,14 +151,6 @@ def estimate(
         require_quadratic=qp_weight > 0.0 and decay > 0,
         transport=transport,
     )
-    result_publication: list[str] = []
-    if return_slack:
-        result_publication.append("slack")
-    if return_cuts:
-        result_publication.append("active_set")
-    if return_cut_duals:
-        result_publication.append("dual")
-
     built = build_fit_context(
         parameters,
         observables=observables,
@@ -164,7 +169,9 @@ def estimate(
         warm_start=warm_start,
         warm_cuts=warm_cuts,
         cut_policy=cut_policy,
-        result_publication=tuple(result_publication) or "summary",
+        result_publication=_requested_publication(
+            return_slack, return_cuts, return_cut_duals
+        ),
     )
 
     with build_activity_run(activity, is_root=transport.rank == 0) as activity_run:
@@ -266,6 +273,9 @@ def estimate_distributed(
     warm_start: FitResult | None = None,
     warm_cuts: Sequence[CutRow] | None = None,
     cut_policy: CutPolicy | None = None,
+    return_slack: bool = False,
+    return_cuts: bool = False,
+    return_cut_duals: bool = False,
     activity: ActivityConfig | None = None,
     level: RunInfoLevel = RunInfoLevel.DEFAULT,
 ) -> FitResult:
@@ -299,6 +309,9 @@ def estimate_distributed(
             min_iterations, qp_weight, decay, penalty_ref, iteration_callback,
             warm_start, warm_cuts, cut_policy, activity, level: As in
             :func:`estimate`.
+        return_slack, return_cuts, return_cut_duals: As in :func:`estimate`,
+            except the requested artifacts are root-gathered: only rank 0's
+            result carries them; other ranks read ``None``.
 
     Returns:
         The same :class:`~combrum.result.FitResult` as :func:`estimate`;
@@ -349,6 +362,11 @@ def estimate_distributed(
     )
     warm_cuts = require_public_object_agreement("warm_cuts", warm_cuts, transport)
     cut_policy = require_public_object_agreement("cut_policy", cut_policy, transport)
+    return_slack = agree_public_bool("return_slack", return_slack, transport)
+    return_cuts = agree_public_bool("return_cuts", return_cuts, transport)
+    return_cut_duals = agree_public_bool(
+        "return_cut_duals", return_cut_duals, transport
+    )
 
     _validate_loop_controls(
         max_iterations, qp_weight, decay, penalty_ref, min_iterations
@@ -383,7 +401,9 @@ def estimate_distributed(
         theta_init=theta_init,
         warm_cuts=warm_cuts,
         cut_policy=cut_policy,
-        result_publication=ResultPublication.SUMMARY,
+        result_publication=_requested_publication(
+            return_slack, return_cuts, return_cut_duals
+        ),
     )
 
     with build_activity_run(activity, is_root=transport.rank == 0) as activity_run:
@@ -457,9 +477,9 @@ def estimate_distributed(
         runtime_seconds=runtime_seconds,
         n_active_cuts=result.n_active_cuts,
         parameters=parameters,
-        slack=None,
+        slack=result.slack,
         metadata=metadata,
         run_info=run_info,
-        cuts=None,
-        cut_duals=None,
+        cuts=result.active_set,
+        cut_duals=result.dual,
     )
