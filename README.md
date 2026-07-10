@@ -50,18 +50,14 @@ To use combRUM, specify two model-specific pieces:
 - a `FeatureMap` that computes the priced-row pair
   $`(\phi_i(d), \varepsilon_i(d))`$ for a choice $`d \in \{0,1\}^M`$
 
-For serial estimation, observed choices and simulation draws are passed through
-a `Data` object. For distributed estimation, each rank owns part of the
-simulated agents and combRUM coordinates the row-generation loop across ranks.
+Serial runs pass observed choices and simulation draws through `cb.Data`, then
+call `cb.estimate(...)`. For the serial bootstrap, keep the same `Model` and
+`Data` and call `cb.bootstrap(...)`.
 
-Call `cb.estimate(...)` or `cb.estimate_distributed(...)` for point estimates.
-Call `cb.bootstrap(..., weights=cb.NativeDraws(n_obs=N, base_seed=seed))` for
-serial multiplier bootstrap inference. Use `cb.bootstrap_distributed(...)` for
-distributed multiplier bootstrap with `NSlack` models that provide
-`observed_features_batch(observation_ids)`; distributed bootstrap uses split
-observation/simulation axes rather than a dense `Data` object.
-Use `cb.LocalCluster(...)` to exercise distributed code paths locally before
-moving the same code to an MPI transport.
+On a high-performance computing (HPC) cluster, the distributed entry points run
+row generation across MPI ranks. Pass `cb.MpiTransport` to
+`cb.estimate_distributed(...)` and `cb.bootstrap_distributed(...)` to communicate
+through MPI. The worked examples and notebooks show both paths.
 
 ## Distributed Runs
 
