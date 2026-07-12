@@ -427,7 +427,6 @@ def test_slack_strip_peak_rss_within_bounded_margin(
 
     def _remove_then_check(self, keys):
         removed = orig_remove(self, keys)
-        # Inspect only after a retirement that actually shed rows.
         if removed:
             _assert_retirement_frees_rows(self)
         return removed

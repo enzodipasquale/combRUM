@@ -18,7 +18,10 @@ from typing import TypeVar
 
 import numpy as np
 
-from combrum._bundle_key import pack_bundle, unpack_bundle
+from combrum._bundle_key import (
+    pack_bundle as _pack_bundle,
+    unpack_bundle as _unpack_bundle,
+)
 
 _T = TypeVar("_T")
 _CUT_ROW_WIRE_HEADER_BYTES = 5 * np.dtype(np.float64).itemsize
@@ -42,18 +45,18 @@ class NodeTopology:
 
     def __post_init__(self) -> None:
         if self.n_nodes < 1:
-            raise ValueError(f"n_nodes must be >= 1; got {self.n_nodes}")
+            raise ValueError(f"expected n_nodes >= 1, got {self.n_nodes}")
         if self.node_size < 1:
-            raise ValueError(f"node_size must be >= 1; got {self.node_size}")
+            raise ValueError(f"expected node_size >= 1, got {self.node_size}")
         if not 0 <= self.node_id < self.n_nodes:
             raise ValueError(
-                f"node_id must lie in [0, n_nodes) = [0, {self.n_nodes});"
+                f"expected node_id in [0, n_nodes) = [0, {self.n_nodes}),"
                 f" got {self.node_id}"
             )
         if not 0 <= self.node_rank < self.node_size:
             raise ValueError(
-                "node_rank must lie in [0, node_size) ="
-                f" [0, {self.node_size}); got {self.node_rank}"
+                "expected node_rank in [0, node_size) ="
+                f" [0, {self.node_size}), got {self.node_rank}"
             )
 
 
@@ -68,14 +71,6 @@ class TransportError(RuntimeError):
         super().__init__(f"[rank {rank}] {message}")
         self.rank = int(rank)
         self.message = str(message)
-
-
-def _pack_bundle(bundle: np.ndarray) -> bytes:
-    return pack_bundle(bundle)
-
-
-def _unpack_bundle(key: bytes) -> np.ndarray:
-    return unpack_bundle(key)
 
 
 @dataclass(frozen=True, eq=False)
@@ -102,20 +97,26 @@ class CutRow:
 
     def __post_init__(self) -> None:
         if not isinstance(self.rep_id, (int, np.integer)) or self.rep_id < 0:
-            raise ValueError(f"rep_id must be an integer >= 0; got {self.rep_id!r}")
+            raise ValueError(
+                f"expected rep_id to be an integer >= 0, got {self.rep_id!r}"
+            )
         object.__setattr__(self, "rep_id", int(self.rep_id))
         if not isinstance(self.agent_id, (int, np.integer)) or self.agent_id < 0:
-            raise ValueError(f"agent_id must be an integer >= 0; got {self.agent_id!r}")
+            raise ValueError(
+                f"expected agent_id to be an integer >= 0, got {self.agent_id!r}"
+            )
         object.__setattr__(self, "agent_id", int(self.agent_id))
         phi = np.array(self.phi, dtype=np.float64, copy=True, order="C")
         if phi.ndim != 1:
-            raise ValueError(f"phi must be one-dimensional (K,); got shape {phi.shape}")
+            raise ValueError(
+                f"expected one-dimensional (K,) phi, got shape {phi.shape}"
+            )
         phi.setflags(write=False)
         object.__setattr__(self, "phi", phi)
         object.__setattr__(self, "epsilon", float(self.epsilon))
         if not isinstance(self.bundle_key, bytes):
             raise ValueError(
-                f"bundle_key must be bytes; got {type(self.bundle_key).__name__}"
+                f"expected bytes bundle_key, got {type(self.bundle_key).__name__}"
             )
         if not self.bundle_key:
             raise ValueError("bundle_key must be nonempty")
@@ -131,16 +132,20 @@ class CutRow:
         bundle_key: bytes,
     ) -> "CutRow":
         if not isinstance(rep_id, (int, np.integer)) or rep_id < 0:
-            raise ValueError(f"rep_id must be an integer >= 0; got {rep_id!r}")
+            raise ValueError(f"expected rep_id to be an integer >= 0, got {rep_id!r}")
         if not isinstance(agent_id, (int, np.integer)) or agent_id < 0:
-            raise ValueError(f"agent_id must be an integer >= 0; got {agent_id!r}")
+            raise ValueError(
+                f"expected agent_id to be an integer >= 0, got {agent_id!r}"
+            )
         phi = np.asarray(phi, dtype=np.float64, order="C")
         if phi.ndim != 1:
-            raise ValueError(f"phi must be one-dimensional (K,); got shape {phi.shape}")
+            raise ValueError(
+                f"expected one-dimensional (K,) phi, got shape {phi.shape}"
+            )
         phi.setflags(write=False)
         if not isinstance(bundle_key, bytes):
             raise ValueError(
-                f"bundle_key must be bytes; got {type(bundle_key).__name__}"
+                f"expected bytes bundle_key, got {type(bundle_key).__name__}"
             )
         if not bundle_key:
             raise ValueError("bundle_key must be nonempty")
@@ -161,7 +166,9 @@ class CutRow:
     ) -> "CutRow":
         new_rep_id = self.rep_id if rep_id is None else rep_id
         if not isinstance(new_rep_id, (int, np.integer)) or new_rep_id < 0:
-            raise ValueError(f"rep_id must be an integer >= 0; got {new_rep_id!r}")
+            raise ValueError(
+                f"expected rep_id to be an integer >= 0, got {new_rep_id!r}"
+            )
         new_eps = self.epsilon if epsilon is None else float(epsilon)
         new_key = self.bundle_key if bundle_key is None else bundle_key
         if not isinstance(new_key, bytes) or not new_key:

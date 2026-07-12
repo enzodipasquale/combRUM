@@ -122,7 +122,7 @@ def test_result_rejects_non_vector_theta_hat() -> None:
     # Neither a 2-D matrix nor a 0-D scalar is a (K,) vector.
     for bad in (np.zeros((K, K)), np.float64(3.0)):
         with pytest.raises(
-            ValueError, match="theta_hat must be one-dimensional"
+            ValueError, match=r"expected one-dimensional \(K,\) theta_hat"
         ):
             FormulationResult(
                 theta_hat=bad, objective=0.0, n_active_cuts=0

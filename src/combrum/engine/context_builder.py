@@ -113,9 +113,6 @@ def build_fit_context(
             :func:`combrum.masters.master_environment`, shared by sequential
             masters (one license checkout per run, not per build), or ``None``
             for a master-owned environment.
-
-    All optional inputs at default (``None``) reproduce the point-estimate
-    context.
     """
     backend_for_master = resolved_master_backend or master_backend
     K = parameters.K
@@ -138,8 +135,6 @@ def build_fit_context(
     # so every cut and reduction is keyed identically.
     local_ids = np.arange(transport.rank, n_agents, transport.size, dtype=np.int64)
 
-    # None means unit weights; one weight vector drives both c_theta (theta_coef)
-    # and the per-agent epigraph/aggregate coefficients (agent_weights).
     if weights is None:
         theta_coef = np.ones(n_agents, dtype=np.float64)
         agent_weights = np.ones(n_agents, dtype=np.float64)
@@ -153,9 +148,9 @@ def build_fit_context(
                 " weight row, never a pre-expanded vector."
             )
         if not np.all(np.isfinite(w)) or np.any(w < 0.0):
-            raise ValueError("weights must be finite and >= 0")
-        # Expand to the (N*S,) agent space: np.tile gives [w; w; ...] (S copies)
-        # in a = s*N + i order, so all S copies of observation i share weights[i].
+            raise ValueError("weights must be finite and nonnegative")
+        # np.tile, not np.repeat: agent order is a = s*N + i, so the S copies
+        # of observation i sit at a % N == i.
         agent_w = np.tile(w, S)
         theta_coef = agent_w
         agent_weights = agent_w
@@ -216,8 +211,7 @@ def build_fit_context(
 
     master_obj = None
     if transport.size == 1:
-        if transport.rank == 0:
-            master_obj = _rank0_master()
+        master_obj = _rank0_master()
     else:
         with transport.collective():
             if transport.rank == 0:

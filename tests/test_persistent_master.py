@@ -921,12 +921,12 @@ def test_persistent_criterion_matches_cold_rebuild_within_band() -> None:
 def test_persistent_penalty_decay_fit_then_reevaluate_runs_end_to_end() -> None:
     """A qp_weight>0 / decay>=1 config runs the persistent path on a real QP solve.
 
-    ``require_quadratic`` resolves to True (qp_weight>0 and decay>0 at
-    persistent.py:169-170), so the driver builds a gurobi master. The proximal
-    weight holds at ``qp_weight`` for ``decay`` iterations and then drops to
-    exactly zero, so the terminating solve is a pure LP and a dual is
-    published. Both the cold fit and a valid shocks-only reevaluate run
-    end-to-end over the carried master.
+    ``require_quadratic`` resolves to True (qp_weight>0 and decay>0 in
+    ``PersistentMasterFit.fit``'s ``resolve_master_backend`` call), so the
+    driver builds a gurobi master. The proximal weight holds at ``qp_weight``
+    for ``decay`` iterations and then drops to exactly zero, so the
+    terminating solve is a pure LP and a dual is published. Both the cold fit
+    and a valid shocks-only reevaluate run end-to-end over the carried master.
     """
     params, observables, observed, shocks0, problem = _toy_inputs()
     penalty_config = LoopConfig(
@@ -1307,9 +1307,10 @@ def test_perturbation_b3_weight_drift_hard_errors_at_g1_end_to_end() -> None:
 def test_reuse_guard_needs_full_weight_vector_over_uninstalled_agent() -> None:
     """G1's weight guard must compare the full vector, not just installed cuts.
 
-    The master's u_coef closure is frozen at ψ0 (persistent.py:325-327) and
-    serves ψ0's weight to any cut warm row-gen prices for the first time at ψ,
-    so a weight drift on an agent with no installed cut must still hard-error.
+    The master's u_coef closure is frozen at ψ0 (the G1 agent_weights guard in
+    ``_assert_reuse_valid``) and serves ψ0's weight to any cut warm row-gen
+    prices for the first time at ψ, so a weight drift on an agent with no
+    installed cut must still hard-error.
 
     Driven at the guard directly — the toy fit installs every agent, so no
     end-to-end reevaluate can present an uninstalled-agent drift. A fake

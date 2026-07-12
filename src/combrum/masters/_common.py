@@ -13,8 +13,7 @@ def validated_u_coefs(
     """Split ``u_coef`` into its callable or validated-array form.
 
     Returns ``(callable, None)`` or ``(None, array)``; the array form is a
-    read-only finite float64 vector indexed by agent id, so backends read
-    slack coefficients without one Python call per agent.
+    read-only finite float64 vector indexed by agent id.
     """
     if callable(u_coef):
         return u_coef, None
@@ -37,7 +36,6 @@ def validated_construction(
     theta_bounds: tuple[np.ndarray, np.ndarray],
     c_theta: np.ndarray,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
-    """Validate backend-independent master constructor inputs."""
     if isinstance(K, bool) or not isinstance(K, (int, np.integer)) or K < 1:
         raise ValueError(f"K must be an integer >= 1; got {K!r}")
     K = int(K)

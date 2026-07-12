@@ -40,8 +40,6 @@ class Phase:
         iters: Iteration span, or ``None`` for the terminal phase (which
             owns every iteration past the last bounded phase).
         retire: Whether reps may retire early once this phase is active.
-
-    Validated at construction.
     """
 
     timeout: float
@@ -56,11 +54,11 @@ class Phase:
             iters = operator.index(self.iters)
             if iters < 1:
                 raise ValueError(
-                    f"Phase.iters must be >= 1 or None; got {self.iters!r}"
+                    f"Phase.iters must be >= 1 or None, got {self.iters!r}"
                 )
             object.__setattr__(self, "iters", iters)
         if not isinstance(self.retire, bool):
-            raise ValueError(f"Phase.retire must be a bool; got {self.retire!r}")
+            raise ValueError(f"Phase.retire must be a bool, got {self.retire!r}")
 
     @property
     def is_terminal(self) -> bool:
@@ -101,7 +99,6 @@ def _phase_lookup(
     *,
     terminal_floor: int | None,
 ) -> Callable[[int], tuple[SolverSettings, int | None]]:
-    """Build an ``iteration -> (settings, floor)`` lookup over a schedule."""
     bounded = schedule.phases[:-1]
     terminal = schedule.phases[-1]
     # Cumulative boundaries: boundary[k] is the first iteration not owned
@@ -137,12 +134,6 @@ def _phase_lookup(
     return lookup
 
 
-def _apply(oracle: Oracle, settings: SolverSettings) -> None:
-    """Apply settings to the oracle iff it declares the capability."""
-    if isinstance(oracle, SolverConfigurable):
-        oracle.apply_solver_settings(settings)
-
-
 def _timeout_callback(
     schedule: Schedule,
     *,
@@ -152,7 +143,8 @@ def _timeout_callback(
 
     def callback(iteration: int, oracle: Oracle) -> int | None:
         settings, floor = lookup(iteration)
-        _apply(oracle, settings)
+        if isinstance(oracle, SolverConfigurable):
+            oracle.apply_solver_settings(settings)
         return floor
 
     return callback

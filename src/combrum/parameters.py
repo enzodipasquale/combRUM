@@ -1,8 +1,7 @@
 """Ordered named parameter blocks: the layout of the flat theta vector.
 
-A :class:`Parameters` object defines how the flat ``theta`` vector decomposes
-into named blocks. Insertion order is theta order; the layout determines ``K``,
-the bound vectors, and the named accessors on every result type.
+A :class:`Parameters` layout determines ``K``, the bound vectors, and the
+named accessors on every result type.
 """
 
 from __future__ import annotations
@@ -31,13 +30,13 @@ class _Block:
 def _parse_spec(name: str, spec: BlockSpec, offset: int) -> _Block:
     if not (isinstance(spec, tuple) and len(spec) == 3):
         raise ValueError(
-            f"parameter block {name!r}: spec must be (lb, ub, k); got {spec!r}"
+            f"parameter block {name!r}: expected an (lb, ub, k) spec, got {spec!r}"
         )
     lb, ub = float(spec[0]), float(spec[1])
     k = spec[2]
     if not isinstance(k, (int, np.integer)) or k < 1:
         raise ValueError(
-            f"parameter block {name!r}: k must be an integer >= 1; got {k!r}"
+            f"parameter block {name!r}: expected integer k >= 1, got {k!r}"
         )
     # "not lb <= ub" also rejects NaN bounds, which compare False both ways.
     if not lb <= ub:
@@ -76,9 +75,7 @@ class Parameters:
             by_name[name] = block
             offset += block.size
         if not parsed:
-            raise ValueError(
-                "Parameters requires at least one block; got an empty specification"
-            )
+            raise ValueError("Parameters requires at least one block")
         object.__setattr__(self, "_blocks", tuple(parsed))
         object.__setattr__(self, "_by_name", by_name)
 
@@ -119,7 +116,7 @@ class Parameters:
         theta = np.asarray(theta)
         if theta.shape != (self.K,):
             raise ValueError(
-                f"theta must have shape (K,) = ({self.K},); got {theta.shape}"
+                f"expected theta of shape (K,) = ({self.K},), got {theta.shape}"
             )
         return {block.name: theta[block.slice] for block in self._blocks}
 
@@ -144,8 +141,8 @@ class Parameters:
             )
             if block_values.shape != (block.size,):
                 raise ValueError(
-                    f"pack: block {block.name!r} must have length"
-                    f" {block.size}; got shape {block_values.shape}"
+                    f"pack: expected length {block.size} for block"
+                    f" {block.name!r}, got shape {block_values.shape}"
                 )
             theta[block.slice] = block_values
         return theta

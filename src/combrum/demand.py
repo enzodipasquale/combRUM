@@ -13,32 +13,32 @@ def _strictly_increasing(values: np.ndarray) -> bool:
     return values.size < 2 or bool(np.all(values[1:] > values[:-1]))
 
 
-def _coerce_ids(values: object, *, name: str = "ids") -> np.ndarray:
+def _coerce_ids(values: object) -> np.ndarray:
     raw = np.asarray(values)
     if raw.ndim != 1:
-        raise ValueError(f"{name} must be one-dimensional; got {raw.shape}")
+        raise ValueError(f"expected 1-D ids, got shape {raw.shape}")
     if np.issubdtype(raw.dtype, np.bool_):
-        raise ValueError(f"{name} must be integer ids, not bool")
+        raise ValueError("ids must be integer ids, not bool")
     if not isinstance(values, np.ndarray):
         obj = np.asarray(values, dtype=object)
         if any(isinstance(value, (bool, np.bool_)) for value in obj.flat):
-            raise ValueError(f"{name} must be integer ids, not bool")
+            raise ValueError("ids must be integer ids, not bool")
     if np.issubdtype(raw.dtype, np.integer):
         if np.issubdtype(raw.dtype, np.unsignedinteger) and raw.size:
             if int(raw.max()) > np.iinfo(np.int64).max:
-                raise ValueError(f"{name} exceed int64 range")
+                raise ValueError("ids exceed int64 range")
         return np.asarray(raw, dtype=np.int64)
     if np.issubdtype(raw.dtype, np.floating):
         if np.any(~np.isfinite(raw)):
-            raise ValueError(f"{name} must be finite integer ids")
+            raise ValueError("ids must be finite integer ids")
         if np.any(raw != np.trunc(raw)):
-            raise ValueError(f"{name} must be integer ids")
+            raise ValueError("ids must be integer ids")
         if raw.size and (
             float(raw.min()) < np.iinfo(np.int64).min or float(raw.max()) >= 2.0**63
         ):
-            raise ValueError(f"{name} exceed int64 range")
+            raise ValueError("ids exceed int64 range")
         return raw.astype(np.int64)
-    raise ValueError(f"{name} must be integer ids; got dtype {raw.dtype}")
+    raise ValueError(f"ids must be integer ids; got dtype {raw.dtype}")
 
 
 def _coerce_id_key(agent_id: int) -> int:
@@ -105,10 +105,9 @@ class Demand:
     ) -> Demand:
         """Feasible incumbent without proof of exactness.
 
-        ``gap`` is an optional keyword bound: a finite positive value is kept
-        as a useful bound certificate, while missing, zero, negative, NaN, and
-        infinite gaps become ``math.inf`` (an inexact call with unknown finite
-        bound).
+        ``gap`` is an optional bound: a finite positive value is kept as a
+        certificate, while missing, zero, negative, NaN, and infinite gaps
+        become ``math.inf``.
         """
         if gap is None:
             gap_value = math.inf
@@ -141,24 +140,24 @@ class DemandBatch(Mapping[int, Demand]):
             unique, counts = np.unique(ids, return_counts=True)
             if unique.size != ids.size:
                 raise ValueError(
-                    f"ids must be unique; duplicated ids {unique[counts > 1].tolist()}"
+                    f"ids contain duplicates: {unique[counts > 1].tolist()}"
                 )
 
         bundles = np.asarray(self.bundles)
         if bundles.ndim < 1 or bundles.shape[0] != ids.size:
             raise ValueError(
-                "bundles must have first dimension len(ids) ="
-                f" {ids.size}; got shape {bundles.shape}"
+                "expected bundles with leading dimension len(ids) ="
+                f" {ids.size}, got shape {bundles.shape}"
             )
 
         payoffs = np.asarray(self.payoffs, dtype=np.float64)
         gaps = np.asarray(self.gaps, dtype=np.float64)
         if payoffs.shape != (ids.size,):
             raise ValueError(
-                f"payoffs must have shape ({ids.size},); got {payoffs.shape}"
+                f"expected payoffs of shape ({ids.size},), got {payoffs.shape}"
             )
         if gaps.shape != (ids.size,):
-            raise ValueError(f"gaps must have shape ({ids.size},); got {gaps.shape}")
+            raise ValueError(f"expected gaps of shape ({ids.size},), got {gaps.shape}")
         if np.any(~np.isfinite(payoffs)):
             raise ValueError("payoffs must be finite")
         if np.any(~np.isfinite(gaps)) or np.any(gaps < 0.0):

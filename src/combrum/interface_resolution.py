@@ -36,10 +36,7 @@ def _continuous_drift(opt: np.ndarray, ref: np.ndarray) -> float:
 
 
 class Mode(Enum):
-    """Which member of a method pair a provider resolved to.
-
-    Dispatched exhaustively by :func:`dispatch`.
-    """
+    """Which member of a method pair a provider resolved to."""
 
     DEFAULT = "default"  # only the per-agent member is overridden
     OPTIMIZED = "optimized"  # only the batched member is overridden
@@ -51,10 +48,9 @@ class Resolution:
     """The once-resolved choice for one method pair.
 
     ``surface`` is the pair name ("price", "features"); ``active`` is the bound
-    class function the caller invokes (instance monkeypatch cannot redirect
-    it); ``reference`` is the bound per-agent member, present only in
-    :attr:`Mode.BOTH` as the conformance reference and divergence fallback,
-    else ``None``.
+    class function the caller invokes; ``reference`` is the bound per-agent
+    member, present only in :attr:`Mode.BOTH` as the conformance reference and
+    divergence fallback, else ``None``.
     """
 
     surface: str
@@ -108,10 +104,9 @@ def resolve_local(
 
     ``default_name`` / ``optimized_name`` are the member names on
     ``instance``'s class; ``default_func`` / ``optimized_func`` are the base
-    default function objects override detection compares against. The active
-    member is returned bound via its class function (instance monkeypatch
-    ignored). Comm-free; the caller folds :attr:`Resolution.token` into its
-    own setup broadcast (or uses :func:`resolve`, which adds the round).
+    default function objects override detection compares against. Comm-free;
+    the caller folds :attr:`Resolution.token` into its own setup broadcast
+    (or uses :func:`resolve`, which adds the round).
 
     Raises:
         TypeError: if neither member is overridden.
@@ -216,8 +211,7 @@ def dispatch(
     """Exhaustive dispatch over a resolved mode.
 
     ``on_both`` receives ``(active_optimized, reference_default)``; the
-    single-member callbacks receive just the active member. An unhandled
-    mode raises.
+    single-member callbacks receive just the active member.
     """
     mode = resolution.mode
     if mode is Mode.DEFAULT:
@@ -244,9 +238,6 @@ def assert_conforms(
     Each element of ``optimized`` / ``reference`` is one item's tuple of
     fields. ``discrete`` indexes fields compared byte-identical;
     ``continuous`` indexes fields compared within ``tol``.
-
-    Raises:
-        AssertionError: on any mismatch.
     """
     if len(optimized) != len(reference):
         raise AssertionError(
@@ -303,7 +294,7 @@ class FeatureMap:
     """
 
     def features(self, agent_id: int, bundle: np.ndarray) -> tuple[np.ndarray, float]:
-        """Per-agent feature row ``(phi (K,), eps)``; default raises."""
+        """Per-agent feature row ``(phi (K,), eps)``."""
         raise NotImplementedError(
             "FeatureMap.features is not overridden; override features or features_batch"
         )
@@ -311,7 +302,7 @@ class FeatureMap:
     def features_batch(
         self, ids: np.ndarray, bundles: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Batched feature rows ``(Phi (n, K), Eps (n,))``; default raises.
+        """Batched feature rows ``(Phi (n, K), Eps (n,))``.
 
         ``ids`` are global agent ids; ``bundles`` are the matching chosen
         bundles in ``ids`` order; the return is in that same order.
@@ -364,18 +355,13 @@ def resolve_features(features: object, surface: str = "features") -> Resolution:
         )
     raise TypeError(
         f"features must be a callable (agent_id, bundle) -> (phi, eps) or a"
-        f" FeatureMap subclass instance; got {type(features).__name__}"
+        f" FeatureMap subclass instance, not {type(features).__name__}"
     )
 
 
 def supports_feature_batch_aggregate(member: Callable[..., Any]) -> bool:
     """Whether ``features_batch`` advertises weighted aggregate mode."""
-
-    try:
-        params = inspect.signature(member).parameters
-    except (TypeError, ValueError):
-        return False
-    return _aggregate_capable(params)
+    return _aggregate_wants_k(member) is not None
 
 
 def _aggregate_capable(params: Mapping[str, inspect.Parameter]) -> bool:
@@ -443,7 +429,6 @@ def feature_batch_aggregate(
     K: int,
 ) -> tuple[np.ndarray, float] | None:
     """Call optional aggregate mode on a batched feature map if available."""
-
     wants_k = _aggregate_wants_k(member)
     if wants_k is None:
         return None
@@ -561,10 +546,7 @@ def conform_demands(
 
     The price analog of :func:`assert_conforms`: per id the chosen
     ``bundle`` is compared byte-identical, ``payoff`` and ``gap`` within
-    ``tol``.
-
-    Raises:
-        AssertionError: on a mismatch or an id the batch failed to price.
+    ``tol``; an id the batch failed to price is a mismatch.
     """
     opt_fields: list[tuple[np.ndarray, ...]] = []
     ref_fields: list[tuple[np.ndarray, ...]] = []
@@ -634,14 +616,9 @@ def price_demands(
 ) -> Mapping[int, Any]:
     """Resolve ``(theta, ids) -> {id: Demand}`` by the mode.
 
-    Symmetric to :func:`feature_rows`:
-
-    * ``DEFAULT``: the per-agent member, one call per id.
-    * ``OPTIMIZED``: the batched member, one call over the shard.
-    * ``BOTH``: the batched member, then :func:`conform_demands` against the
-      per-agent member; raises on divergence.
-
-    ``ids`` are global agent ids; an empty shard prices nothing.
+    Symmetric to :func:`feature_rows`, with :func:`conform_demands` as the
+    ``BOTH`` gate. ``ids`` are global agent ids; an empty shard prices
+    nothing.
     """
     id_arr = np.asarray(ids, dtype=np.int64)
     if id_arr.size == 0:
@@ -663,8 +640,6 @@ def _conform_demands(
     theta: np.ndarray,
     ids: Sequence[int],
 ) -> dict[int, Any]:
-    # Run the optimized batch, gate against the per-agent reference, return
-    # the batched mapping on a pass.
     opt = _batched_demands(batched, theta, ids)
     ref = _per_agent_demands(per_agent, theta, ids)
     conform_demands(surface, optimized=opt, reference=ref, ids=ids)

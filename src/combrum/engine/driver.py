@@ -72,6 +72,21 @@ def _validate_schedule_formulation(
     )
 
 
+def _coerce_iteration_count(name: str, value: int, minimum: int) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"expected {name} to be an integer >= {minimum}, got bool")
+    try:
+        coerced = int(operator.index(value))
+    except TypeError as exc:
+        raise TypeError(
+            f"expected {name} to be an integer >= {minimum},"
+            f" got {type(value).__name__}"
+        ) from exc
+    if coerced < minimum:
+        raise ValueError(f"expected {name} >= {minimum}, got {value}")
+    return coerced
+
+
 def _validate_loop_controls(
     max_iterations: int,
     qp_weight: float,
@@ -79,28 +94,8 @@ def _validate_loop_controls(
     penalty_ref: str,
     min_iterations: int = 0,
 ) -> None:
-    if isinstance(max_iterations, (bool, np.bool_)):
-        raise TypeError("max_iterations must be an integer >= 1; got bool")
-    if isinstance(min_iterations, (bool, np.bool_)):
-        raise TypeError("min_iterations must be an integer >= 0; got bool")
-    try:
-        max_value = int(operator.index(max_iterations))
-    except TypeError as exc:
-        raise TypeError(
-            "max_iterations must be an integer >= 1;"
-            f" got {type(max_iterations).__name__}"
-        ) from exc
-    try:
-        min_value = int(operator.index(min_iterations))
-    except TypeError as exc:
-        raise TypeError(
-            "min_iterations must be an integer >= 0;"
-            f" got {type(min_iterations).__name__}"
-        ) from exc
-    if max_value < 1:
-        raise ValueError(f"max_iterations must be >= 1; got {max_iterations}")
-    if min_value < 0:
-        raise ValueError(f"min_iterations must be >= 0; got {min_iterations}")
+    max_value = _coerce_iteration_count("max_iterations", max_iterations, 1)
+    min_value = _coerce_iteration_count("min_iterations", min_iterations, 0)
     if min_value > max_value:
         raise ValueError(
             "min_iterations must be <= max_iterations;"
@@ -119,15 +114,15 @@ def _validate_loop_controls(
         raise ValueError(f"qp_weight must be finite; got {qp_weight!r}")
     if qp_value < 0.0:
         raise ValueError(f"qp_weight must be >= 0; got {qp_weight!r}")
-    # qp_weight>0 needs decay>=1 so the weight reaches 0; otherwise the
-    # published duals would be multipliers of a penalized problem.
+    # The published duals would otherwise be multipliers of a penalized problem.
     if qp_value > 0.0 and decay <= 0:
         raise ValueError(
-            f"qp_weight>0 needs decay>=1 so the weight reaches 0; got decay={decay!r}"
+            "qp_weight>0 needs decay>=1 so the weight reaches 0"
+            f" (got decay={decay!r})"
         )
     if penalty_ref not in ("dynamic", "static"):
         raise ValueError(
-            f"penalty_ref must be 'dynamic' or 'static'; got {penalty_ref!r}"
+            f"penalty_ref must be 'dynamic' or 'static' (got {penalty_ref!r})"
         )
 
 
@@ -136,8 +131,8 @@ class LoopConfig:
     """Loop controls for the driver (not the agent space, which lives on
     :class:`~combrum.context.FitContext`).
 
-    ``max_iterations`` bounds the walk; ``schedule`` is the optional re-pricing
-    schedule (None = full sweep every iteration). ``qp_weight > 0`` with
+    ``schedule`` is the optional re-pricing schedule (None = full sweep every
+    iteration). ``qp_weight > 0`` with
     ``decay >= 1`` holds a proximal penalty at ``qp_weight`` for ``decay``
     iterations, then drops it to exactly zero so the terminating solve is a
     pure LP (a constant weight keeps the master's quadratic term unchanged,
@@ -173,10 +168,9 @@ class LoopConfig:
 class LoopDiagnostics:
     """Diagnostics captured from one driver run.
 
-    ``converged`` and ``iterations`` are the loop verdict; ``cuts_admitted``
-    sums per-step progress. ``final_penalty_weight`` is the weight behind the
-    published theta (zero on every accepted convergence, so the terminating
-    solve is certifiably a pure LP).
+    ``final_penalty_weight`` is the weight behind the published theta (zero on
+    every accepted convergence, so the terminating solve is certifiably a pure
+    LP).
     """
 
     converged: bool
@@ -220,33 +214,23 @@ def run_fit(
 
     ``ctx`` is a built :class:`~combrum.context.FitContext` (the master, if
     any, already on ``ctx.master_backend`` on rank 0); ``oracle`` and
-    ``formulation`` are constructed but not yet set up; ``config`` is the loop
-    knobs. The driver runs::
+    ``formulation`` are constructed but not yet set up. The driver runs::
 
         setup (oracle + formulation + resolve the price interface)
         repeat: solve -> [schedule mask] -> fit_step (price/contribute/
                  reduce+exchange/finalise/apply_step) -> stop check
         result()
 
-    with the live-set mask over the replication set, the driver-owned
-    ``DualConcentration`` schedule branch, the static-anchor penalty phase
-    ending in a pure-LP terminating solve, and warm-start (the prior fit's
-    published theta carried on ``ctx.theta_init``).
-
     ``demand_sink`` is an optional read-only observer of every iteration's
-    priced demands. ``None`` by default. When present it only reads the demands
-    the price phase already produced, so it moves no extra wire and changes no
-    reduction.
+    priced demands. When present it only reads the demands the price phase
+    already produced; attaching one adds no communication and leaves the
+    reductions untouched.
 
     ``suppress_close`` keeps the master alive past this fit. Default ``False``
     closes ``ctx.master_backend`` in the ``finally``; ``True`` skips that close
     so a persistent driver can hold one master across an outer search and
     warm-solve it again, taking over the close obligation. Oracle teardown and
     formulation dispose run on both paths.
-
-    Returns the :class:`LoopOutcome`: the formulation's
-    :class:`~combrum.formulation.FormulationResult` plus
-    :class:`LoopDiagnostics`.
     """
     transport = ctx.transport
     owner_rank = ctx.owner_rank
@@ -290,13 +274,9 @@ def run_fit(
     cuts_admitted = 0
     activity = config.activity
     activity_enabled = activity is not None and activity.enabled
-    activity_details = (
-        activity_enabled
-        and activity is not None
-        and _activity_details(activity.config.level)
-    )
+    activity_details = activity_enabled and _activity_details(activity.config.level)
     run_t0 = time.perf_counter() if activity_enabled else None
-    if activity_enabled and activity is not None:
+    if activity_enabled:
         activity.emit(
             RowGenStart(
                 run_id=activity.config.run_id,
@@ -339,7 +319,6 @@ def run_fit(
         # Resolve the price interface once, after setup's collective.
         price_resolution = _resolve_price(oracle, transport)
         for it in range(max_iterations):
-            # Stop once no replication is live.
             if not live.any():
                 break
             convergence_floor = callback_convergence_floor(
@@ -429,10 +408,8 @@ def run_fit(
 
                     before_apply = _before_apply
 
-            # Engine fit-step: price the scheduled shard, contribute,
-            # reduce+exchange, finalise, apply_step. The reductions and owners
-            # vector match the bundled path, so on the pure-LP path the
-            # published answer is byte-equal to it.
+            # The reductions and owners vector match the bundled path, so on
+            # the pure-LP path the published answer is byte-equal to it.
             step = fit_step(
                 formulation,
                 transport=transport,
@@ -451,7 +428,7 @@ def run_fit(
             iterations += 1
             last_violation = float(step.violation)
 
-            if activity_details and activity is not None:
+            if activity_details:
                 now = time.perf_counter()
                 objective = (
                     master.objective()
@@ -519,7 +496,7 @@ def run_fit(
                 force_full = False
             priced_weight = weight_t
         result = formulation.result()
-        if activity_enabled and activity is not None:
+        if activity_enabled:
             activity.emit(
                 RowGenFinal(
                     run_id=activity.config.run_id,
@@ -548,7 +525,6 @@ def run_fit(
     finally:
         oracle.teardown()
         formulation.dispose()
-        # suppress_close keeps the master alive for a persistent driver to reuse.
         if master is not None and not suppress_close:
             master.close()
     return LoopOutcome(

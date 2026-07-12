@@ -46,18 +46,16 @@ class DistributedObservedPrep:
             "phi_obs_local",
             "empirical_moment",
         ):
-            arr = getattr(self, name)
-            if isinstance(arr, np.ndarray):
-                arr.setflags(write=False)
+            getattr(self, name).setflags(write=False)
 
 
 def owned_observation_ids(n_observations: int, rank: int, size: int) -> np.ndarray:
     """Contiguous observation shard owned by ``rank``."""
     N = int(n_observations)
     if N < 1:
-        raise ValueError(f"n_observations must be >= 1; got {n_observations}")
+        raise ValueError(f"n_observations must be at least 1 (got {n_observations})")
     if not 0 <= int(rank) < int(size):
-        raise ValueError(f"rank must lie in [0, {size}); got {rank}")
+        raise ValueError(f"rank {rank} is out of range for size {size}")
     base, extra = divmod(N, int(size))
     start = int(rank) * base + min(int(rank), extra)
     stop = start + base + (1 if int(rank) < extra else 0)
@@ -100,7 +98,7 @@ def _distributed_observed_surface(model: Model, transport: Transport) -> object:
         root_token = transport.bcast(token if transport.rank == 0 else None)
         if token != root_token:
             raise ValueError(
-                "distributed observed-feature surface must be identical on every rank"
+                "distributed observed-feature surface differs across ranks"
             )
     (
         source,
@@ -126,7 +124,7 @@ def _distributed_pricing_surface(model: Model, transport: Transport) -> object |
         root_token = transport.bcast(token if transport.rank == 0 else None)
         if token != root_token:
             raise ValueError(
-                "distributed pricing feature surface must be identical on every rank"
+                "distributed pricing feature surface differs across ranks"
             )
     return model.features
 
@@ -134,17 +132,17 @@ def _distributed_pricing_surface(model: Model, transport: Transport) -> object |
 def _checked_distributed_phi(value: object, *, n_rows: int, K: int) -> np.ndarray:
     if not isinstance(value, np.ndarray):
         raise ValueError(
-            "observed_features_batch must return a numpy.ndarray;"
-            f" got {type(value).__name__}"
+            "observed_features_batch must return a numpy.ndarray"
+            f" (got {type(value).__name__})"
         )
     expected = (int(n_rows), int(K))
     if value.shape != expected:
         raise ValueError(
-            f"observed_features_batch returned shape {value.shape}; expected {expected}"
+            f"observed_features_batch returned shape {value.shape}, expected {expected}"
         )
     if value.dtype != np.float64:
         raise ValueError(
-            f"observed_features_batch must return float64 rows; got {value.dtype}"
+            f"observed_features_batch must return float64 rows (got {value.dtype})"
         )
     if not value.flags.c_contiguous:
         raise ValueError("observed_features_batch must return a C-contiguous array")
@@ -220,8 +218,8 @@ def distributed_c_theta(
     )
     if weights.shape != (prep.owned_obs.size,):
         raise ValueError(
-            "obs_weights_local must have shape (len(owned_obs),) ="
-            f" ({prep.owned_obs.size},); got {weights.shape}"
+            f"obs_weights_local has shape {weights.shape}, expected"
+            f" (len(owned_obs),) = ({prep.owned_obs.size},)"
         )
     local_rows = -float(prep.S) * (weights[:, None] * prep.phi_obs_local)
     c_theta = np.asarray(
@@ -267,14 +265,10 @@ def build_distributed_fit_context(
         raise ValueError("distributed contexts currently support NSlack only")
     c = np.asarray(c_theta, dtype=np.float64)
     if c.shape != (prep.K,):
-        raise ValueError(f"c_theta must have shape ({prep.K},); got {c.shape}")
+        raise ValueError(f"c_theta has shape {c.shape}, expected ({prep.K},)")
     if not callable(slack_coef):
         raise ValueError("slack_coef must be callable")
     owner = int(owner_rank)
-    if not 0 <= owner < transport.size:
-        raise ValueError(
-            f"owner_rank must lie in [0, {transport.size}); got {owner_rank}"
-        )
 
     def _owner_master() -> object:
         params = _master_params_for_backend(master_backend, master_params)

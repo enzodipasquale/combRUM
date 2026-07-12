@@ -37,7 +37,7 @@ class CutReadings:
             arr = np.asarray(values, dtype=np.float64)
             if arr.shape != (len(self.keys),):
                 raise ValueError(
-                    f"{name} readings must have shape ({len(self.keys)},);"
+                    f"expected {name} readings of shape ({len(self.keys)},),"
                     f" got {arr.shape}"
                 )
             arr.setflags(write=False)
@@ -102,10 +102,9 @@ class MasterBackend(ABC):
     def u_values(self) -> dict[int, float]:
         """Current epigraph/slack values keyed by agent id.
 
-        Reported from the last solved relaxation, like :meth:`theta`. Must not
-        be reconstructed from installed row algebra: that duplicates solver
-        state and can silently drift from the actual variable value under
-        backend-specific bounds.
+        Must not be reconstructed from installed row algebra: that duplicates
+        solver state and can silently drift from the actual variable value
+        under backend-specific bounds.
         """
 
     @abstractmethod
@@ -169,11 +168,10 @@ class MasterBackend(ABC):
     def reinstall(self, rows: Sequence[CutRow]) -> None:
         """Rebuild the installed set from extracted rows.
 
-        The other half of the warm-start/checkpoint primitive: after
-        ``fresh.reinstall(old.extract_cuts())`` the fresh master holds the same
-        relaxation as the old one. This is the warm-start/seed path, not the
-        retirement path; a cut policy sheds rows through :meth:`remove_cuts`
-        (in place), never this rebuild.
+        The other half of the warm-start/checkpoint primitive in
+        :meth:`extract_cuts`. This is the seed path, not the retirement path;
+        a cut policy sheds rows through :meth:`remove_cuts` (in place), never
+        this rebuild.
         """
 
     def remove_cuts(self, keys: Iterable[tuple[int, bytes]]) -> int:
@@ -203,8 +201,7 @@ class MasterBackend(ABC):
         and only the RHS moves: phi, the slack columns, and every other row are
         left exactly as installed. Lets a persistent master be reused across an
         outer search by overwriting each cut's RHS rather than rebuilding the
-        relaxation. The default raises; a backend without an in-place RHS
-        rewrite simply does not override it.
+        relaxation.
         """
         raise NotImplementedError(
             "MasterBackend.set_rhs is not overridden;"

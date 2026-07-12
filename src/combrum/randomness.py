@@ -20,11 +20,7 @@ BOOTSTRAP_NAMESPACE = 0xC0B2202606250001
 
 
 def rep_seed(base_seed: int, rep_id: int) -> np.random.SeedSequence:
-    """Placement-invariant seed of replication ``rep_id``.
-
-    Hashing ``(base_seed, rep_id)`` into the entropy pool gives
-    bitwise-equal streams for equal inputs anywhere.
-    """
+    """Placement-invariant seed of replication ``rep_id``."""
     base = operator.index(base_seed)
     rep = operator.index(rep_id)
     if base < 0:
@@ -40,7 +36,6 @@ def rep_rng(base_seed: int, rep_id: int) -> np.random.Generator:
 
 
 def _normalize_to_sum(raw: np.ndarray, n: int) -> np.ndarray:
-    """Scale ``raw`` in place to sum to ``n`` (uniform if it sums to zero)."""
     total = float(raw.sum())
     if total <= 0.0:  # pragma: no cover - exponential is a.s. positive
         return np.ones(n, dtype=np.float64)
@@ -166,19 +161,18 @@ class ReplayedWeights:
     def __post_init__(self) -> None:
         matrix = np.array(self.matrix, dtype=np.float64)
         if matrix.ndim != 2:
-            raise ValueError(f"matrix must be 2-D (B, N); got shape {matrix.shape}")
+            raise ValueError(f"matrix must be 2-D (B, N), got shape {matrix.shape}")
         if matrix.shape[0] < 1 or matrix.shape[1] < 1:
             raise ValueError(
-                "matrix must hold at least one replication of at least"
-                f" one weight (B >= 1, N >= 1); got shape {matrix.shape}"
+                "matrix must be non-empty (B >= 1, N >= 1),"
+                f" got shape {matrix.shape}"
             )
         if not np.isfinite(matrix).all():
-            raise ValueError("matrix must be finite; got NaN or inf entries")
+            raise ValueError("matrix contains NaN or inf entries")
         matrix.setflags(write=False)
         object.__setattr__(self, "matrix", matrix)
 
     def weights_for(self, rep_id: int) -> np.ndarray:
-        """Read-only ``(N,)`` weight row of replication ``rep_id``."""
         n_reps = self.matrix.shape[0]
         rep = operator.index(rep_id)
         if not 0 <= rep < n_reps:
@@ -186,5 +180,4 @@ class ReplayedWeights:
                 f"rep_id {rep_id} out of range; this ReplayedWeights"
                 f" holds replications [0, {n_reps})"
             )
-        # View of the frozen matrix is read-only; no copy needed.
         return self.matrix[rep]

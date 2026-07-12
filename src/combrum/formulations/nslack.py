@@ -33,7 +33,13 @@ from combrum._bundle_key import pack_bundles as _pack_bundles
 from combrum.context import FitContext, ResultPublication
 from combrum.demand import Demand, DemandBatch
 from combrum.dual import DualSolution
-from combrum.formulation import Evaluation, Formulation, FormulationResult
+from combrum.formulation import (
+    Evaluation,
+    Formulation,
+    FormulationResult,
+    _require_owner_master,
+    _staged_penalty,
+)
 from combrum.interface_resolution import (
     FeatureMap,
     Resolution,
@@ -56,18 +62,10 @@ from combrum.steprecord import (
 )
 from combrum.transport.base import CutRow, _pack_bundle
 
-# Feature-map injection accepts a bare ``(agent_id, bundle) -> (phi (K,), eps)``
-# callable OR a FeatureMap subclass adding a batched ``features_batch``; both
-# resolve to one active path at setup.
 __all__ = ["FeatureMap", "NSlack"]
 
 _RECEIVED_VIOLATION_BLOCK_ELEMENTS = 1_000_000
 _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS = 1_000_000
-
-
-# Bundle keys share the package-level codec; the alias keeps local call sites
-# compact.
-bundle_key = _pack_bundle
 
 
 @dataclass(frozen=True)
@@ -130,7 +128,7 @@ def _dual_solution(
         bundle_row_ids=np.asarray(bundle_row_ids, dtype=np.int64),
         pis=np.asarray(pis, dtype=np.float64),
         bundle_table=table,
-        bound_duals=dict(bound_duals),
+        bound_duals=bound_duals,
     )
 
 
@@ -162,7 +160,7 @@ def _canonicalize_cut_rows(rows: tuple[CutRow, ...]) -> tuple[CutRow, ...]:
 
 
 def _feature_block_size(K: int) -> int:
-    return max(1, _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS // max(1, int(K)))
+    return max(1, _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS // int(K))
 
 
 def _dual_packet(dual: DualSolution) -> _DualPacket:
@@ -251,8 +249,7 @@ class NSlack(Formulation):
         # Validation runs at setup (needs the transport for rank agreement);
         # the arg is held until then.
         self._features_arg = features
-        # Optional capture sink: when None no capture record is built and no
-        # extra compute runs (every capture block guards on it).
+        # Every capture block guards on the sink, so None costs no compute.
         self._trace_sink: TraceSink | None = None
         self._pending: _Pending | None = None
 
@@ -263,23 +260,13 @@ class NSlack(Formulation):
         single master solve, so a penalty iteration does not solve the old
         relaxation and then immediately solve the cut-augmented one again.
         """
-        ref_arr = np.asarray(ref, dtype=np.float64)
-        if ref_arr.shape != (self._ctx.K,):
-            raise ValueError(
-                f"ref must have shape ({self._ctx.K},); got {ref_arr.shape}"
-            )
-        weight_value = float(weight)
-        if not np.isfinite(weight_value):
-            raise ValueError(f"weight must be finite; got {weight!r}")
-        staged_ref = np.array(ref_arr, dtype=np.float64, copy=True)
-        staged_ref.setflags(write=False)
-        self._pending_penalty = (staged_ref, weight_value)
+        self._pending_penalty = _staged_penalty(ref, weight, self._ctx.K)
 
     def set_trace_sink(self, sink: TraceSink | None) -> None:
-        """Attach (or detach) the capture sink; default detached.
+        """Attach (or detach) the capture sink.
 
-        Sink-gated: with no sink no record is built. The sink receives one
-        sealed :class:`StepRecord` per iteration, emitted at the end of
+        With no sink no record is built. The sink receives one sealed
+        :class:`StepRecord` per iteration, emitted at the end of
         ``apply_step``.
         """
         self._trace_sink = sink
@@ -291,8 +278,6 @@ class NSlack(Formulation):
             validator = getattr(ctx.cut_policy, "validate_master_size", None)
             if callable(validator):
                 validator(n_parameters=ctx.K, n_agents=ctx.n_agents)
-        # Master hosted on owner_rank (default 0); this rank holds it iff it
-        # is the owner. Every master touch + bcast below uses owner_rank.
         self._owner_rank = ctx.owner_rank
         self._owners = np.array([self._owner_rank], dtype=np.int64)
         self._owners.setflags(write=False)
@@ -305,14 +290,11 @@ class NSlack(Formulation):
         # any data-dependent branch; agreement token rides the setup bcast.
         self._features_res: Resolution = resolve_features(self._features_arg)
 
-    def _feature_token(self) -> object:
-        return self._features_res.token
-
     def prepare_warm_cuts(self, rows: Sequence[CutRow]) -> tuple[CutRow, ...]:
         return _canonicalize_cut_rows(tuple(rows))
 
     def _distributed_feature_token(self) -> object:
-        return self._feature_token()
+        return self._features_res.token
 
     def _distributed_route_spec(self) -> tuple[np.ndarray, int]:
         return self._ctx.local_ids, self._ctx.n_agents
@@ -328,21 +310,12 @@ class NSlack(Formulation):
         packet: _MasterState | None = None
         full_u: dict[int, float] | None = None
         if self._is_owner:
-            if self._master is None:
-                raise ValueError(
-                    "NSlack is master-based by definition:"
-                    " ctx.master_backend must be set on the owner rank"
-                )
-            if not isinstance(self._master, MasterBackend):
-                raise ValueError(
-                    "ctx.master_backend must implement MasterBackend;"
-                    f" got {type(self._master).__name__}"
-                )
+            _require_owner_master(self._master, MasterBackend, "NSlack")
             self._master.solve()
             packet, full_u = self._state(progressed=0)
         return packet, full_u
 
-    def _setup_owner_local(
+    def _distributed_setup_owner_local(
         self, ctx: FitContext
     ) -> tuple[_MasterState | None, dict[int, float] | None]:
         """Initialise this rank; only the owner touches the master."""
@@ -350,23 +323,15 @@ class NSlack(Formulation):
         self._prepare_setup(ctx)
         return self._owner_initial_state()
 
-    def _distributed_setup_owner_local(
-        self, ctx: FitContext
-    ) -> tuple[_MasterState | None, dict[int, float] | None]:
-        return self._setup_owner_local(ctx)
-
     def setup(self, ctx: FitContext) -> None:
         self._prepare_setup(ctx)
-        packet: _MasterState | None = None
-        full_u: dict[int, float] | None = None
         # Master check and features rank-agreement share one guard so a
         # missing master or divergent build fails as an agreed verdict on
         # every rank rather than stranding peers in the broadcast.
         with self._transport.collective():
             packet, full_u = self._owner_initial_state()
-            # One broadcast carries the owner's master state and features
-            # token; each rank checks its token against the owner's so a per-rank
-            # build divergence becomes the agreed transport verdict.
+            # One broadcast carries both the owner's master state and its
+            # features token; each rank checks its token against the owner's.
             owner_packet, owner_token = self._transport.bcast(
                 (packet, self._features_res.token) if self._is_owner else None,
                 root=self._owner_rank,
@@ -400,7 +365,7 @@ class NSlack(Formulation):
             if pending is not None:
                 # Pack every priced bundle key in one vectorized call rather
                 # than one per agent (bundles is 2-D, so this hits the batched
-                # codec path); keys[i] is byte-identical to bundle_key(bundle).
+                # codec path); keys[i] is byte-identical to _pack_bundle(bundle).
                 keys = _pack_bundles(bundles)
                 for i, (agent_id, value) in enumerate(zip(ids, rc)):
                     pending.priced_reduced_costs.append(
@@ -466,7 +431,7 @@ class NSlack(Formulation):
             agent = int(agent_id)
             payoff = float(demand.payoff)
             if not math.isfinite(payoff):
-                raise ValueError("demand payoffs must be finite")
+                raise ValueError("non-finite demand payoff")
             u_a = u_dense[agent] if u_dense is not None else self._u.get(agent, 0.0)
             rc = payoff - u_a
             if rc > worst:
@@ -475,7 +440,7 @@ class NSlack(Formulation):
                 pending.priced_reduced_costs.append(
                     PricedReducedCost(
                         agent_id=agent,
-                        bundle_key=bundle_key(demand.bundle),
+                        bundle_key=_pack_bundle(demand.bundle),
                         rc=rc,
                     )
                 )
@@ -498,7 +463,7 @@ class NSlack(Formulation):
                 agent_id=agent,
                 phi=phi,
                 epsilon=eps,
-                bundle_key=bundle_key(bundle),
+                bundle_key=_pack_bundle(bundle),
             )
             for agent, bundle, (phi, eps) in zip(
                 violated_ids, violated_bundles, featured
@@ -578,18 +543,13 @@ class NSlack(Formulation):
             packet, full_u = self._state(progressed=n_new)
         return packet, full_u
 
-    def _apply_owner_step(
+    def _distributed_apply_owner_step(
         self, install_payload: object
     ) -> tuple[_MasterState | None, dict[int, float] | None]:
         """Apply routed rows on the owner without transport calls."""
 
         received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
         return self._owner_install_step(received)
-
-    def _distributed_apply_owner_step(
-        self, install_payload: object
-    ) -> tuple[_MasterState | None, dict[int, float] | None]:
-        return self._apply_owner_step(install_payload)
 
     def _adopt_owner_state(
         self,
@@ -610,8 +570,6 @@ class NSlack(Formulation):
 
     def apply_step(self, install_payload: object) -> int:
         received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
-        packet: _MasterState | None = None
-        full_u: dict[int, float] | None = None
         with self._transport.collective():
             packet, full_u = self._owner_install_step(received)
         state = self._transport.bcast(packet, root=self._owner_rank)
@@ -634,10 +592,7 @@ class NSlack(Formulation):
             return np.empty(0, dtype=np.float64)
         theta = self._theta
         out = np.empty(len(rows), dtype=np.float64)
-        block_rows = max(
-            1,
-            _RECEIVED_VIOLATION_BLOCK_ELEMENTS // max(1, int(theta.size)),
-        )
+        block_rows = max(1, _RECEIVED_VIOLATION_BLOCK_ELEMENTS // theta.size)
         for start in range(0, len(rows), block_rows):
             chunk = rows[start : start + block_rows]
             phi = np.vstack([row.phi for row in chunk])
@@ -828,7 +783,7 @@ class NSlack(Formulation):
                         _dual_solution(
                             rows,
                             self._master.dual_values(),
-                            dict(self._master.bound_duals()),
+                            self._master.bound_duals(),
                             self._ctx.K,
                         )
                     )
@@ -842,9 +797,7 @@ class NSlack(Formulation):
                 packet, root=self._owner_rank
             )
             dual = _dual_from_packet(dual_packet)
-            slack = np.zeros(self._ctx.n_agents, dtype=np.float64)
-            for agent_id, value in u_values.items():
-                slack[agent_id] = value
+            slack = self._dense_u(u_values)
             return FormulationResult(
                 theta_hat=self._theta,
                 objective=self._objective,
@@ -878,7 +831,7 @@ class NSlack(Formulation):
                             _dual_solution(
                                 rows,
                                 self._master.dual_values(),
-                                dict(self._master.bound_duals()),
+                                self._master.bound_duals(),
                                 self._ctx.K,
                             )
                         )

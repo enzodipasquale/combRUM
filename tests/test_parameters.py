@@ -42,18 +42,18 @@ def test_pack_unpack_identity() -> None:
 
 def test_unpack_validates_length() -> None:
     # oversized and undersized both raise (K=3 from the fixture)
-    with pytest.raises(ValueError, match=r"theta must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta of shape \(K,\)"):
         make_params().unpack(np.zeros(4))
-    with pytest.raises(ValueError, match=r"theta must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta of shape \(K,\)"):
         make_params().unpack(np.zeros(2))
 
 
 def test_unpack_rejects_wrong_dimensionality() -> None:
     # right total size but 2-D -- the full shape must be checked, not just size
     params = make_params()
-    with pytest.raises(ValueError, match=r"theta must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta of shape \(K,\)"):
         params.unpack(np.zeros((3, 1)))
-    with pytest.raises(ValueError, match=r"theta must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta of shape \(K,\)"):
         params.unpack(np.zeros((1, 3)))
 
 
@@ -65,15 +65,15 @@ def test_pack_validates_names_and_lengths() -> None:
         params.pack(
             {"beta": np.zeros(2), "gamma": np.zeros(1), "delta": np.zeros(1)}
         )
-    with pytest.raises(ValueError, match="must have length 2"):
+    with pytest.raises(ValueError, match="expected length 2"):
         params.pack({"beta": np.zeros(3), "gamma": np.zeros(1)})
     # wrong length on a non-first block
-    with pytest.raises(ValueError, match="block 'gamma' must have length 1"):
+    with pytest.raises(ValueError, match="expected length 1 for block 'gamma'"):
         params.pack({"beta": np.zeros(2), "gamma": np.zeros(5)})
     # scalar / undersized values must not broadcast into the size-2 block
-    with pytest.raises(ValueError, match="must have length 2"):
+    with pytest.raises(ValueError, match="expected length 2"):
         params.pack({"beta": 5.0, "gamma": np.zeros(1)})
-    with pytest.raises(ValueError, match="must have length 2"):
+    with pytest.raises(ValueError, match="expected length 2"):
         params.pack({"beta": np.zeros(1), "gamma": np.zeros(1)})
 
 
@@ -89,9 +89,9 @@ def test_rejects_empty_specification() -> None:
 
 
 def test_rejects_invalid_blocks() -> None:
-    with pytest.raises(ValueError, match="k must be an integer >= 1"):
+    with pytest.raises(ValueError, match="expected integer k >= 1"):
         Parameters({"a": (0.0, 1.0, 0)})
-    with pytest.raises(ValueError, match="k must be an integer >= 1"):
+    with pytest.raises(ValueError, match="expected integer k >= 1"):
         Parameters({"a": (0.0, 1.0, 2.0)})  # type: ignore[dict-item]
     with pytest.raises(ValueError, match="lb <= ub required"):
         Parameters({"a": (2.0, 1.0, 1)})
@@ -100,7 +100,7 @@ def test_rejects_invalid_blocks() -> None:
         Parameters({"a": (float("nan"), 1.0, 1)})
     with pytest.raises(ValueError, match="lb <= ub required"):
         Parameters({"a": (0.0, float("nan"), 1)})
-    with pytest.raises(ValueError, match=r"spec must be \(lb, ub, k\)"):
+    with pytest.raises(ValueError, match=r"expected an \(lb, ub, k\) spec"):
         Parameters({"a": (0.0, 1.0)})  # type: ignore[dict-item]
 
 

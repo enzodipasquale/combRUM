@@ -197,18 +197,8 @@ def test_serial_bootstrap_rejects_non_integer_replication_count(monkeypatch) -> 
 
 def test_serial_bootstrap_rejects_multirank_dense_transport() -> None:
     bootstrap_mod = importlib.import_module("combrum.bootstrap")
-    parameters = Parameters({"theta": (-1.0, 1.0, 1)})
-    model = Model(
-        _Oracle(),
-        parameters,
-        features=lambda agent_id, bundle: (np.zeros(1), 0.0),
-        formulation=_Formulation,
-    )
-    data = Data(
-        observed_bundles=np.zeros((2, 1), dtype=bool),
-        shocks=np.zeros((2, 1, 1)),
-        observables=np.arange(2),
-    )
+    model = _theta_model()
+    data = _zeros_data()
 
     def run(transport):
         try:
@@ -242,7 +232,7 @@ def test_serial_bootstrap_validates_data_shapes_before_cache_build() -> None:
         shocks=np.zeros(2),
         observables=np.arange(2),
     )
-    with pytest.raises(ValueError, match=r"shocks must have shape \(N, S, \.\.\.\)"):
+    with pytest.raises(ValueError, match=r"expected shocks of shape \(N, S, \.\.\.\)"):
         bootstrap_mod.bootstrap(model, bad_shocks, n_bootstrap=1, weights=weights)
 
     bad_observed = Data(
@@ -250,7 +240,9 @@ def test_serial_bootstrap_validates_data_shapes_before_cache_build() -> None:
         shocks=np.zeros((2, 1, 1)),
         observables=np.arange(2),
     )
-    with pytest.raises(ValueError, match="observed_bundles must be 2-D"):
+    with pytest.raises(
+        ValueError, match=r"expected observed_bundles of shape \(N, M\)"
+    ):
         bootstrap_mod.bootstrap(model, bad_observed, n_bootstrap=1, weights=weights)
 
 

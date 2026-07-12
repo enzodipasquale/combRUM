@@ -28,8 +28,9 @@ def available() -> bool:
 
 @dataclass
 class _Solution:
-    """Last solve copied out at solve time, so accessors keep reporting it
-    after later cut installs invalidate the solver's own query surface.
+    """Last solve copied out at solve time; sorted views and dual/slack
+    readings memoize lazily. Cut installs and RHS edits drop the whole
+    object, so accessors raise until the next solve.
     """
 
     theta: np.ndarray
@@ -60,7 +61,6 @@ class HighsMaster(MasterBackend):
         n_agents: int | None = None,
     ) -> None:
         self._h = None
-        # n_agents set: declare all u-columns up front; None: lazy per first cut.
         self._n_agents = None if n_agents is None else int(n_agents)
         self._K, self._lower, self._upper, self._c = validated_construction(
             K, theta_bounds, c_theta
@@ -69,8 +69,8 @@ class HighsMaster(MasterBackend):
         if self._u_coefs is not None and self._n_agents is not None:
             if self._u_coefs.size < self._n_agents:
                 raise ValueError(
-                    f"u_coef array must cover all {self._n_agents} agents;"
-                    f" got {self._u_coefs.size} coefficients"
+                    f"u_coef array must cover all {self._n_agents} agents,"
+                    f" but has only {self._u_coefs.size} coefficients"
                 )
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
@@ -156,17 +156,13 @@ class HighsMaster(MasterBackend):
             if key in self._installed or key in fresh:
                 continue
             self._validate_row(row)
-            # First occurrence wins; duplicates absorbed.
             fresh[key] = row
         # Invalidate before the installs so a mid-batch solver error cannot
         # leave accessors reporting pre-add results.
         if fresh:
             self._invalidate_solution()
             self._u_read = None
-        # Install in canonical key order so equal row sets build identical
-        # models regardless of in-batch arrival permutation.
-        ordered = sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key))
-        if ordered:
+            ordered = sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key))
             self._install_batch(ordered)
         return len(fresh)
 
@@ -234,7 +230,7 @@ class HighsMaster(MasterBackend):
             return float(self._u_coefs[agent_id])
         coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
         if not np.isfinite(coef):
-            raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+            raise ValueError(f"u_coef({agent_id}) must be finite, got {coef!r}")
         return coef
 
     def _slack_coef_vector(self, n: int) -> np.ndarray:
@@ -296,8 +292,6 @@ class HighsMaster(MasterBackend):
         return len(self._installed)
 
     def reinstall(self, rows: Sequence[CutRow]) -> None:
-        # clear() + rebuild (the reinstall contract; in-place removal would leave
-        # solver history).
         self._h.clear()
         self._build()
         self.add_cuts(rows)
@@ -389,15 +383,11 @@ class HighsMaster(MasterBackend):
         )
         return max(self._u_lb(), rhs_max)
 
-    def _update_u_upper(self, row: CutRow, candidate: float | None = None) -> None:
-        if self._u_lower_bound is None:
-            return
+    def _update_u_upper(self, row: CutRow, candidate: float) -> None:
         coef = self._slack_coef(row.agent_id)
         if coef < 0.0:
             return
-        current = self._u_upper.get(row.agent_id, float(self._highspy.kHighsInf))
-        if candidate is None:
-            candidate = self._finite_u_upper(row)
+        current = self._u_upper[row.agent_id]
         if current < self._highspy.kHighsInf and candidate <= current:
             return
         col = self._u_cols[row.agent_id]
@@ -495,14 +485,8 @@ class HighsMaster(MasterBackend):
     def cut_readings(self, *, dual: bool = False, slack: bool = False) -> CutReadings:
         last = self._last()
         keys, order = self._sorted_rows(last)
-        dual_arr = (
-            np.asarray(self._row_duals(last)[order], dtype=np.float64) if dual else None
-        )
-        slack_arr = (
-            np.asarray(self._row_slacks(last)[order], dtype=np.float64)
-            if slack
-            else None
-        )
+        dual_arr = self._row_duals(last)[order] if dual else None
+        slack_arr = self._row_slacks(last)[order] if slack else None
         return CutReadings(keys=keys, dual=dual_arr, slack=slack_arr)
 
     def solved_cut_keys(self) -> frozenset[tuple[int, bytes]]:
@@ -546,7 +530,7 @@ class HighsMaster(MasterBackend):
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.array(ref, dtype=np.float64)
         if ref.shape != (self._K,):
-            raise ValueError(f"ref must have shape ({self._K},); got {ref.shape}")
+            raise ValueError(f"ref must have shape ({self._K},), got {ref.shape}")
         if weight <= 0:
             return
         raise NotImplementedError(

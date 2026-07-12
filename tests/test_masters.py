@@ -557,8 +557,6 @@ def test_set_rhs_updates_extracted_epsilon_phi_unchanged(
             master.theta(), moved_theta, rtol=0, atol=1e-9
         )
         assert master.objective() == pytest.approx(moved_objective, abs=1e-9)
-        # And theta, objective, and the full dual map must match a fresh
-        # master built from the modified row set.
         with lp_master(backend) as fresh:
             fresh.add_cuts(_rows_with_epsilon(key, new_eps))
             fresh.solve()
@@ -591,7 +589,6 @@ def test_set_rhs_invalidates_solution_until_resolve(backend: str) -> None:
         ):
             with pytest.raises(RuntimeError, match="no solve"):
                 accessor()
-        # A re-solve restores the accessors.
         master.solve()
         assert master.theta().shape == (K,)
 

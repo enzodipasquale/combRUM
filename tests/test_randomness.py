@@ -186,9 +186,9 @@ def test_replayed_weights_validation() -> None:
         make_replayed_weights(matrix=np.empty((0, 3)))
     with pytest.raises(ValueError, match="B >= 1, N >= 1"):
         make_replayed_weights(matrix=np.empty((3, 0)))
-    with pytest.raises(ValueError, match="must be finite"):
+    with pytest.raises(ValueError, match="NaN or inf"):
         make_replayed_weights(matrix=np.array([[1.0, np.nan], [0.0, 1.0]]))
-    with pytest.raises(ValueError, match="must be finite"):
+    with pytest.raises(ValueError, match="NaN or inf"):
         make_replayed_weights(matrix=np.array([[1.0, np.inf], [0.0, 1.0]]))
 
 

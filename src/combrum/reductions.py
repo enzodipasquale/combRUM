@@ -42,10 +42,10 @@ def canonical_sum(values: np.ndarray, global_ids: np.ndarray) -> np.ndarray | fl
     """
     ids = np.asarray(global_ids)
     if ids.ndim != 1:
-        raise ValueError(f"global_ids must be one-dimensional; got shape {ids.shape}")
+        raise ValueError(f"expected one-dimensional global_ids, got shape {ids.shape}")
     if not np.issubdtype(ids.dtype, np.integer):
         raise ValueError(
-            f"global_ids must have an integer dtype; got dtype {ids.dtype}"
+            f"expected an integer dtype for global_ids, got {ids.dtype}"
         )
     vals = np.asarray(values, dtype=np.float64)
     if vals.ndim not in (1, 2):

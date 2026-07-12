@@ -110,7 +110,7 @@ def _float_token(
             False,
             0.0,
             "TypeError",
-            f"{name} must be a finite float; got bool",
+            f"{name} must be a finite float, got bool",
         )
     try:
         out = float(value)
@@ -119,7 +119,7 @@ def _float_token(
             False,
             0.0,
             "TypeError",
-            f"{name} must be a finite float; got {type(value).__name__}",
+            f"{name} must be a finite float, got {type(value).__name__}",
         )
     if not math.isfinite(out):
         return (
@@ -166,7 +166,7 @@ def _bool_token(name: str, value: object) -> tuple[bool, object, str, str]:
             False,
             False,
             "TypeError",
-            f"{name} must be a bool; got {type(value).__name__}",
+            f"{name} must be a bool, got {type(value).__name__}",
         )
     return (True, bool(value), "", "")
 
@@ -189,7 +189,7 @@ def _choice_token(
             False,
             value,
             "ValueError",
-            f"{name} must be one of {rendered}; got {value!r}",
+            f"{name} must be one of {rendered}, got {value!r}",
         )
     return (True, value, "", "")
 
@@ -221,14 +221,14 @@ def _optional_theta_token(
             False,
             None,
             "TypeError",
-            f"{name} must be None or expose theta_hat; got {type(value).__name__}",
+            f"{name} must be None or expose theta_hat, got {type(value).__name__}",
         )
     except Exception as exc:
         return (
             False,
             None,
             "ValueError",
-            f"{name}.theta_hat could not be read; {type(exc).__name__}: {exc}",
+            f"{name}.theta_hat could not be read ({type(exc).__name__}: {exc})",
         )
     try:
         arr = np.asarray(theta, dtype=np.float64)
@@ -237,7 +237,7 @@ def _optional_theta_token(
             False,
             None,
             "TypeError",
-            f"{name}.theta_hat must be numeric; {exc}",
+            f"{name}.theta_hat must be numeric ({exc})",
         )
     if arr.shape != (K,):
         return (
@@ -283,8 +283,8 @@ def _pickle_digest_token(name: str, value: object) -> tuple[bool, object, str, s
             False,
             None,
             "TypeError",
-            f"{name} must be pickle-serializable for distributed agreement;"
-            f" {type(exc).__name__}: {exc}",
+            f"{name} must be pickle-serializable for distributed agreement"
+            f" ({type(exc).__name__}: {exc})",
         )
     return (
         True,

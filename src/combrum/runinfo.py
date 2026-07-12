@@ -42,11 +42,10 @@ class RunInfoLevel(enum.IntEnum):
 class Provenance:
     """The run's environment fingerprint.
 
-    ``python_version``, ``numpy_version``, ``platform``, and ``solver_backend``
-    are always populated. ``mpi_lib``, ``blas``, and ``gurobi_version`` are
-    ``None`` when the corresponding library or config is unavailable.
-    ``resolved_backend`` is the concrete backend selected after ``"auto"``
-    resolution when the caller provides it.
+    ``mpi_lib``, ``blas``, and ``gurobi_version`` are ``None`` when the
+    corresponding library or config is unavailable. ``resolved_backend`` is
+    the concrete backend selected after ``"auto"`` resolution when the caller
+    provides it.
     """
 
     python_version: str
@@ -86,8 +85,8 @@ class RunMetadata:
         # Fail fast on a malformed node layout rather than at downstream read.
         if not isinstance(self.node, NodeTopology):
             raise TypeError(
-                "RunMetadata.node must be a transport NodeTopology; got"
-                f" {type(self.node).__name__}"
+                "expected a transport NodeTopology for RunMetadata.node,"
+                f" got {type(self.node).__name__}"
             )
 
 
@@ -113,37 +112,35 @@ def collect_provenance(
 ) -> Provenance:
     """Probe the run's environment fingerprint.
 
-    ``solver_backend`` is the backend the run requested; ``resolved_backend`` is
-    the concrete backend selected after resolution. The probed fields are
-    ``None`` when their library or config is unavailable: ``mpi_lib`` from
-    ``mpi4py``, ``blas`` from ``numpy.show_config`` (numpy >= 1.25), and
-    ``gurobi_version`` as a dotted string from ``gurobipy``.
+    ``mpi_lib`` comes from ``mpi4py``, ``blas`` from ``numpy.show_config``
+    (numpy >= 1.25), and ``gurobi_version`` as a dotted string from
+    ``gurobipy``.
     """
     try:
-        from mpi4py import MPI as _MPI  # noqa: PLC0415
+        from mpi4py import MPI  # noqa: PLC0415
 
-        mpi_lib: str | None = _MPI.Get_library_version()
+        mpi_lib: str | None = MPI.Get_library_version()
     except ImportError:
         mpi_lib = None
 
     try:
-        _cfg = np.show_config(mode="dicts")
-        _b = _cfg.get("Build Dependencies", {}).get("blas", {})
-        _name = str(_b.get("name", ""))
-        _ver = str(_b.get("version", ""))
+        cfg = np.show_config(mode="dicts")
+        b = cfg.get("Build Dependencies", {}).get("blas", {})
+        name = str(b.get("name", ""))
+        ver = str(b.get("version", ""))
         blas: str | None = (
-            f"{_name}/{_ver}"
-            if _name and _ver and _ver != "unknown"
-            else (_name or None)
+            f"{name}/{ver}"
+            if name and ver and ver != "unknown"
+            else (name or None)
         )
     except Exception:
         blas = None
 
     try:
-        import gurobipy as _grb  # noqa: PLC0415
+        import gurobipy as grb  # noqa: PLC0415
 
-        _v = _grb.gurobi.version()
-        gurobi_version: str | None = ".".join(str(x) for x in _v)
+        v = grb.gurobi.version()
+        gurobi_version: str | None = ".".join(str(x) for x in v)
     except Exception:
         gurobi_version = None
 

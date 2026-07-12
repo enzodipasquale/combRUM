@@ -9,16 +9,11 @@ super-step instead of paying one collective per replication.
 * :meth:`RowGenStep.contribute`: transport-free, rank-local. Folds a
   rank's priced demands into a :class:`Contribution`.
 * the engine reduces per-rank :class:`Contribution` into :class:`Reduced`
-  (MAX-reduce + cut exchange, or reproducible SUM), dispatching on the
-  concrete contribution type so a new kind is a type the engine must
-  handle, not a string key it can silently miss.
+  (MAX-reduce + cut exchange, or reproducible SUM).
 * :meth:`RowGenStep.finalise`: transport-free, rank-local. Maps the
-  reduced value (identical on every rank) onto the generic
-  :class:`~combrum.formulation.Evaluation` distance plus a method-owned
-  install payload.
+  reduced value onto a :class:`StepOutcome`.
 * :meth:`RowGenStep.apply_step`: root-only install/solve plus the single
-  master-state broadcast (master lives on rank 0 alone); every other
-  collective is hoisted to the engine.
+  master-state broadcast (master lives on rank 0 alone).
 
 The two reduction shapes:
 
@@ -96,8 +91,6 @@ class SumReduced:
     aggregate: np.ndarray
 
 
-# reduced value the engine hands to RowGenStep.finalise, paired with
-# Contribution by per-type dispatch
 Reduced = MaxReduced | SumReduced
 
 
@@ -116,14 +109,7 @@ class StepOutcome:
 
 
 class RowGenStep(Protocol):
-    """One composable row-generation step, phased for engine ownership.
-
-    Per-iteration work splits into three rank-local phases
-    (``contribute``/``finalise`` transport-free, ``apply_step``
-    root-collective-only), so the engine owns the reduce and exchange
-    between ``contribute`` and ``finalise`` and folds several live
-    replications into one super-step.
-    """
+    """One composable row-generation step, phased for engine ownership."""
 
     def contribute(self, demands: Mapping[int, Demand]) -> Contribution:
         """Fold this rank's priced demands into its :class:`Contribution`.
@@ -142,10 +128,9 @@ class RowGenStep(Protocol):
         ...
 
     def apply_step(self, install_payload: object) -> int:
-        """Install the payload on root and broadcast the master state.
+        """Install the payload on root, solve, and broadcast the master state.
 
-        Root-only install/solve plus the single master-state broadcast,
-        the method's one inherent root collective. Returns the progress
+        The method's one inherent root collective. Returns the progress
         count (cuts admitted); ``0`` is a valid step.
         """
         ...

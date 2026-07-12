@@ -68,7 +68,6 @@ def _object_name(value: object | None) -> str | None:
 class RowGenStart:
     run_id: str | None = None
     label: str = "rowgen"
-    timestamp_utc: str | None = None
     n_obs: int | None = None
     n_simulations: int | None = None
     n_features: int | None = None
@@ -121,18 +120,13 @@ class RowGenFinal:
     final_gap: float | None = None
     objective: float | None = None
     active_cuts: int | None = None
-    n_priced: int | None = None
-    n_inexact: int | None = None
-    worst_gap: float | None = None
     wall_seconds: float | None = None
-    peak_rss_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class BootstrapStart:
     run_id: str | None = None
     label: str = "bootstrap"
-    timestamp_utc: str | None = None
     n_bootstrap: int | None = None
     base_seed: int | None = None
     resampling: str | None = None
@@ -189,7 +183,6 @@ class BootstrapRepFinal:
     objective: float | None = None
     active_cuts: int | None = None
     wall_seconds: float | None = None
-    dual_store_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +197,6 @@ class BootstrapFinal:
     total_super_steps: int | None = None
     wall_seconds: float | None = None
     n_duals_stored: int | None = None
-    peak_rss_bytes: int | None = None
 
 
 ActivityEvent = (
@@ -221,8 +213,7 @@ ActivityEvent = (
 class ActivitySink(Protocol):
     """A side-effect target for activity events."""
 
-    def emit(self, event: ActivityEvent) -> None:
-        """Consume one activity event."""
+    def emit(self, event: ActivityEvent) -> None: ...
 
 
 @dataclass(slots=True)
@@ -270,10 +261,10 @@ class SafeActivitySink:
 
     def __init__(
         self,
-        *sinks: ActivitySink | None,
+        *sinks: ActivitySink,
         warn: TextIO | None = None,
     ) -> None:
-        self._sinks = [sink for sink in sinks if sink is not None]
+        self._sinks = list(sinks)
         self._active = [True] * len(self._sinks)
         self._warn = sys.stderr if warn is None else warn
         self._warned = False
@@ -343,13 +334,10 @@ class RootTableFormatter:
 
     def _write(self, label: str, text: str) -> None:
         self.stream.write(f"[{label}] {text}\n")
-        flush = getattr(self.stream, "flush", None)
-        if flush is not None:
-            flush()
+        self.stream.flush()
 
     def _event_label(self, event: ActivityEvent) -> str:
-        label = getattr(event, "label", None) or self.label
-        return str(label or "combrum")
+        return str(event.label or self.label or "combrum")
 
     def _rowgen_start(self, event: RowGenStart) -> None:
         parts: list[str] = ["row generation:"]

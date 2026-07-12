@@ -86,12 +86,6 @@ class PersistentMasterFit:
         tolerance: float = 1e-6,
         weights: np.ndarray | None = None,
     ) -> None:
-        """Hold the psi-invariant fit inputs and callbacks.
-
-        ``rhs_transform`` is required. ``geometry_signature`` is optional; when
-        omitted, the priced-bundle geometry check is skipped and the caller
-        asserts that this geometry is psi-invariant. See the module docstring.
-        """
         self._parameters = parameters
         self._observables = observables
         self._observed_bundles = np.asarray(observed_bundles)
@@ -156,11 +150,9 @@ class PersistentMasterFit:
     ) -> PersistentFitResult:
         """Cold fit at psi0: build the live master and stash its signature.
 
-        Builds a fresh master, runs the fit with ``suppress_close=True`` so the
-        master survives, and stashes the psi0 reuse signature (``c_theta0``, the
-        full ``agent_weights`` vector, the theta bounds, and optional
-        ``geometry_signature(psi0)``) that the later reevaluate guard
-        byte-compares against.
+        The psi0 reuse signature (``c_theta0``, the full ``agent_weights``
+        vector, the theta bounds, and optional ``geometry_signature(psi0)``)
+        is what the later reevaluate guard byte-compares against.
         """
         formulation, features = self._fit_surfaces(oracle, formulation, features)
         if self._resolved_master_backend is None:
@@ -241,7 +233,7 @@ class PersistentMasterFit:
         vector, optional G2 ``geometry_signature(psi)``, and G3
         ``theta_bounds`` against the psi0 signature. The method then rewrites
         every carried cut's RHS via ``set_rhs`` over the full ``extract_cuts()``
-        key set and warm-solves with ``suppress_close=True``.
+        key set and warm-solves.
         """
         self._require_live_master()
         formulation, features = self._fit_surfaces(oracle, formulation, features)
@@ -280,24 +272,21 @@ class PersistentMasterFit:
         return self._publish(built, outcome)
 
     def _require_live_master(self) -> None:
+        message = (
+            "reevaluate() called with no live master: either fit(psi0) has"
+            " not run yet or the master was already closed."
+        )
         if self._transport.size == 1:
-            if self._transport.rank == 0 and self._master is None:
-                raise RuntimeError(
-                    "reevaluate() before a successful fit(): no live master"
-                    "; call fit(psi0) first (or the master was closed)."
-                )
+            if self._master is None:
+                raise RuntimeError(message)
             return
         with self._transport.collective():
             if self._transport.rank == 0 and self._master is None:
-                raise RuntimeError(
-                    "reevaluate() before a successful fit(): no live master"
-                    "; call fit(psi0) first (or the master was closed)."
-                )
+                raise RuntimeError(message)
 
     def _rewrite_live_rhs(self, psi: Any, built: Any) -> None:
         if self._transport.size == 1:
-            if self._transport.rank == built.ctx.owner_rank:
-                self._rewrite_live_rhs_owner(psi, built)
+            self._rewrite_live_rhs_owner(psi, built)
             return
         with self._transport.collective():
             if self._transport.rank == built.ctx.owner_rank:
@@ -330,16 +319,17 @@ class PersistentMasterFit:
             != np.asarray(self._c_theta0, dtype=np.float64).tobytes()
         ):
             raise ValueError(
-                "PersistentMasterFit reuse guard G1: c_theta at psi differs"
-                " from psi0; the objective linear term is not psi-invariant."
+                "PersistentMasterFit reuse guard G1: c_theta at psi does not"
+                " match psi0; master reuse needs a psi-invariant objective"
+                " linear term."
             )
         if (
             np.asarray(built.ctx.agent_weights, dtype=np.float64).tobytes()
             != np.asarray(self._agent_weights0, dtype=np.float64).tobytes()
         ):
             raise ValueError(
-                "PersistentMasterFit reuse guard G1: agent_weights at psi"
-                " differs from psi0 over the full (N*S,) vector; the master's"
+                "PersistentMasterFit reuse guard G1: agent_weights at psi and"
+                " psi0 disagree over the full (N*S,) vector; the master's"
                 " u_coef closure is frozen at psi0."
             )
         # G2 geometry: optional; covers the all-bundle phi that the observed-only
@@ -350,7 +340,8 @@ class PersistentMasterFit:
         ):
             raise ValueError(
                 "PersistentMasterFit reuse guard G2: geometry_signature(psi)"
-                " differs from psi0; the cut geometry is not psi-invariant."
+                " no longer matches psi0; the cut geometry is not"
+                " psi-invariant."
             )
         # G3 bounds: the theta box.
         lower, upper = built.ctx.theta_bounds
@@ -362,8 +353,9 @@ class PersistentMasterFit:
             != np.asarray(ref_upper, dtype=np.float64).tobytes()
         ):
             raise ValueError(
-                "PersistentMasterFit reuse guard G3: theta_bounds at psi"
-                " differ from psi0; the theta bounds are not psi-invariant."
+                "PersistentMasterFit reuse guard G3: theta_bounds moved"
+                " between psi0 and psi; the theta box must stay fixed across"
+                " the search."
             )
 
     def _publish(self, built: Any, outcome: Any) -> PersistentFitResult:
@@ -380,13 +372,7 @@ class PersistentMasterFit:
         )
 
     def close(self) -> None:
-        """Close the live master (idempotent).
-
-        The driver owns the master's lifecycle since ``run_fit`` ran with
-        ``suppress_close=True``. Also called automatically on any guard
-        or solve exception and on context-manager exit. A second
-        call (or a call before ``fit``) is a no-op.
-        """
+        """Close the live master; idempotent, and a no-op before ``fit``."""
         master = self._master
         self._master = None
         if master is not None:

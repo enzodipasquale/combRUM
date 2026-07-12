@@ -274,7 +274,7 @@ def test_cutrow_preserves_bundle_key_bytes() -> None:
 
     assert row.bundle_key == prior_key
     np.testing.assert_array_equal(row.bundle, bundle)
-    np.testing.assert_array_equal(row.bundle, bundle)
+    np.testing.assert_array_equal(row.bundle, bundle)  # second read serves the memoized decode
 
 
 def _reference_cut_order(

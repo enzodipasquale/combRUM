@@ -153,8 +153,8 @@ def test_callback_convergence_floor_rejects_non_integer_return() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"max_iterations": 0}, "max_iterations must be >= 1"),
-        ({"min_iterations": -1}, "min_iterations must be >= 0"),
+        ({"max_iterations": 0}, "expected max_iterations >= 1"),
+        ({"min_iterations": -1}, "expected min_iterations >= 0"),
         ({"qp_weight": 1.0, "decay": 0}, "qp_weight>0 needs decay>=1"),
         ({"penalty_ref": "moving"}, "penalty_ref must be"),
     ],

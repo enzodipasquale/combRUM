@@ -94,7 +94,6 @@ def test_most_violated_fraction_rounds_and_keeps_at_least_one() -> None:
 def test_most_violated_breaks_cutoff_ties_toward_earlier() -> None:
     policy = MostViolated(k=1)
     a, b = _row(1, b"a"), _row(2, b"b")
-    # Equal violations: the earlier candidate wins the single slot.
     assert policy.admit([a, b], np.array([4.0, 4.0]), 0) == (a,)
 
 
@@ -439,7 +438,6 @@ def test_slack_strip_ignores_cuts_without_a_reading() -> None:
 
     retired = policy.purge(rows, dual=None, slack=slack, iteration=0)
     retired_keys = {(row.agent_id, row.bundle_key) for row in retired}
-    # Only the loosest signalled row strips; the reading-less row never does.
     assert retired_keys == {keys[3]}
     assert keys[4] not in retired_keys
 

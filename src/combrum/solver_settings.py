@@ -33,21 +33,21 @@ class SolverSettings:
                 self.time_limit_seconds, (int, float)
             ):
                 raise ValueError(
-                    "time_limit_seconds must be a finite float > 0 or"
-                    f" None; got {self.time_limit_seconds!r}"
+                    f"invalid time_limit_seconds: {self.time_limit_seconds!r}"
+                    " (need a finite float > 0 or None)"
                 )
             limit = float(self.time_limit_seconds)
             if not math.isfinite(limit) or limit <= 0.0:
                 raise ValueError(
-                    "time_limit_seconds must be a finite float > 0 or"
-                    f" None; got {self.time_limit_seconds!r}"
+                    f"invalid time_limit_seconds: {self.time_limit_seconds!r}"
+                    " (need a finite float > 0 or None)"
                 )
             object.__setattr__(self, "time_limit_seconds", limit)
         if self.mip_focus is not None:
             focus = operator.index(self.mip_focus)
             if focus < 0:
                 raise ValueError(
-                    f"mip_focus must be >= 0 or None; got {self.mip_focus!r}"
+                    f"invalid mip_focus: {self.mip_focus!r} (need >= 0 or None)"
                 )
             object.__setattr__(self, "mip_focus", focus)
 

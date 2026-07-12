@@ -101,15 +101,15 @@ def _require_distributed_transport(transport: Transport) -> None:
 
 def _coerce_max_live_reps(value: object) -> int:
     if isinstance(value, (bool, np.bool_)):
-        raise TypeError("max_live_reps must be an integer >= 1; got bool")
+        raise TypeError("max_live_reps must be an integer >= 1 (got bool)")
     try:
         cap = operator.index(value)
     except TypeError as exc:
         raise TypeError(
-            f"max_live_reps must be an integer >= 1; got {type(value).__name__}"
+            f"max_live_reps must be an integer >= 1 (got {type(value).__name__})"
         ) from exc
     if cap < 1:
-        raise ValueError(f"max_live_reps must be >= 1; got {value!r}")
+        raise ValueError(f"max_live_reps must be >= 1 (got {value!r})")
     return int(cap)
 
 
@@ -118,6 +118,13 @@ def _max_live_reps_token(value: object) -> tuple[bool, int, str, str]:
         return (True, _coerce_max_live_reps(value), "", "")
     except (TypeError, ValueError) as exc:
         return (False, 0, type(exc).__name__, str(exc))
+
+
+def _raise_token(token: tuple[bool, object, str, str]) -> None:
+    if not token[0]:
+        if token[2] == "TypeError":
+            raise TypeError(token[3])
+        raise ValueError(token[3])
 
 
 def _agree_max_live_reps(value: object, transport: Transport) -> int:
@@ -132,14 +139,11 @@ def _agree_max_live_reps(value: object, transport: Transport) -> int:
             local_value = local[1] if local[0] else local[3]
             root_value = root[1] if root[0] else root[3]
             raise ValueError(
-                "max_live_reps must match on every rank;"
-                f" rank {transport.rank} has {local_value!r},"
-                f" rank 0 has {root_value!r}"
+                "max_live_reps must match on every rank"
+                f" (rank {transport.rank} passed {local_value!r},"
+                f" rank 0 passed {root_value!r})"
             )
-        if not local[0]:
-            if local[2] == "TypeError":
-                raise TypeError(local[3])
-            raise ValueError(local[3])
+        _raise_token(local)
     return local[1]
 
 
@@ -156,7 +160,7 @@ def _warm_cut_token(
                 False,
                 None,
                 "TypeError",
-                f"warm_cuts[{idx}] must be CutRow; got {type(row).__name__}",
+                f"warm_cuts[{idx}] must be CutRow (got {type(row).__name__})",
             )
         h.update(int(row.rep_id).to_bytes(8, "little", signed=True))
         h.update(int(row.agent_id).to_bytes(8, "little", signed=True))
@@ -185,20 +189,14 @@ def _agree_warm_cuts(
     else:
         local = _warm_cut_token(rows)
     if transport.size == 1:
-        if not local[0]:
-            if local[2] == "TypeError":
-                raise TypeError(local[3])
-            raise ValueError(local[3])
+        _raise_token(local)
         return rows
 
     with transport.collective():
         root = transport.bcast(local if transport.rank == 0 else None, root=0)
         if local != root:
             raise ValueError("warm_cuts must match on every rank")
-        if not local[0]:
-            if local[2] == "TypeError":
-                raise TypeError(local[3])
-            raise ValueError(local[3])
+        _raise_token(local)
     return rows
 
 
@@ -284,8 +282,6 @@ def _reduce_live_max(
     local_row_nbytes: int | None = None,
 ) -> tuple[list[Reduced | None], int | None]:
     live_slots = tuple(int(slot) for slot in live_slots)
-    if not live_slots:
-        raise AssertionError("cannot reduce an empty live-replication set")
     B = int(owners.shape[0])
     live_owners = np.asarray([owners[slot] for slot in live_slots], dtype=np.int64)
     # The row-width bookkeeping rides the batched max as one extra lane, so
@@ -316,10 +312,10 @@ def _reduce_live_max(
 def _store_dual(writer: DualStoreWriter, rep_id: int, dual: DualSolution | None) -> int:
     """Re-stamp one replication's dual onto its global id and persist it.
 
-    Returns 1 when a dual was written, 0 when ``dual is None``. The dual is
-    built under ``rep_id == 0`` and re-stamped before the write, else B of them
-    would collide on the store's per-``rep_id`` key. One dual is in flight at a
-    time, so the writer's resident set is one payload, never B.
+    The dual is built under ``rep_id == 0`` and re-stamped before the write,
+    else B of them would collide on the store's per-``rep_id`` key. One dual
+    is in flight at a time, so the writer's resident set is one payload,
+    never B.
     """
     if dual is None:
         return 0
@@ -356,17 +352,9 @@ def _cut_exchange_block_size(
 ) -> int:
     # Pure sizing: the agreed shard-size bound is wave-constant, so the wave
     # loop agrees it once instead of re-reducing it per block.
-    if not n_live:
-        return 0
-    budget_bytes = max(1, _CUT_EXCHANGE_BLOCK_ELEMENTS * np.dtype(np.float64).itemsize)
-    bytes_per_rep = max(1, int(max_scheduled_ids) * max(1, int(row_nbytes)))
-    return max(
-        1,
-        min(
-            int(n_live),
-            max(1, budget_bytes // bytes_per_rep),
-        ),
-    )
+    budget_bytes = _CUT_EXCHANGE_BLOCK_ELEMENTS * np.dtype(np.float64).itemsize
+    bytes_per_rep = max(1, int(max_scheduled_ids) * int(row_nbytes))
+    return min(int(n_live), max(1, budget_bytes // bytes_per_rep))
 
 
 def _observed_cut_row_nbytes(
@@ -383,9 +371,6 @@ def _observed_cut_row_nbytes(
 
 @dataclass
 class _Replica:
-    """One replication's per-rep state: formulation, resolved price surface,
-    and the local-id shard it prices each iteration."""
-
     rep_id: int
     formulation: RowGenStep
     price_resolution: Resolution
@@ -401,17 +386,15 @@ def _dispose_replicas(replicas: Sequence[_Replica]) -> str | None:
     for replica in replicas:
         if replica.closed:
             continue
-        formulation = getattr(replica, "formulation", None)
         try:
-            if formulation is not None:
-                formulation.dispose()
+            replica.formulation.dispose()
         except Exception as exc:
             errors.append(
                 f"rep {replica.rep_id} formulation.dispose:"
                 f" {type(exc).__name__}: {exc}"
             )
         finally:
-            master_backend = getattr(replica, "master_backend", None)
+            master_backend = replica.master_backend
             if master_backend is not None:
                 try:
                     master_backend.close()
@@ -492,8 +475,6 @@ def _publish_nslack_states(
     bump_iteration: bool,
 ) -> None:
     slot_ids = [int(slot) for slot in slots]
-    if not slot_ids:
-        return
     owners_live = np.asarray([owners[slot] for slot in slot_ids], dtype=np.int64)
     block = np.zeros((len(slot_ids), int(K) + 4), dtype=np.float64)
     with transport.collective():
@@ -522,9 +503,6 @@ def _route_nslack_us(
     transport: Transport,
 ) -> dict[int, dict[int, float]]:
     slot_ids = [int(slot) for slot in slots]
-    if not slot_ids:
-        return {}
-
     first = _nslack(replicas[slot_ids[0]])
     local_ids, n_agents = first._distributed_route_spec()
     owners_live = np.asarray([owners[slot] for slot in slot_ids], dtype=np.int64)
@@ -561,7 +539,6 @@ def _run_replica_wave(
     activity: ActivityRun | None = None,
     round_offset: int = 0,
 ) -> BootstrapResult:
-    """Drive a bounded wave of bootstrap replicas to convergence."""
     n_reps = len(replicas)
     with transport.collective():
         if any(not isinstance(replica.formulation, NSlack) for replica in replicas):
@@ -843,10 +820,10 @@ def _run_replica_wave(
             for slot in np.flatnonzero(live):
                 rep_iterations[int(slot)] = iterations
         _finalize_slots(range(n_reps))
-        for slot, replica in enumerate(replicas):
-            if log_details and activity is not None:
-                assert rep_iterations is not None
-                assert rep_gaps is not None
+        if log_details and activity is not None:
+            assert rep_iterations is not None
+            assert rep_gaps is not None
+            for slot, replica in enumerate(replicas):
                 activity.emit(
                     BootstrapRepFinal(
                         run_id=activity.config.run_id,
@@ -904,8 +881,8 @@ def _bootstrap_local_rows(
     if not 0 <= obs_start <= obs_stop <= prep.owned_obs.size:
         raise ValueError(
             "observation block must satisfy"
-            f" 0 <= start <= stop <= {prep.owned_obs.size};"
-            f" got start={obs_start}, stop={obs_stop}"
+            f" 0 <= start <= stop <= {prep.owned_obs.size}"
+            f" (got start={obs_start}, stop={obs_stop})"
         )
     owned_obs = prep.owned_obs[obs_start:obs_stop]
     phi_obs = prep.phi_obs_local[obs_start:obs_stop]
@@ -939,7 +916,7 @@ def _finish_bootstrap_reduction(
     if np.any(normalizers <= 0.0):
         bad = normalizers[normalizers <= 0.0]
         raise ValueError(
-            f"bootstrap multiplier normalizer must be positive; got {bad.tolist()}"
+            f"bootstrap multiplier normalizer must be positive (got {bad.tolist()})"
         )
     scales = float(prep.N) / normalizers
     return reduced[:, 1:] * scales[:, None], normalizers
@@ -952,19 +929,8 @@ def _bootstrap_wave_c_theta_and_normalizers(
     base_seed: int,
     transport: Transport,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Observation-axis bootstrap reductions for one live wave."""
     rep_ids = tuple(int(rep_id) for rep_id in rep_ids)
-    if not rep_ids:
-        return (
-            np.empty((0, prep.K), dtype=np.float64),
-            np.empty(0, dtype=np.float64),
-        )
-    elems_per_rep = prep.N * (prep.K + 1)
-    block = (
-        len(rep_ids)
-        if elems_per_rep == 0
-        else max(1, _BOOTSTRAP_OBS_BLOCK_ELEMENTS // elems_per_rep)
-    )
+    block = max(1, _BOOTSTRAP_OBS_BLOCK_ELEMENTS // (prep.N * (prep.K + 1)))
     c_thetas = np.empty((len(rep_ids), prep.K), dtype=np.float64)
     normalizers = np.empty(len(rep_ids), dtype=np.float64)
     for start in range(0, len(rep_ids), block):
@@ -1164,11 +1130,11 @@ def bootstrap_distributed(
     global ids ``0, ..., N*S-1``; bootstrap multipliers are drawn on observed
     rows only and reused by every simulated agent with the same ``gid % N``.
     ``max_live_reps`` bounds the number of concurrently live bootstrap
-    replications per wave; larger values use more memory and fewer waves, while
-    smaller values use less memory and more wave setup rounds. Every rank must
-    pass the same value. Draws use the distributed counter-based stream keyed by
-    ``(base_seed, rep_id, obs_id)``; this is placement-invariant but not the
-    same stream as serial ``bootstrap``'s default generator.
+    replications per wave, trading memory for fewer wave setup rounds. Every
+    rank must pass the same value. Draws use the distributed counter-based
+    stream keyed by ``(base_seed, rep_id, obs_id)``; this is
+    placement-invariant but not the same stream as serial ``bootstrap``'s
+    default generator.
 
     The model must use ``model.formulation=NSlack`` and provide a distributed
     observed-feature surface: either ``model.observed_features`` or
@@ -1228,9 +1194,9 @@ def bootstrap_distributed(
     )
     if min_iterations > max_iterations:
         raise ValueError(
-            "min_iterations must be <= max_iterations;"
-            f" got min_iterations={min_iterations!r},"
-            f" max_iterations={max_iterations!r}"
+            "min_iterations must be <= max_iterations"
+            f" (got min_iterations={min_iterations!r},"
+            f" max_iterations={max_iterations!r})"
         )
     base_seed = agree_public_int("base_seed", base_seed, transport, lower=0)
     tolerance = agree_public_float(

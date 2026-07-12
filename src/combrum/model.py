@@ -19,21 +19,17 @@ from combrum.parameters import Parameters
 class Model:
     """Oracle, parameter layout, feature map, and formulation class.
 
-    Args:
-        oracle: Oracle instance.
-        parameters: Parameter layout.
-        features: Priced-row callable ``(agent_id, bundle) -> (phi, eps)`` or
-            :class:`FeatureMap` instance; defaults to ``oracle`` when omitted.
-        observed_features: Optional observed-row surface. Serial fits call it as
-            ``(agent_id, bundle) -> phi``; when omitted, serial fits infer
-            observed rows from ``features`` on the observed bundles.
-            Distributed fits require this surface, or ``features`` itself, to
-            provide ``observed_features_batch(observation_ids)``. If observed
-            rows need setup before that batch call, the surface may also define
-            ``setup_observed(transport, observation_ids)``. If priced feature
-            rows need setup on the agent axis, ``features`` may define
-            ``setup_pricing_agents(transport, agent_ids)``.
-        formulation: Formulation class (not an instance), e.g. ``NSlack``.
+    ``features`` is the priced-row surface — a callable
+    ``(agent_id, bundle) -> (phi, eps)`` or a :class:`FeatureMap` — and
+    defaults to ``oracle`` itself. ``observed_features`` is the optional
+    observed-row surface: serial fits call it as ``(agent_id, bundle) -> phi``
+    and, when it is omitted, infer observed rows from ``features`` on the
+    observed bundles; distributed fits require it (or ``features`` itself) to
+    provide ``observed_features_batch(observation_ids)``. If observed rows
+    need setup before that batch call, the surface may also define
+    ``setup_observed(transport, observation_ids)``; if priced rows need setup
+    on the agent axis, ``features`` may define
+    ``setup_pricing_agents(transport, agent_ids)``.
     """
 
     oracle: Oracle

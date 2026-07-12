@@ -28,7 +28,6 @@ def _key(row: CutRow) -> tuple[int, bytes]:
     return (row.agent_id, row.bundle_key)
 
 
-# Sentinel distinguishing "no reading for this cut" from any float value.
 _NO_READING = object()
 
 
@@ -106,8 +105,8 @@ class Compose(CutPolicy):
             for stage in chain:
                 if not isinstance(stage, CutPolicy):
                     raise ValueError(
-                        f"{name} stages must be CutPolicy instances;"
-                        f" got {type(stage).__name__}"
+                        f"{name} stages must be CutPolicy instances"
+                        f" (got {type(stage).__name__})"
                     )
         self._admit_chain = tuple(admit_chain)
         self._purge_chain = tuple(purge_chain)
@@ -225,7 +224,7 @@ class PurgeInactive(CutPolicy):
 
     def __init__(self, max_age: int) -> None:
         if not isinstance(max_age, (int, np.integer)) or max_age < 1:
-            raise ValueError(f"max_age must be an integer >= 1; got {max_age!r}")
+            raise ValueError(f"max_age must be an integer >= 1 (got {max_age!r})")
         self._max_age = int(max_age)
         self._zero_streak: dict[tuple[int, bytes], int] = {}
 
@@ -300,8 +299,8 @@ class SlackStrip(CutPolicy):
         hard_threshold: float = math.inf,
     ) -> None:
         percentile = float(percentile)
-        if not 0.0 < percentile <= 100.0 or math.isnan(percentile):
-            raise ValueError(f"percentile must lie in (0, 100]; got {percentile!r}")
+        if not 0.0 < percentile <= 100.0:
+            raise ValueError(f"percentile must lie in (0, 100] (got {percentile!r})")
         hard_threshold = float(hard_threshold)
         if math.isinf(hard_threshold):
             max_live_cuts = math.inf
@@ -417,12 +416,12 @@ class MostViolated(CutPolicy):
             raise ValueError("specify exactly one of k or fraction")
         if k is not None:
             if not isinstance(k, (int, np.integer)) or k < 1:
-                raise ValueError(f"k must be an integer >= 1; got {k!r}")
+                raise ValueError(f"k must be an integer >= 1 (got {k!r})")
             k = int(k)
         if fraction is not None:
             fraction = float(fraction)
             if not 0.0 < fraction <= 1.0:
-                raise ValueError(f"fraction must lie in (0, 1]; got {fraction!r}")
+                raise ValueError(f"fraction must lie in (0, 1] (got {fraction!r})")
         self._k = k
         self._fraction = fraction
 
@@ -481,7 +480,7 @@ class SlackThreshold(CutPolicy):
     def __init__(self, epsilon: float) -> None:
         epsilon = float(epsilon)
         if not epsilon >= 0.0:
-            raise ValueError(f"epsilon must be >= 0; got {epsilon!r}")
+            raise ValueError(f"epsilon must be >= 0 (got {epsilon!r})")
         self._epsilon = epsilon
 
     profile = CutPolicyProfile(

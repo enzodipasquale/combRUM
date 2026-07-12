@@ -5,12 +5,6 @@ asks it to price one agent (or a batch) at one theta. Oracles must be
 deterministic functions of ``(theta, agent_id(s))`` given their data:
 randomness or hidden mutable state breaks every parity/determinism gate,
 since a rerun or re-sharded run must price every agent identically.
-
-:meth:`Oracle.price` and :meth:`Oracle.price_batch` each default to
-``raise NotImplementedError``; an oracle must override at least one. When
-both are supplied they must agree: ``price_batch(theta, ids)[id]`` matches
-``price(theta, id)`` for every id, with the per-agent path as the
-determinism reference.
 """
 
 from __future__ import annotations
@@ -30,10 +24,10 @@ class Oracle(ABC):
     Lifecycle: optional :meth:`setup` once before any pricing,
     :meth:`price` / :meth:`price_batch` many times, and optional
     :meth:`teardown` once after the last call. Pricing must be a
-    deterministic function of ``(theta, agent_id(s))`` (see module
-    docstring). An oracle must override at least one of :meth:`price` /
-    :meth:`price_batch`. For large or sharded applications, ``price_batch`` is
-    the main path: the engine passes exactly the global ids owned by the rank.
+    deterministic function of ``(theta, agent_id(s))``. An oracle must
+    override at least one of :meth:`price` / :meth:`price_batch`. For large
+    or sharded applications, ``price_batch`` is the main path: the engine
+    passes exactly the global ids owned by the rank.
     """
 
     def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
@@ -46,7 +40,6 @@ class Oracle(ABC):
         :meth:`combrum.transport.base.Transport.node_shared` so memory
         scales with nodes, not ranks.
         """
-        pass
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
         """Solve one agent's subproblem at ``theta``.
@@ -54,8 +47,7 @@ class Oracle(ABC):
         ``agent_id`` is the GLOBAL id; the same id prices the same agent
         under any sharding. Approximate solves with a finite certified gap
         return :meth:`Demand.inexact`; feasible incumbents without a usable
-        certificate return :meth:`Demand.uncertified`. Defaults to raising;
-        override this or :meth:`price_batch`.
+        certificate return :meth:`Demand.uncertified`.
         """
         raise NotImplementedError(
             "Oracle.price is not overridden; override price or price_batch"
@@ -78,8 +70,7 @@ class Oracle(ABC):
         When an oracle overrides both, ``price_batch(theta, ids)[id]`` must
         match ``price(theta, id)`` for every id (discrete fields
         byte-identical, continuous fields within ``1e-13``), with the
-        per-agent path the deterministic reference. Defaults to raising;
-        override this or :meth:`price`.
+        per-agent path the deterministic reference.
         """
         raise NotImplementedError(
             "Oracle.price_batch is not overridden; override price or price_batch"

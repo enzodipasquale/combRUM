@@ -95,16 +95,16 @@ def test_int_array_inputs_coerced_to_float64() -> None:
 
 def test_rejects_wrong_theta_coef_length() -> None:
     # Both directions: a one-sided size check would accept one of these.
-    with pytest.raises(ValueError, match=r"theta_coef must have shape \(n_agents,\)"):
+    with pytest.raises(ValueError, match=r"expected theta_coef of shape \(n_agents,\)"):
         make_context(theta_coef=np.zeros(N * S + 1))
-    with pytest.raises(ValueError, match=r"theta_coef must have shape \(n_agents,\)"):
+    with pytest.raises(ValueError, match=r"expected theta_coef of shape \(n_agents,\)"):
         make_context(theta_coef=np.zeros(N * S - 1))
 
 
 def test_rejects_wrong_agent_weights_length() -> None:
-    with pytest.raises(ValueError, match=r"agent_weights must have shape"):
+    with pytest.raises(ValueError, match=r"expected agent_weights of shape"):
         make_context(agent_weights=np.zeros(N * S - 1))
-    with pytest.raises(ValueError, match=r"agent_weights must have shape"):
+    with pytest.raises(ValueError, match=r"expected agent_weights of shape"):
         make_context(agent_weights=np.zeros(N * S + 1))
 
 
@@ -129,7 +129,7 @@ def test_rejects_multidimensional_local_ids() -> None:
     # A 2-D array passes the uniqueness check (np.unique flattens) and the
     # range check; only the ndim guard rejects it.
     two_d = np.arange(N * S, dtype=np.int64).reshape(2, 4)
-    with pytest.raises(ValueError, match="local_ids must be one-dimensional"):
+    with pytest.raises(ValueError, match="expected 1-D local_ids"):
         make_context(local_ids=two_d)
 
 
@@ -150,13 +150,19 @@ def test_accepts_equal_bounds() -> None:
 
 
 def test_rejects_wrong_bounds_length() -> None:
-    with pytest.raises(ValueError, match=r"theta_bounds lower must have shape \(K,\)"):
+    with pytest.raises(
+        ValueError, match=r"expected theta_bounds lower of shape \(K,\)"
+    ):
         make_context(theta_bounds=(np.zeros(K + 1), np.ones(K + 1)))
     # A size-1 upper broadcasts against (K,) in the lower<=upper comparison,
     # so only the shape guard can catch it; lower stays correct-length here.
-    with pytest.raises(ValueError, match=r"theta_bounds upper must have shape \(K,\)"):
+    with pytest.raises(
+        ValueError, match=r"expected theta_bounds upper of shape \(K,\)"
+    ):
         make_context(theta_bounds=(np.zeros(K), np.ones(1)))
-    with pytest.raises(ValueError, match=r"theta_bounds upper must have shape \(K,\)"):
+    with pytest.raises(
+        ValueError, match=r"expected theta_bounds upper of shape \(K,\)"
+    ):
         make_context(theta_bounds=(np.zeros(K), np.ones(K + 1)))
 
 
@@ -179,16 +185,16 @@ def test_rejects_malformed_theta_bounds_container() -> None:
 
 
 def test_rejects_nonpositive_tolerance() -> None:
-    with pytest.raises(ValueError, match="tolerance must be > 0"):
+    with pytest.raises(ValueError, match="tolerance must be positive"):
         make_context(tolerance=0.0)
-    with pytest.raises(ValueError, match="tolerance must be > 0"):
+    with pytest.raises(ValueError, match="tolerance must be positive"):
         make_context(tolerance=-1.0)
 
 
 def test_rejects_wrong_theta_init_length() -> None:
-    with pytest.raises(ValueError, match=r"theta_init must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta_init of shape \(K,\)"):
         make_context(theta_init=np.zeros(K + 1))
-    with pytest.raises(ValueError, match=r"theta_init must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta_init of shape \(K,\)"):
         make_context(theta_init=np.zeros(K - 1))
 
 
@@ -205,13 +211,13 @@ def test_rejects_nonfinite_theta_init() -> None:
 
 def test_rejects_nonpositive_K() -> None:
     with pytest.raises(
-        ValueError, match=r"K \(parameter dimension\) must be >= 1; got 0"
+        ValueError, match=r"K \(parameter dimension\) must be >= 1, got 0"
     ):
         make_context(K=0, theta_bounds=(np.zeros(0), np.zeros(0)))
 
 
 def test_rejects_nonpositive_N() -> None:
-    with pytest.raises(ValueError, match=r"N \(observations\) must be >= 1; got 0"):
+    with pytest.raises(ValueError, match=r"N \(observations\) must be >= 1, got 0"):
         make_context(
             N=0,
             theta_coef=np.zeros(0),
@@ -221,7 +227,7 @@ def test_rejects_nonpositive_N() -> None:
 
 
 def test_rejects_nonpositive_S() -> None:
-    with pytest.raises(ValueError, match=r"S \(simulations\) must be >= 1; got 0"):
+    with pytest.raises(ValueError, match=r"S \(simulations\) must be >= 1, got 0"):
         make_context(
             S=0,
             theta_coef=np.zeros(0),

@@ -282,7 +282,7 @@ def test_prepare_distributed_observed_requires_rank_uniform_pricing_setup_hook()
         return "no error"
 
     assert all(
-        "distributed pricing feature surface must be identical" in message
+        "distributed pricing feature surface differs across ranks" in message
         for message in LocalCluster(2).run(run)
     )
 
@@ -747,7 +747,6 @@ def test_nslack_lazy_slack_strip_counts_distinct_installed_agents() -> None:
 
     assert formulation._purge(policy, profile, ()) == set()
 
-    # Two distinct agents -> installed_agents=2, so K + installed_agents = 5.
     with pytest.raises(
         ValueError,
         match=r"hard_threshold=3, K=3, installed_agents=2, K \+ installed_agents=5",

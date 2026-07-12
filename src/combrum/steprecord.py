@@ -95,9 +95,8 @@ class PricedFeature:
 class StepRecord:
     """One iteration's pre-filter inputs over their full domain.
 
-    A frozen, typed snapshot of the quantities a row-gen step's filters read
-    in one iteration. Fields a formulation does not exercise stay at their
-    empty default. ``iteration`` is the 0-based loop index.
+    Fields a formulation does not exercise stay at their empty default.
+    ``iteration`` is the 0-based loop index.
     """
 
     iteration: int
@@ -112,8 +111,6 @@ class StepRecord:
 
 @dataclass
 class _Pending:
-    """Mutable per-iteration accumulator; :meth:`seal` freezes it to a record."""
-
     iteration: int
     priced_reduced_costs: list[PricedReducedCost] = field(default_factory=list)
     admit_violations: list[AdmitViolation] = field(default_factory=list)
@@ -142,9 +139,7 @@ class TraceSink(Protocol):
     :class:`ListTraceSink` is the in-memory collector.
     """
 
-    def emit(self, record: StepRecord) -> None:
-        """Receive one iteration's sealed :class:`StepRecord`."""
-        ...
+    def emit(self, record: StepRecord) -> None: ...
 
 
 @dataclass

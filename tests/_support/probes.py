@@ -315,7 +315,6 @@ def test_normalize_maxrss_linux_prefix_family_scaled() -> None:
 
 
 def test_normalize_maxrss_unknown_platform_rejected() -> None:
-    # Unknown platforms raise instead of guessing a unit.
     import pytest
 
     with pytest.raises(ValueError, match="win32"):

@@ -59,7 +59,7 @@ class RoundRobin(RepricingSchedule):
 
     def __init__(self, chunks: int) -> None:
         if not isinstance(chunks, (int, np.integer)) or chunks < 1:
-            raise ValueError(f"chunks must be an integer >= 1; got {chunks!r}")
+            raise ValueError(f"chunks must be a positive integer, got {chunks!r}")
         self._chunks = int(chunks)
 
     def select(

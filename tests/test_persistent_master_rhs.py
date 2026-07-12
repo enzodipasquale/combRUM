@@ -11,10 +11,6 @@ so each cut's ``ε@ψ = ψ·ε@ψ0``, while φ / ``c_theta`` / the θ-box /
 ``_geometry_signature_factory`` supplies the optional G2 fingerprint. The
 observed bundles are perturbed off the oracle's argmax (two flipped rows) so
 the objective varies across the panel while staying in the ψ-class.
-
-Covered: (a) objective parity against a rebuild-per-eval over a ψ-panel,
-(c) the deterministic speed proxy and cut-count carry, (d) NSlack-only
-enforcement, (e) an end-to-end golden-section outer ψ-search.
 """
 
 from __future__ import annotations

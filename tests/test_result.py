@@ -106,9 +106,9 @@ def test_fit_result_named_accessors() -> None:
 
 
 def test_fit_result_validation() -> None:
-    with pytest.raises(ValueError, match=r"theta_hat must have shape \(K,\)"):
+    with pytest.raises(ValueError, match=r"expected theta_hat of shape \(K,\)"):
         make_fit(theta=(1.0, 2.0))
-    with pytest.raises(ValueError, match="empirical_moment must have shape"):
+    with pytest.raises(ValueError, match="expected empirical_moment of shape"):
         make_fit(empirical_moment=np.zeros(4))
     with pytest.raises(ValueError, match="n_active_cuts must be >= 0"):
         make_fit(n_active_cuts=-1)
@@ -248,7 +248,7 @@ def test_fit_and_bootstrap_results_pickle_and_deepcopy_round_trip() -> None:
 
 
 def test_bootstrap_validation() -> None:
-    with pytest.raises(ValueError, match=r"thetas must have shape \(B, K\)"):
+    with pytest.raises(ValueError, match=r"expected thetas of shape \(B, K\)"):
         make_boot(thetas=np.zeros((4, 2)))
     with pytest.raises(ValueError, match="B must be >= 1"):
         make_boot(thetas=np.zeros((0, 3)), converged=np.zeros(0, dtype=bool))
@@ -257,7 +257,7 @@ def test_bootstrap_validation() -> None:
     assert single.thetas.shape == (1, 3)
     assert single.converged.shape == (1,)
     assert single.n_converged == 1
-    with pytest.raises(ValueError, match=r"converged must have shape \(B,\)"):
+    with pytest.raises(ValueError, match=r"expected converged of shape \(B,\)"):
         make_boot(converged=np.array([True, False]))
     with pytest.raises(ValueError, match="one payload per replication"):
         make_boot(duals=("d0", "d1"))

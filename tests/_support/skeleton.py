@@ -35,7 +35,7 @@ from combrum.demand import Demand
 from combrum.formulation import Evaluation, Formulation, FormulationResult
 from combrum.oracle import Oracle
 from combrum.transport.base import CutRow, Transport, TransportError
-from combrum.transport.reference import LocalCluster, SerialTransport
+from combrum.transport.reference import SerialTransport
 
 #: Single replication owned by rank 0; routes every cut through the exchange.
 _OWNERS: np.ndarray = np.zeros(1, dtype=np.int64)

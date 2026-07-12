@@ -7,11 +7,6 @@ the same relaxation, and NSlack rebuilds its bookkeeping from
 ``extract_cuts()``/``theta()`` at setup, so the refit adopts the cuts
 unchanged. The artifact is a deterministic, persistable tuple — the
 checkpoint that chains bootstrap reps and sweep cells.
-
-Covered here: same-problem and sweep-cell refits converge in strictly fewer
-iterations at the same objective (toy and QKP families, two sizes each),
-the artifact is byte-reproducible, warm-start composes with the decay
-penalty, and a warm-started fit is bitwise rank-invariant.
 """
 
 from __future__ import annotations

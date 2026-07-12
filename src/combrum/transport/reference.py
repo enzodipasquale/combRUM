@@ -26,20 +26,10 @@ import numpy as np
 from combrum.reductions import canonical_sum
 from combrum.transport._common import (
     ids_validated as _ids_validated,
-)
-from combrum.transport._common import (
-    route_bucket_for_rank as _route_bucket_for_rank,
-)
-from combrum.transport._common import (
     route_agent_axis_validated as _route_agent_axis_validated,
-)
-from combrum.transport._common import (
+    route_bucket_for_rank as _route_bucket_for_rank,
     route_local_ids_owned_validated as _route_local_ids_owned_validated,
-)
-from combrum.transport._common import (
     route_values_validated as _route_values_validated,
-)
-from combrum.transport._common import (
     scatter_arrays_validated as _scatter_arrays_validated,
 )
 from combrum.transport.base import (
@@ -58,8 +48,8 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-# Shared combiners: collective semantics on rank-ordered pooled inputs. Serial
-# is the pool-of-one case, so serial and multirank cannot diverge.
+# Shared combiners: collective semantics on rank-ordered pooled inputs;
+# serial is the pool-of-one case.
 
 
 def _combine_sum(
@@ -112,19 +102,17 @@ def _combine_sum(
 
 def _combine_vector_sum(values_by_rank: Sequence[np.ndarray]) -> np.ndarray:
     arrays = [np.asarray(v, dtype=np.float64) for v in values_by_rank]
-    if not arrays:
-        raise ValueError("sum_vectors_reproducible: at least one rank required")
     shape = arrays[0].shape
     for r, arr in enumerate(arrays):
         if arr.ndim not in (1, 2):
             raise ValueError(
-                "sum_vectors_reproducible: values must have shape (M,) or"
-                f" (B, M); rank {r} passed {arr.shape}"
+                "sum_vectors_reproducible: values must be (M,) or (B, M),"
+                f" rank {r} passed {arr.shape}"
             )
         if arr.shape != shape:
             raise ValueError(
                 "sum_vectors_reproducible: every rank must pass the same"
-                f" shape; rank 0 has {shape}, rank {r} has {arr.shape}"
+                f" shape, rank 0 has {shape} but rank {r} has {arr.shape}"
             )
     flat = np.stack(
         [np.ascontiguousarray(arr).reshape(-1) for arr in arrays],
@@ -154,19 +142,19 @@ def _agreed_owners(
     first = np.asarray(owners_by_rank[0])
     if first.ndim != 1 or not np.issubdtype(first.dtype, np.integer):
         raise ValueError(
-            f"{what}: owners must be a 1-D integer array of ranks;"
+            f"{what}: owners must be a 1-D integer array of ranks,"
             f" got shape {first.shape}, dtype {first.dtype}"
         )
     for r, other in enumerate(owners_by_rank[1:], start=1):
         other = np.asarray(other)
         if other.shape != first.shape or not np.array_equal(other, first):
             raise ValueError(
-                f"{what}: owners must be identical on every rank;"
-                f" rank {r} disagrees with rank 0"
+                f"{what}: owners must be identical on every rank,"
+                f" but rank {r} disagrees with rank 0"
             )
     if first.size and (int(first.min()) < 0 or int(first.max()) >= size):
         raise ValueError(
-            f"{what}: owners must lie in [0, size) = [0, {size});"
+            f"{what}: owners must lie in [0, size) = [0, {size}),"
             f" got range [{int(first.min())}, {int(first.max())}]"
         )
     return first
@@ -181,13 +169,13 @@ def _combine_owner_broadcast(
         arr = np.asarray(v, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[0] != B:
             raise ValueError(
-                f"owner_broadcast: values must have shape (B, M) = ({B}, M);"
-                f" rank {r} passed shape {arr.shape}"
+                f"owner_broadcast: values must have shape (B, M) = ({B}, M),"
+                f" rank {r} passed {arr.shape}"
             )
         arrays.append(arr)
     if len({a.shape for a in arrays}) != 1:
         raise ValueError(
-            "owner_broadcast: every rank must pass the same (B, M) shape;"
+            "owner_broadcast: every rank must pass the same (B, M) shape,"
             f" got shapes {sorted(a.shape for a in arrays)}"
         )
     out = np.zeros_like(arrays[0], dtype=np.float64)
@@ -210,7 +198,7 @@ def _normalize_batched_agent_values(
         if not isinstance(payload, Mapping):
             raise ValueError(
                 "route_agent_values_batched: values_by_rep must be a mapping"
-                f" or None; rank {rank} passed {type(payload).__name__}"
+                f" or None, rank {rank} passed {type(payload).__name__}"
             )
         for rep_key, values in payload.items():
             if (
@@ -221,14 +209,14 @@ def _normalize_batched_agent_values(
             ):
                 raise ValueError(
                     "route_agent_values_batched: replication ids must lie in"
-                    f" [0, {B}); rank {rank} passed {rep_key!r}"
+                    f" [0, {B}), rank {rank} passed {rep_key!r}"
                 )
             rep = int(rep_key)
             if int(owners[rep]) != rank:
                 raise ValueError(
                     "route_agent_values_batched: only the owner rank may pass"
-                    f" values for replication {rep}; owner is"
-                    f" {int(owners[rep])}, rank {rank} passed values"
+                    f" values for replication {rep}, owner is"
+                    f" {int(owners[rep])}, but rank {rank} passed values"
                 )
             by_rep[rep] = _route_values_validated(
                 values,
@@ -283,7 +271,7 @@ def _combine_cuts(
         for row in rows:
             if not isinstance(row, CutRow):
                 raise ValueError(
-                    "exchange_cuts: rows must be CutRow instances;"
+                    "exchange_cuts: rows must be CutRow instances,"
                     f" rank {r} passed {type(row).__name__}"
                 )
             if row.rep_id >= B:
@@ -302,7 +290,7 @@ def _combine_agent_values(
     n_global: int,
 ) -> np.ndarray:
     if n_global < 0:
-        raise ValueError(f"n_global must be >= 0; got {n_global}")
+        raise ValueError(f"n_global must be >= 0, got {n_global}")
     values_parts: list[np.ndarray] = []
     ids_parts: list[np.ndarray] = []
     for r, (values, ids) in enumerate(zip(values_by_rank, ids_by_rank)):
@@ -310,7 +298,7 @@ def _combine_agent_values(
         gids = np.asarray(ids)
         if vals.ndim != 1:
             raise ValueError(
-                "gather_agent_values: values must be one-dimensional;"
+                "gather_agent_values: values must be one-dimensional,"
                 f" rank {r} passed shape {vals.shape}"
             )
         if gids.ndim != 1 or not np.issubdtype(gids.dtype, np.integer):
@@ -321,13 +309,13 @@ def _combine_agent_values(
         if gids.shape != vals.shape:
             raise ValueError(
                 "gather_agent_values: values and global_ids must have the same"
-                f" shape on each rank; rank {r} has {vals.shape} and"
+                f" shape on each rank, but rank {r} has {vals.shape} and"
                 f" {gids.shape}"
             )
         if gids.size and (int(gids.min()) < 0 or int(gids.max()) >= n_global):
             raise ValueError(
                 "gather_agent_values: global_ids must lie in"
-                f" [0, {n_global}); rank {r} got range"
+                f" [0, {n_global}), rank {r} got range"
                 f" [{int(gids.min())}, {int(gids.max())}]"
             )
         values_parts.append(vals)
@@ -420,14 +408,14 @@ class SerialTransport(Transport):
 
     def bcast(self, obj: _T | None, root: int = 0) -> _T:
         if root != 0:
-            raise ValueError(f"root must lie in [0, 1); got {root}")
+            raise ValueError(f"root must lie in [0, 1), got {root}")
         return obj  # type: ignore[return-value]
 
     def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         if source != 0:
-            raise ValueError(f"source must lie in [0, 1); got {source}")
+            raise ValueError(f"source must lie in [0, 1), got {source}")
         if root != 0:
-            raise ValueError(f"root must lie in [0, 1); got {root}")
+            raise ValueError(f"root must lie in [0, 1), got {root}")
         return obj
 
     def allreduce_max(self, value: float) -> float:
@@ -449,11 +437,9 @@ class SerialTransport(Transport):
         root: int = 0,
     ) -> dict[str, np.ndarray]:
         if root != 0:
-            raise ValueError(f"root must lie in [0, 1); got {root}")
+            raise ValueError(f"root must lie in [0, 1), got {root}")
         if arrays is None:
-            raise ValueError(
-                "scatter_by_agent: rank 0 must pass the full arrays; got None"
-            )
+            raise ValueError("scatter_by_agent: rank 0 must pass the full arrays")
         normalized, n_global = _scatter_arrays_validated(arrays)
         ids = _ids_validated(local_ids, n_global, "scatter_by_agent")
         return _scatter_select(normalized, ids)
@@ -467,7 +453,7 @@ class SerialTransport(Transport):
         root: int = 0,
     ) -> np.ndarray | None:
         if root != 0:
-            raise ValueError(f"root must lie in [0, 1); got {root}")
+            raise ValueError(f"root must lie in [0, 1), got {root}")
         return _combine_agent_values([values], [global_ids], int(n_global))
 
     def route_agent_values(
@@ -653,7 +639,7 @@ class LocalMultirankTransport(Transport):
 
     def bcast(self, obj: _T | None, root: int = 0) -> _T:
         if not 0 <= root < self._size:
-            raise ValueError(f"root must lie in [0, {self._size}); got {root}")
+            raise ValueError(f"root must lie in [0, {self._size}), got {root}")
         gathered = self._rendezvous.exchange(
             self._rank, "bcast", obj if self._rank == root else None
         )
@@ -665,9 +651,9 @@ class LocalMultirankTransport(Transport):
 
     def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
         if not 0 <= source < self._size:
-            raise ValueError(f"source must lie in [0, {self._size}); got {source}")
+            raise ValueError(f"source must lie in [0, {self._size}), got {source}")
         if not 0 <= root < self._size:
-            raise ValueError(f"root must lie in [0, {self._size}); got {root}")
+            raise ValueError(f"root must lie in [0, {self._size}), got {root}")
         gathered = self._rendezvous.exchange(
             self._rank,
             f"send_to_root:{source}:{root}",
@@ -711,7 +697,7 @@ class LocalMultirankTransport(Transport):
         root: int = 0,
     ) -> dict[str, np.ndarray]:
         if not 0 <= root < self._size:
-            raise ValueError(f"root must lie in [0, {self._size}); got {root}")
+            raise ValueError(f"root must lie in [0, {self._size}), got {root}")
         gathered = self._rendezvous.exchange(
             self._rank, f"scatter_by_agent:{root}", (arrays, local_ids)
         )
@@ -721,12 +707,12 @@ class LocalMultirankTransport(Transport):
                 continue
             if gathered[r][0] is not None:  # type: ignore[index]
                 raise ValueError(
-                    f"scatter_by_agent: only rank {root} holds the full arrays;"
-                    f" rank {r} passed a non-None payload"
+                    f"scatter_by_agent: only rank {root} holds the full arrays,"
+                    f" but rank {r} passed a payload"
                 )
         if root_arrays is None:
             raise ValueError(
-                f"scatter_by_agent: rank {root} must pass the full arrays; got None"
+                f"scatter_by_agent: rank {root} must pass the full arrays"
             )
         normalized, n_global = _scatter_arrays_validated(root_arrays)
         # Validate every rank's ids on every rank: divergent caller state
@@ -746,7 +732,7 @@ class LocalMultirankTransport(Transport):
         root: int = 0,
     ) -> np.ndarray | None:
         if not 0 <= root < self._size:
-            raise ValueError(f"root must lie in [0, {self._size}); got {root}")
+            raise ValueError(f"root must lie in [0, {self._size}), got {root}")
         payload = (
             np.asarray(values, dtype=np.float64),
             np.asarray(global_ids),
@@ -759,7 +745,7 @@ class LocalMultirankTransport(Transport):
         if len(sizes) != 1:
             raise ValueError(
                 "gather_agent_values: every rank must pass the same"
-                f" n_global; got {sorted(sizes)}"
+                f" n_global, got {sorted(sizes)}"
             )
         if self._rank != root:
             return None
@@ -966,14 +952,14 @@ class LocalCluster:
         rendezvous_timeout: float = 10.0,
     ) -> None:
         if size < 1:
-            raise ValueError(f"size must be >= 1; got {size}")
+            raise ValueError(f"size must be >= 1, got {size}")
         if ranks_per_node is None:
             ranks_per_node = size
         if ranks_per_node < 1:
-            raise ValueError(f"ranks_per_node must be >= 1; got {ranks_per_node}")
+            raise ValueError(f"ranks_per_node must be >= 1, got {ranks_per_node}")
         if not rendezvous_timeout > 0:
             raise ValueError(
-                f"rendezvous_timeout must be > 0; got {rendezvous_timeout}"
+                f"rendezvous_timeout must be > 0, got {rendezvous_timeout}"
             )
         self._size = int(size)
         self._ranks_per_node = int(ranks_per_node)

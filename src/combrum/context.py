@@ -54,16 +54,16 @@ def _coerce_result_publication(value: object) -> ResultPublication:
             return _RESULT_PUBLICATION_NAMES[value]
         except KeyError as exc:
             raise ValueError(
-                "result_publication must name one of"
-                f" {sorted(_RESULT_PUBLICATION_NAMES)}; got {value!r}"
+                f"unknown result_publication mode {value!r}:"
+                f" expected one of {sorted(_RESULT_PUBLICATION_NAMES)}"
             ) from exc
     if isinstance(value, Iterable):
         publication = ResultPublication.SUMMARY
         for item in value:
             if not isinstance(item, str):
                 raise ValueError(
-                    "result_publication iterables must contain string mode"
-                    f" names; got {item!r}"
+                    "result_publication iterables must contain mode-name"
+                    f" strings, got {item!r}"
                 )
             publication |= _coerce_result_publication(item)
         return publication
@@ -77,6 +77,17 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
     # Mutable ndarray payloads would defeat the frozen dataclass guarantee.
     arr.setflags(write=False)
     return arr
+
+
+def _coerce_agent_vector(ctx: FitContext, name: str) -> None:
+    arr = np.asarray(getattr(ctx, name), dtype=np.float64)
+    if arr.shape != (ctx.n_agents,):
+        raise ValueError(
+            f"expected {name} of shape (n_agents,) ="
+            f" ({ctx.n_agents},) with n_agents = N * S,"
+            f" got {arr.shape}"
+        )
+    object.__setattr__(ctx, name, _readonly(arr))
 
 
 @dataclass(frozen=True)
@@ -129,13 +140,13 @@ class FitContext:
 
     def __post_init__(self) -> None:
         if self.K < 1:
-            raise ValueError(f"K (parameter dimension) must be >= 1; got {self.K}")
+            raise ValueError(f"K (parameter dimension) must be >= 1, got {self.K}")
         if self.N < 1:
-            raise ValueError(f"N (observations) must be >= 1; got {self.N}")
+            raise ValueError(f"N (observations) must be >= 1, got {self.N}")
         if self.S < 1:
-            raise ValueError(f"S (simulations) must be >= 1; got {self.S}")
+            raise ValueError(f"S (simulations) must be >= 1, got {self.S}")
         if not self.tolerance > 0:
-            raise ValueError(f"tolerance must be > 0; got {self.tolerance}")
+            raise ValueError(f"tolerance must be positive, got {self.tolerance}")
 
         bounds = self.theta_bounds
         if not (isinstance(bounds, tuple) and len(bounds) == 2):
@@ -146,12 +157,12 @@ class FitContext:
         upper = np.asarray(bounds[1], dtype=np.float64)
         if lower.shape != (self.K,):
             raise ValueError(
-                f"theta_bounds lower must have shape (K,) = ({self.K},);"
+                f"expected theta_bounds lower of shape (K,) = ({self.K},),"
                 f" got {lower.shape}"
             )
         if upper.shape != (self.K,):
             raise ValueError(
-                f"theta_bounds upper must have shape (K,) = ({self.K},);"
+                f"expected theta_bounds upper of shape (K,) = ({self.K},),"
                 f" got {upper.shape}"
             )
         if np.any(lower > upper):
@@ -164,7 +175,7 @@ class FitContext:
 
         if self.weight_mode not in ("dense", "distributed"):
             raise ValueError(
-                "weight_mode must be 'dense' or 'distributed';"
+                "weight_mode must be 'dense' or 'distributed',"
                 f" got {self.weight_mode!r}"
             )
 
@@ -178,23 +189,8 @@ class FitContext:
                     "dense FitContext must not set slack_coef;"
                     " pass agent_weights instead"
                 )
-            theta_coef = np.asarray(self.theta_coef, dtype=np.float64)
-            if theta_coef.shape != (self.n_agents,):
-                raise ValueError(
-                    "theta_coef must have shape (n_agents,) ="
-                    f" ({self.n_agents},) with n_agents = N * S;"
-                    f" got {theta_coef.shape}"
-                )
-            object.__setattr__(self, "theta_coef", _readonly(theta_coef))
-
-            agent_weights = np.asarray(self.agent_weights, dtype=np.float64)
-            if agent_weights.shape != (self.n_agents,):
-                raise ValueError(
-                    "agent_weights must have shape (n_agents,) ="
-                    f" ({self.n_agents},) with n_agents = N * S;"
-                    f" got {agent_weights.shape}"
-                )
-            object.__setattr__(self, "agent_weights", _readonly(agent_weights))
+            _coerce_agent_vector(self, "theta_coef")
+            _coerce_agent_vector(self, "agent_weights")
         else:
             if self.theta_coef is not None or self.agent_weights is not None:
                 raise ValueError(
@@ -209,7 +205,7 @@ class FitContext:
         local_ids = np.asarray(self.local_ids)
         if local_ids.ndim != 1:
             raise ValueError(
-                f"local_ids must be one-dimensional; got shape {local_ids.shape}"
+                f"expected 1-D local_ids, got shape {local_ids.shape}"
             )
         if not np.issubdtype(local_ids.dtype, np.integer):
             raise ValueError(
@@ -235,7 +231,7 @@ class FitContext:
             theta_init = np.asarray(self.theta_init, dtype=np.float64)
             if theta_init.shape != (self.K,):
                 raise ValueError(
-                    f"theta_init must have shape (K,) = ({self.K},);"
+                    f"expected theta_init of shape (K,) = ({self.K},),"
                     f" got {theta_init.shape}"
                 )
             if np.any(~np.isfinite(theta_init)):

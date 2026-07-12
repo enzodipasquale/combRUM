@@ -75,7 +75,6 @@ class FakeMaster(MasterBackend):
 
     @property
     def pure_lp(self) -> bool:
-        # True iff no quadratic penalty is installed.
         return self._penalty is None
 
     def _rows(self) -> tuple[CutRow, ...]:
@@ -367,7 +366,7 @@ def test_fake_double_pure_lp_flag_tracks_penalty_revert() -> None:
 
     master = FakeMaster(K, [-10.0] * K, [10.0] * K)
     master.add_cuts([make_row(1, b"a", [4.0, 4.0])])
-    assert master.pure_lp  # no penalty installed yet
+    assert master.pure_lp
 
     master.set_penalty(np.zeros(K), weight=1.0)
     assert not master.pure_lp

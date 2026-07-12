@@ -273,7 +273,7 @@ def test_nslack_mapping_contribute_rejects_nonfinite_payoff(
 
     formulation = _nslack_for_contribute(tolerance=1.0)
 
-    with pytest.raises(ValueError, match="demand payoffs must be finite"):
+    with pytest.raises(ValueError, match="non-finite demand payoff"):
         formulation.contribute({3: _Demand()})
 
 

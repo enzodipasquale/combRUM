@@ -61,11 +61,9 @@ def _status_name(gurobipy: object, status: int) -> str:
 
 @dataclass(frozen=True)
 class _Solution:
-    """Last solve's results, copied out at solve time.
-
-    Values are materialized while the solver's query surface is valid so
-    accessors keep reporting the last solve after later cut installs or
-    objective edits.
+    """Last solve copied out at solve time, so accessors keep reporting it
+    after later cut installs or objective edits invalidate the solver's own
+    query surface.
     """
 
     theta: np.ndarray
@@ -94,8 +92,6 @@ class GurobiMaster(MasterBackend):
         self._env = None
         self._env_owned = env is None
         self._model = None
-        # n_agents given -> all u-columns declared up front (fixed column
-        # structure); None -> lazy per-first-cut columns.
         self._n_agents = None if n_agents is None else int(n_agents)
         self._K, self._lower, self._upper, self._c = validated_construction(
             K, theta_bounds, c_theta
@@ -104,8 +100,8 @@ class GurobiMaster(MasterBackend):
         if self._u_coefs is not None and self._n_agents is not None:
             if self._u_coefs.size < self._n_agents:
                 raise ValueError(
-                    f"u_coef array must cover all {self._n_agents} agents;"
-                    f" got {self._u_coefs.size} coefficients"
+                    f"u_coef array must cover all {self._n_agents} agents,"
+                    f" but has only {self._u_coefs.size} coefficients"
                 )
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
@@ -160,10 +156,6 @@ class GurobiMaster(MasterBackend):
         self._cut_duals: dict[tuple[int, bytes], float] | None = None
         self._bound_duals: dict[int, float] | None = None
         if self._n_agents is not None:
-            # Pre-declare ALL u-columns in agent order: a fixed column
-            # structure keeps the warm re-solve vertex deterministic even at a
-            # degenerate optimum. With the default lower bound, a cutless
-            # agent's u sits at lb=0 -> 0, so the estimate is unchanged.
             self._u_mvar = model.addMVar(
                 self._n_agents,
                 lb=self._u_lb(),
@@ -176,7 +168,7 @@ class GurobiMaster(MasterBackend):
             return float(self._u_coefs[agent_id])
         coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
         if not np.isfinite(coef):
-            raise ValueError(f"u_coef({agent_id}) must be finite; got {coef!r}")
+            raise ValueError(f"u_coef({agent_id}) must be finite, got {coef!r}")
         return coef
 
     def _slack_coef_vector(self, n: int) -> np.ndarray:
@@ -194,7 +186,6 @@ class GurobiMaster(MasterBackend):
         for row in rows:
             key = (row.agent_id, row.bundle_key)
             if key not in self._installed:
-                # First occurrence wins; duplicates absorbed.
                 self._installed[key] = row
                 fresh.append(row)
         # Install in canonical key order so equal row sets build identical
@@ -207,9 +198,6 @@ class GurobiMaster(MasterBackend):
 
     def _install_batch(self, rows: Sequence[CutRow]) -> None:
         if self._u_mvar is None:
-            # Canonical row order means new agents appear in ascending order,
-            # so batch variable creation reproduces the creation order — and
-            # with it the column indexing — of a one-row-at-a-time install.
             missing = [
                 agent_id
                 for agent_id in dict.fromkeys(row.agent_id for row in rows)
@@ -291,20 +279,14 @@ class GurobiMaster(MasterBackend):
         return removed
 
     def set_rhs(self, updates: Mapping[tuple[int, bytes], float]) -> None:
-        # Validate the whole key set first, so an unknown key makes the update
-        # all-or-nothing and never leaves the relaxation partially changed.
         for key in updates:
             if key not in self._constrs:
                 raise KeyError(key)
-        # Invalidate before the writes so a mid-loop solver error cannot leave
-        # accessors reporting the pre-edit solve.
         self._invalidate_solution()
         keys = list(updates)
         values = [float(updates[key]) for key in keys]
         self._model.setAttr("RHS", [self._constrs[key] for key in keys], values)
         for key, new_eps in zip(keys, values):
-            # Mirror the new RHS into the installed row; the epsilon-only
-            # _replace shares phi and the decoded-bundle memo with the old row.
             self._installed[key] = self._installed[key]._replace(epsilon=new_eps)
 
     # -- solving and reporting ----------------------------------------------
@@ -435,7 +417,7 @@ class GurobiMaster(MasterBackend):
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.array(ref, dtype=np.float64)
         if ref.shape != (self._K,):
-            raise ValueError(f"ref must have shape ({self._K},); got {ref.shape}")
+            raise ValueError(f"ref must have shape ({self._K},), got {ref.shape}")
         if weight <= 0:
             if self._penalty is not None:
                 self._penalty = None
@@ -479,7 +461,7 @@ class GurobiMaster(MasterBackend):
         if theta_delta is None:
             return variables, base
         work = self._linear_coeffs_work
-        if work is None or work.shape != base.shape:
+        if work is None:
             work = np.array(base, dtype=np.float64, copy=True)
             self._linear_coeffs_work = work
         else:

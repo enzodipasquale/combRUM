@@ -59,28 +59,8 @@ def ids_validated(local_ids: object, n_global: int | None, what: str) -> np.ndar
     return ids
 
 
-def agent_owner_rank(agent_id: int, n_agents: int, size: int) -> int:
-    """Rank owning an agent under contiguous global-agent sharding."""
-    if n_agents <= 0:
-        raise ValueError(f"n_agents must be > 0; got {n_agents}")
-    if size <= 0:
-        raise ValueError(f"size must be > 0; got {size}")
-    agent = int(agent_id)
-    if agent < 0 or agent >= int(n_agents):
-        raise ValueError(f"agent_id must lie in [0, {n_agents}); got {agent_id}")
-    base, extra = divmod(int(n_agents), int(size))
-    front = (base + 1) * extra
-    if agent < front:
-        return agent // (base + 1)
-    return extra + (agent - front) // base
-
-
 def agent_owner_ranks(agent_ids: np.ndarray, n_agents: int, size: int) -> np.ndarray:
-    """Vector of :func:`agent_owner_rank` over in-range ``agent_ids``."""
-    if n_agents <= 0:
-        raise ValueError(f"n_agents must be > 0; got {n_agents}")
-    if size <= 0:
-        raise ValueError(f"size must be > 0; got {size}")
+    """Rank owning each in-range agent id under contiguous global-agent sharding."""
     base, extra = divmod(int(n_agents), int(size))
     ranks = np.arange(size, dtype=np.int64)
     starts = ranks * base + np.minimum(ranks, extra)
@@ -133,24 +113,6 @@ def route_agent_axis_validated(
     return int(n_agents), int(source)
 
 
-def route_local_ids_shape_validated(
-    local_ids: object,
-    *,
-    what: str,
-) -> np.ndarray:
-    if not isinstance(local_ids, np.ndarray):
-        raise ValueError(
-            f"{what}: local_ids must be a numpy ndarray; got {type(local_ids).__name__}"
-        )
-    ids = local_ids
-    if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
-        raise ValueError(
-            f"{what}: local_ids must be a 1-D integer array of global agent"
-            f" ids; got shape {ids.shape}, dtype {ids.dtype}"
-        )
-    return ids
-
-
 def route_local_ids_owned_validated(
     local_ids: object,
     *,
@@ -161,7 +123,16 @@ def route_local_ids_owned_validated(
 ) -> np.ndarray:
     """Validate that every supplied id belongs to ``rank``'s agent shard."""
 
-    ids = route_local_ids_shape_validated(local_ids, what=what)
+    if not isinstance(local_ids, np.ndarray):
+        raise ValueError(
+            f"{what}: local_ids must be a numpy ndarray; got {type(local_ids).__name__}"
+        )
+    ids = local_ids
+    if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
+        raise ValueError(
+            f"{what}: local_ids must be a 1-D integer array of global agent"
+            f" ids; got shape {ids.shape}, dtype {ids.dtype}"
+        )
     if ids.size:
         if int(ids.min()) < 0 or int(ids.max()) >= int(n_agents):
             raise ValueError(
@@ -200,7 +171,7 @@ def route_values_validated(
         return {}
     if values is None:
         raise ValueError(
-            f"{what}: source rank {source} must pass a mapping of values; got None"
+            f"{what}: source rank {source} must pass a mapping of values"
         )
     if not isinstance(values, Mapping):
         raise ValueError(

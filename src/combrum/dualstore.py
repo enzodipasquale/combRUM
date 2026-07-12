@@ -45,7 +45,7 @@ def _same_float_bits(a: Mapping[int, float], b: Mapping[int, float]) -> bool:
 def equal(a: DualSolution, b: DualSolution) -> bool:
     """Content-bitwise equality: dtype, shape, and raw bytes of every array
     and bound multiplier, plus ``rep_id`` (signed zeros differ; NaNs compare
-    by bit pattern). File bytes are not compared because zip metadata varies.
+    by bit pattern).
     """
     if a.rep_id != b.rep_id:
         return False
@@ -69,12 +69,10 @@ class DualStoreWriter:
     def write(self, dual: DualSolution) -> Path:
         """Persist one replication and return its final path.
 
-        Append-only: rewriting an existing ``rep_id`` raises. The payload
-        lands via ``os.replace`` from a ``.tmp`` sibling, so a torn write
-        cannot parse as a valid replication file.
-
-        Raises:
-            FileExistsError: if ``dual.rep_id`` already exists in the store.
+        Append-only: rewriting an existing ``rep_id`` raises
+        ``FileExistsError``. The payload lands via ``os.replace`` from a
+        ``.tmp`` sibling, so a torn write cannot parse as a valid
+        replication file.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._dir / _rep_filename(dual.rep_id)
@@ -122,7 +120,7 @@ class DualStoreReader:
         """All replication ids present, ascending."""
         if not self._dir.is_dir():
             # Raise rather than treat a missing/mistyped path as empty.
-            raise FileNotFoundError(f"dual store directory does not exist: {self._dir}")
+            raise FileNotFoundError(f"dual store directory {self._dir} does not exist")
         return tuple(
             sorted(
                 int(match.group(1))
@@ -135,7 +133,6 @@ class DualStoreReader:
         """Load one replication via the :class:`DualSolution` constructor.
 
         Raises:
-            FileNotFoundError: if no file for ``rep_id`` exists.
             ValueError: if the file is mislabeled or corrupt.
         """
         path = self._dir / _rep_filename(rep_id)
@@ -157,8 +154,8 @@ class DualStoreReader:
             # mismatched parallel arrays into a plausible-but-corrupt payload.
             if coords.ndim != 1 or values.ndim != 1:
                 raise ValueError(
-                    f"dual store file {path} is corrupt: bound_coords/"
-                    f"bound_values must be 1-D; got shapes"
+                    f"dual store file {path} is corrupt: expected 1-D"
+                    f" bound_coords/bound_values, got shapes"
                     f" {coords.shape}, {values.shape}"
                 )
             if coords.shape != values.shape:

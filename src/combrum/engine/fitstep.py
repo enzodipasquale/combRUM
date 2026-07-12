@@ -83,9 +83,7 @@ def reduce_contribution(
 ) -> tuple[Reduced, int, int]:
     """Reduce + exchange a contribution, dispatched on its concrete type.
 
-    Dispatches on the concrete :class:`~combrum.rowgen.Contribution` type so
-    the type checker forces a branch per reduction shape. Returns the
-    :class:`~combrum.rowgen.Reduced` plus this step's
+    Returns the :class:`~combrum.rowgen.Reduced` plus this step's
     ``(reduce_rounds, exchange_rounds)`` collective counts.
 
     * :class:`~combrum.rowgen.MaxContribution`: ``allreduce_max`` of the
@@ -101,14 +99,11 @@ def reduce_contribution(
         received = transport.exchange_cuts(contribution.local_rows, owners)
         return MaxReduced(global_worst=global_worst, received_rows=received), 1, 1
     if isinstance(contribution, SumContribution):
-        # sum_reproducible keyed on global id lands the aggregate
-        # bitwise-identical on every rank and at every rank count.
         aggregate = np.asarray(
             transport.sum_reproducible(contribution.terms, contribution.ids),
             dtype=np.float64,
         )
         return SumReduced(aggregate=aggregate), 1, 0
-    # Unhandled contribution type: raise rather than mis-reduce.
     raise AssertionError(
         f"unhandled contribution type: {type(contribution).__name__};"
         " the engine dispatches the reduce by concrete Contribution type"
@@ -140,15 +135,12 @@ def fit_step(
     ``demand_sink`` is an optional read-only observer called with the
     ``{id: Demand}`` mapping after pricing and before contribute. Read-only:
     it moves no wire and changes no reduction.
-
-    Returns the :class:`StepResult`.
     """
 
     def _price_and_contribute():
         demands: Mapping[int, Demand] = price_demands(
             price_resolution, theta, scheduled_local_ids
         )
-        # Rank-local tally off the priced demands; inexact iff gap > 0.
         n_priced = len(demands)
         gaps = getattr(demands, "gaps", None)
         if gaps is not None:

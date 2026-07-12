@@ -8,10 +8,6 @@ re-checked or aggregated after the producing master problem is gone.
 The parallel-array layout stores one bundle snapshot per payload
 (``bundle_table``) with each dual row holding an index into it, keeping
 the payload O(rows + table) rather than O(rows x M).
-
-``bound_duals`` lists exactly the coordinates at a box bound (an empty mapping
-means no theta coordinate is tight); it stores the box-bound reduced costs the
-master reported, for callers that re-check or aggregate them.
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ def _frozen(arr: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class CutDualRow:
-    """One lazily decoded cut-dual diagnostic row."""
+    """One cut-dual diagnostic row."""
 
     agent_id: int
     observation_id: int
@@ -49,7 +45,8 @@ class DualSolution:
     arrays: row ``r`` says agent ``agent_ids[r]`` puts dual mass
     ``pis[r]`` on bundle ``bundle_table[bundle_row_ids[r]]``. The table
     has shape ``(n_bundles, M)``. ``bound_duals`` maps theta coordinate
-    index -> bound reduced cost for the coordinates at a box bound.
+    index -> bound reduced cost for exactly the coordinates at a box
+    bound (empty when none is tight).
 
     All arrays are copied at construction and frozen read-only so the
     payload cannot alias caller memory. Point-estimate fits use ``rep_id == 0``;
@@ -79,27 +76,27 @@ class DualSolution:
         ):
             if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
                 raise ValueError(
-                    f"{name} must be a 1-D integer array;"
+                    f"expected a 1-D integer array for {name},"
                     f" got shape {arr.shape}, dtype {arr.dtype}"
                 )
         if agent_ids.size and int(agent_ids.min()) < 0:
             raise ValueError(
-                f"agent_ids must be >= 0; got {agent_ids[agent_ids < 0].tolist()}"
+                f"agent_ids must be >= 0, got {agent_ids[agent_ids < 0].tolist()}"
             )
 
         pis = np.array(self.pis, dtype=np.float64)
         if pis.ndim != 1:
-            raise ValueError(f"pis must be a 1-D array; got shape {pis.shape}")
+            raise ValueError(f"expected a 1-D pis array, got shape {pis.shape}")
         if not (agent_ids.shape == bundle_row_ids.shape == pis.shape):
             raise ValueError(
                 "agent_ids, bundle_row_ids, pis must be parallel arrays"
-                " with one entry per dual row;"
+                " with one entry per dual row,"
                 f" got shapes {agent_ids.shape}, {bundle_row_ids.shape},"
                 f" {pis.shape}"
             )
         if not np.isfinite(pis).all():
             raise ValueError(
-                f"pis must be finite; got {pis[~np.isfinite(pis)].tolist()}"
+                f"pis must be finite, got {pis[~np.isfinite(pis)].tolist()}"
             )
 
         # dtype preserved (bool/int8/... tables are legal); re-encoding
@@ -107,7 +104,7 @@ class DualSolution:
         bundle_table = np.array(self.bundle_table)
         if bundle_table.ndim != 2:
             raise ValueError(
-                "bundle_table must be 2-D (n_bundles, M);"
+                "expected a 2-D (n_bundles, M) bundle_table,"
                 f" got shape {bundle_table.shape}"
             )
         n_bundles = bundle_table.shape[0]
@@ -115,7 +112,7 @@ class DualSolution:
         if out_of_range.any():
             raise ValueError(
                 f"bundle_row_ids must index bundle_table rows in"
-                f" [0, {n_bundles}); got {bundle_row_ids[out_of_range].tolist()}"
+                f" [0, {n_bundles}), got {bundle_row_ids[out_of_range].tolist()}"
             )
 
         # Normalized copy (keys to int, values to float) so the caller's
@@ -126,11 +123,11 @@ class DualSolution:
             if coord < 0:
                 raise ValueError(
                     "bound_duals keys are theta coordinate indices and"
-                    f" must be >= 0; got {key!r}"
+                    f" must be >= 0, got {key}"
                 )
             bound = float(value)
             if not math.isfinite(bound):
-                raise ValueError(f"bound_duals[{coord}] must be finite; got {value!r}")
+                raise ValueError(f"bound_duals[{coord}] must be finite, got {value!r}")
             bound_duals[coord] = bound
 
         object.__setattr__(self, "agent_ids", _frozen(agent_ids))
@@ -191,10 +188,10 @@ class DualSolution:
             n = operator.index(n_obs)
         except TypeError as exc:
             raise ValueError(
-                f"n_obs must be an integer greater than zero; got {n_obs!r}"
+                f"n_obs must be a positive integer, got {n_obs!r}"
             ) from exc
         if n < 1:
-            raise ValueError(f"n_obs must be greater than zero; got {n}")
+            raise ValueError(f"n_obs must be positive, got {n}")
 
         def _iter_rows() -> Iterator[CutDualRow]:
             for agent_id, bundle_row_id, pi in zip(

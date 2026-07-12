@@ -32,7 +32,7 @@ def _restore_readonly(obj: object, names: tuple[str, ...]) -> None:
 def _certification_from_metadata(value: object) -> Certification:
     if not isinstance(value, dict):
         raise ValueError(
-            f"certification metadata must be a dict; got {type(value).__name__}"
+            f"certification metadata must be a dict (got {type(value).__name__})"
         )
     unknown = bool(value.get("worst_gap_unknown", False))
     worst = np.inf if unknown else float(value.get("worst_gap", 0.0))
@@ -70,9 +70,7 @@ def _merge_certifications(
     ]
     n_priced = sum(cert.n_priced for cert in certifications)
     n_inexact = sum(cert.n_inexact for cert in certifications)
-    worst_gap = (
-        0.0 if n_inexact == 0 else max(cert.worst_gap for cert in certifications)
-    )
+    worst_gap = max(cert.worst_gap for cert in certifications)
     return _certification_metadata(
         Certification(
             n_priced=n_priced,
@@ -89,8 +87,8 @@ class FitResult:
     ``theta_hat`` and ``empirical_moment`` are length-``K`` vectors aligned with
     ``parameters``; ``empirical_moment`` is the observed-data moment. ``slack``
     is the per-agent slack vector, ``None`` unless the fit requested it.
-    ``run_info``, ``cuts``, and ``cut_duals`` carry optional provenance and are
-    excluded from :meth:`to_dict`; ``cuts`` can seed a warm start.
+    ``run_info``, ``cuts``, and ``cut_duals`` carry optional provenance;
+    ``cuts`` can seed a warm start.
     """
 
     theta_hat: np.ndarray
@@ -101,8 +99,6 @@ class FitResult:
     parameters: Parameters
     slack: np.ndarray | None = None
     metadata: dict[str, object] = field(default_factory=dict)
-    # The three trailing fields are excluded from to_dict so serialised
-    # output stays stable. cuts can be threaded back into a warm start.
     run_info: RunMetadata | None = None
     cuts: Sequence[CutRow] | None = None
     cut_duals: DualSolution | None = None
@@ -112,7 +108,7 @@ class FitResult:
         theta_hat = np.asarray(self.theta_hat, dtype=np.float64)
         if theta_hat.shape != (K,):
             raise ValueError(
-                f"theta_hat must have shape (K,) = ({K},); got {theta_hat.shape}"
+                f"expected theta_hat of shape (K,) = ({K},), got {theta_hat.shape}"
             )
         if np.any(~np.isfinite(theta_hat)):
             raise ValueError("theta_hat must be finite")
@@ -121,7 +117,7 @@ class FitResult:
         empirical_moment = np.asarray(self.empirical_moment, dtype=np.float64)
         if empirical_moment.shape != (K,):
             raise ValueError(
-                f"empirical_moment must have shape (K,) = ({K},);"
+                f"expected empirical_moment of shape (K,) = ({K},),"
                 f" got {empirical_moment.shape}"
             )
         if np.any(~np.isfinite(empirical_moment)):
@@ -173,10 +169,7 @@ class FitResult:
                 " this FitResult was built with slack=None"
             )
         if self.slack.size == 0:
-            raise ValueError(
-                "slack_summary requires a nonempty slack vector;"
-                f" got shape {self.slack.shape}"
-            )
+            raise ValueError("slack_summary requires a nonempty slack vector")
         return {
             "total_slack": float(self.slack.sum()),
             "mean_slack": float(self.slack.mean()),
@@ -218,12 +211,12 @@ class BootstrapResult:
         thetas = np.asarray(self.thetas, dtype=np.float64)
         if thetas.ndim != 2 or thetas.shape[1] != K:
             raise ValueError(
-                f"thetas must have shape (B, K) = (B, {K}); got {thetas.shape}"
+                f"expected thetas of shape (B, K) = (B, {K}), got {thetas.shape}"
             )
         B = thetas.shape[0]
         if B < 1:
             raise ValueError(
-                f"B must be >= 1 replication; got thetas shape {thetas.shape}"
+                f"B must be >= 1 replication (got thetas of shape {thetas.shape})"
             )
         if np.any(~np.isfinite(thetas)):
             raise ValueError("thetas must be finite")
@@ -232,7 +225,7 @@ class BootstrapResult:
         converged = np.asarray(self.converged, dtype=bool)
         if converged.shape != (B,):
             raise ValueError(
-                f"converged must have shape (B,) = ({B},); got {converged.shape}"
+                f"expected converged of shape (B,) = ({B},), got {converged.shape}"
             )
         object.__setattr__(self, "converged", _readonly(converged))
 
@@ -240,7 +233,7 @@ class BootstrapResult:
             u_samples = np.asarray(self.u_samples)
             if u_samples.ndim < 1 or u_samples.shape[0] != B:
                 raise ValueError(
-                    f"u_samples must have leading dimension B = {B};"
+                    f"expected u_samples with leading dimension B = {B},"
                     f" got shape {u_samples.shape}"
                 )
             object.__setattr__(self, "u_samples", _readonly(u_samples))
@@ -365,9 +358,7 @@ class BootstrapResult:
         """
         results = tuple(results)
         if not results:
-            raise ValueError(
-                "concat requires at least one BootstrapResult; got an empty sequence"
-            )
+            raise ValueError("concat requires at least one BootstrapResult")
         first = results[0]
         for other in results[1:]:
             if other.parameters != first.parameters:

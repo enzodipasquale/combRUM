@@ -16,10 +16,6 @@ def pack_bundle(bundle: np.ndarray) -> bytes:
 
     arr = np.ascontiguousarray(bundle)
     dtype = arr.dtype.str.encode("ascii")
-    if len(dtype) > np.iinfo(np.uint16).max:
-        raise ValueError(f"bundle dtype tag is too long: {arr.dtype.str!r}")
-    if arr.ndim > np.iinfo(np.uint16).max:
-        raise ValueError(f"bundle has too many dimensions: {arr.ndim}")
     shape = np.asarray(arr.shape, dtype="<i8")
     return _HEADER.pack(_MAGIC, len(dtype), arr.ndim) + dtype + shape.tobytes() + arr.tobytes()
 
@@ -34,8 +30,6 @@ def pack_bundles(bundles: np.ndarray) -> list[bytes]:
     if arr.ndim != 2:
         return [pack_bundle(bundle) for bundle in arr]
     dtype = arr.dtype.str.encode("ascii")
-    if len(dtype) > np.iinfo(np.uint16).max:
-        raise ValueError(f"bundle dtype tag is too long: {arr.dtype.str!r}")
     prefix = (
         _HEADER.pack(_MAGIC, len(dtype), 1)
         + dtype
@@ -103,7 +97,7 @@ def _parse_packed(key: bytes) -> tuple[np.dtype, tuple[int, ...], int]:
     dtype = _dtype_from_tag(key[_HEADER.size : dtype_end])
     shape = _shape_struct(int(ndim)).unpack_from(key, dtype_end)
     if any(dim < 0 for dim in shape):
-        raise ValueError(f"bundle_key shape must be nonnegative; got {shape}")
+        raise ValueError(f"negative dimension in bundle_key shape {shape}")
     expected = math.prod(shape) * int(dtype.itemsize)
     if len(key) - shape_end != expected:
         raise ValueError(

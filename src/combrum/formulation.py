@@ -23,6 +23,44 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _staged_penalty(
+    ref: np.ndarray, weight: float, K: int
+) -> tuple[np.ndarray, float]:
+    """Validate a proximal ``(ref, weight)`` pair for staging.
+
+    Returns a frozen copy of ``ref``, detached from caller memory so a
+    later mutation cannot leak into an already-staged solve.
+    """
+    ref_arr = np.asarray(ref, dtype=np.float64)
+    if ref_arr.shape != (K,):
+        raise ValueError(f"expected ref of shape ({K},), got shape {ref_arr.shape}")
+    weight_value = float(weight)
+    if not np.isfinite(weight_value):
+        raise ValueError(f"expected finite weight, got {weight!r}")
+    staged_ref = _readonly(np.array(ref_arr, dtype=np.float64, copy=True))
+    return staged_ref, weight_value
+
+
+def _require_owner_master(
+    master: object, required: type, formulation: str
+) -> None:
+    """Owner-rank check that a usable master backend was supplied.
+
+    ``required`` (the backend base class) rides in as an argument: this
+    module deliberately has no import edge to the master layer.
+    """
+    if master is None:
+        raise ValueError(
+            f"{formulation} is master-based by definition:"
+            " ctx.master_backend must be set on the owner rank"
+        )
+    if not isinstance(master, required):
+        raise ValueError(
+            f"ctx.master_backend does not implement {required.__name__}"
+            f" (got {type(master).__name__})"
+        )
+
+
 @dataclass(frozen=True)
 class Evaluation:
     """One iteration's evaluated step: progress measure plus method state.
@@ -51,14 +89,10 @@ class Evaluation:
 class FormulationResult:
     """The answer a formulation publishes.
 
-    ``theta_hat`` (the method's published final estimate) and ``objective``
-    are required; both are positional so a method cannot silently fall back
-    to a last iterate.
-
-    ``n_active_cuts`` counts cuts active in the answer; ``0`` is valid.
-    ``slack``, ``active_set``, and ``dual`` are optional (``None`` when a
-    method has none); ``active_set`` and ``dual`` are method-owned opaque
-    types. ``metadata`` carries method-owned diagnostics opaquely.
+    ``theta_hat`` and ``objective`` are positional so a method cannot
+    silently fall back to a last iterate. ``n_active_cuts`` counts cuts
+    active in the answer; ``0`` is valid. ``active_set``, ``dual``, and
+    ``metadata`` are method-owned and opaque to the caller.
     """
 
     theta_hat: np.ndarray
@@ -73,7 +107,7 @@ class FormulationResult:
         theta_hat = np.asarray(self.theta_hat, dtype=np.float64)
         if theta_hat.ndim != 1:
             raise ValueError(
-                f"theta_hat must be one-dimensional (K,); got shape {theta_hat.shape}"
+                f"expected one-dimensional (K,) theta_hat, got shape {theta_hat.shape}"
             )
         if np.any(~np.isfinite(theta_hat)):
             raise ValueError("theta_hat must be finite")
@@ -120,8 +154,7 @@ class Formulation(ABC):
     def evaluate(self, demands: Mapping[int, Demand]) -> Evaluation:
         """Fold the subproblems priced at the current theta into progress.
 
-        Keys are GLOBAL agent ids. Returns the method's progress measure
-        mapped onto the generic :class:`Evaluation` distance.
+        Keys are GLOBAL agent ids.
         """
 
     @abstractmethod
@@ -137,7 +170,7 @@ class Formulation(ABC):
 
     @abstractmethod
     def result(self) -> FormulationResult:
-        """The published answer; the caller's source for the final estimate."""
+        """The published answer."""
 
     def dispose(self) -> None:
         """Release method-held resources; default no-op."""

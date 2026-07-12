@@ -44,15 +44,9 @@ def _resolve_master_backend_local(
     *,
     require_quadratic: bool = False,
 ) -> str:
-    _validate_backend_name(requested)
-
     if requested == "gurobi":
         return "gurobi"
     if requested == "highs":
-        if require_quadratic:
-            raise RuntimeError(
-                "master backend 'highs' does not support quadratic penalties"
-            )
         return "highs"
 
     import combrum.masters.gurobi as gurobi
@@ -86,7 +80,7 @@ def _normalize_owner_ranks(
     for rank in ranks:
         r = int(rank)
         if not 0 <= r < size:
-            raise ValueError(f"owner rank must lie in [0, {size}); got {rank}")
+            raise ValueError(f"invalid owner rank {rank}: must lie in [0, {size})")
         if r not in normalized:
             normalized.append(r)
     return tuple(normalized)
@@ -97,8 +91,6 @@ def _unavailable_flags(
     *,
     require_quadratic: bool,
 ) -> np.ndarray:
-    _validate_backend_name(requested)
-
     unavailable = np.zeros(2, dtype=np.float64)
     if requested == "gurobi":
         import combrum.masters.gurobi as gurobi
@@ -106,10 +98,6 @@ def _unavailable_flags(
         unavailable[0] = 0.0 if gurobi.available() else 1.0
         return unavailable
     if requested == "highs":
-        if require_quadratic:
-            raise RuntimeError(
-                "master backend 'highs' does not support quadratic penalties"
-            )
         import combrum.masters.highs as highs
 
         unavailable[1] = 0.0 if highs.available() else 1.0
@@ -131,7 +119,6 @@ def _choose_from_unavailable(
     *,
     require_quadratic: bool,
 ) -> str:
-    _validate_backend_name(requested)
     gurobi_unavailable = bool(unavailable[0] > 0.0)
     highs_unavailable = bool(unavailable[1] > 0.0)
 
@@ -142,10 +129,6 @@ def _choose_from_unavailable(
             )
         return "gurobi"
     if requested == "highs":
-        if require_quadratic:
-            raise RuntimeError(
-                "master backend 'highs' does not support quadratic penalties"
-            )
         if highs_unavailable:
             raise RuntimeError(
                 "master backend 'highs' is not available on every owner rank"
@@ -181,6 +164,13 @@ def resolve_master_backend(
     every rank derives the same concrete backend from the owner intersection.
     Serial calls keep the original exception types by resolving locally.
     """
+    _validate_backend_name(requested)
+    # highs cannot host quadratic penalties regardless of availability, so
+    # reject up front — identically on every rank, before any collective.
+    if requested == "highs" and require_quadratic:
+        raise RuntimeError(
+            "master backend 'highs' does not support quadratic penalties"
+        )
     if transport is None or transport.size == 1:
         return _resolve_master_backend_local(
             requested, require_quadratic=require_quadratic
@@ -258,8 +248,7 @@ def make_master(
     Available means the solver package imports and an environment
     actually starts; an installed gurobipy whose license cannot start
     an environment reads as unavailable, so auto falls through to a
-    backend that can actually solve. An unknown name raises
-    :class:`ValueError` naming the valid set.
+    backend that can actually solve.
 
     ``n_agents`` pre-declares that many slack (epigraph) columns up front for
     a fixed, deterministic column structure; ``None`` adds each agent's column
@@ -271,9 +260,6 @@ def make_master(
     environment.
     """
     _validate_backend_name(backend)
-    # "auto" picks the first available solver (gurobi, then highs); reuse the
-    # same resolver the distributed path uses. Import a solver only on the
-    # branch that builds it, so importing combrum.masters never loads one.
     if backend == "auto":
         backend = _resolve_master_backend_local(backend)
     if backend == "gurobi":

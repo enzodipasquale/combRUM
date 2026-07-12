@@ -75,10 +75,6 @@ pytestmark = [
 
 
 # --- the walk pair: per-agent features vs batched features -------------------
-#
-# _with_features rebuilds a FamilyProblem swapping only the feature map;
-# _walk_pair runs the per-agent and batch-only walks over identical
-# arrays/formulation/backend so any row difference is the features path alone.
 
 
 def _with_features(problem: FamilyProblem, features: object) -> FamilyProblem:

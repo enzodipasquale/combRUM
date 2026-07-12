@@ -1094,14 +1094,14 @@ def test_bootstrap_replicas_receive_warm_start_and_isolated_policy(monkeypatch) 
 
     def fake_build(rep_id, **kwargs):
         records.append(
-                {
-                    "rep_id": rep_id,
-                    "theta_writeable": kwargs["theta_init"].flags.writeable,
-                    "theta_init": np.asarray(kwargs["theta_init"]).copy(),
-                    "warm_cuts": kwargs["warm_cuts"],
-                    "policy": kwargs["cut_policy"],
-                }
-            )
+            {
+                "rep_id": rep_id,
+                "theta_writeable": kwargs["theta_init"].flags.writeable,
+                "theta_init": np.asarray(kwargs["theta_init"]).copy(),
+                "warm_cuts": kwargs["warm_cuts"],
+                "policy": kwargs["cut_policy"],
+            }
+        )
         return _fake_replica(rep_id, kwargs["prep"])
 
     bd = importlib.import_module("combrum.bootstrap_distributed")

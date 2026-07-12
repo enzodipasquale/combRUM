@@ -21,6 +21,7 @@ the aggregate fields.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import hashlib
 import struct
 
 import numpy as np
@@ -1180,9 +1181,6 @@ def _gate_nslack_admit_subset(arrays, problem, batch_only_map, backend) -> None:
         arrays, problem, problem.features, backend
     )
     _assert_nslack_records_exercised(per_agent.step_records)
-    # The captured admitted set must equal the reconstruction (violation >
-    # epsilon over the received rows), with at least one iteration admitting
-    # a strict subset of the candidates.
     _assert_admitted_field_witness(
         per_agent.step_records,
         theta_snapshots,
@@ -1395,8 +1393,6 @@ def _assert_aggregate_field_witness(
     test-side over the reconstructed row — never read back from the record.
     At least one non-zero raw is required.
     """
-    import hashlib
-
     K = arrays_K(arrays)
     checked = 0
     for r in records:
@@ -1925,7 +1921,6 @@ def _it0_feature_phi(records, agent_id: int) -> bytes | None:
 def test_perturbation_phi_value_nslack_rejects_divergence(backend) -> None:
     toy = load_toy()
     problem = toy_problem(toy)
-    # The clean batched path passes the comparator before perturbation.
     clean = _nslack_records(toy, problem, toy_feature_map_batch_only(toy), backend)
     reference = _nslack_records(toy, problem, problem.features, backend)
     _assert_records_equivalent(reference, clean)
@@ -2025,7 +2020,6 @@ def _with_oracle(problem: FamilyProblem, oracle: object) -> FamilyProblem:
 def test_perturbation_price_payoff_oneslack_rejects_divergence(backend) -> None:
     toy = load_toy()
     problem = toy_problem(toy)
-    # The clean (unperturbed-oracle) batched path must pass first.
     reference = _oneslack_records(toy, problem, problem.features, backend)
     _assert_records_equivalent(
         reference, _oneslack_records(toy, problem, toy_feature_map_batch_only(toy), backend)
@@ -2138,7 +2132,6 @@ def test_perturbation_install_gate_oneslack_rejects_divergence(backend) -> None:
 def test_perturbation_schedule_concentration_rejects_divergence(backend) -> None:
     toy = load_toy()
     problem = toy_problem(toy)
-    # The clean batched schedule stream passes before the perturbed path is tried.
     reference = _nslack_schedule_walk(
         toy, problem, problem.features, backend, SerialTransport()
     ).schedule_concentrations
@@ -2147,7 +2140,6 @@ def test_perturbation_schedule_concentration_rejects_divergence(backend) -> None
         toy, problem, toy_feature_map_batch_only(toy), backend, SerialTransport()
     ).schedule_concentrations
     _assert_schedule_equivalent(reference, clean)
-    # The perturbation: the schedule comparator must fail.
     perturbed = _nslack_schedule_walk(
         toy, problem, toy_schedule_perturbation(toy), backend, SerialTransport()
     ).schedule_concentrations

@@ -329,10 +329,7 @@ def test_sum_and_gather_reject_bad_shapes_before_collectives(
         outcomes = rec["outcomes"]
         assert "global_ids must be a 1-D integer array" in outcomes["sum_float_ids"]
         assert "values must have shape (n,) or (n, M)" in outcomes["sum_3d_values"]
-        assert (
-            "global_ids must be a 1-D integer array"
-            in outcomes["gather_float_ids"]
-        )
+        assert "expected 1-D integer global_ids" in outcomes["gather_float_ids"]
         assert rec["counters"] == {}
 
 

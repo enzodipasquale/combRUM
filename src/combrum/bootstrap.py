@@ -52,11 +52,6 @@ class NativeDraws:
 
     Each replication's weights are exponential(1) multipliers normalised so the
     row sums to ``n_obs``. ``base_seed`` makes the stream reproducible.
-
-    Example::
-
-        weights = NativeDraws(n_obs=N, base_seed=42)
-        boot = bootstrap(model, data, n_bootstrap=500, weights=weights)
     """
 
     n_obs: int
@@ -65,15 +60,14 @@ class NativeDraws:
     def __post_init__(self) -> None:
         n_obs = operator.index(self.n_obs)
         if n_obs < 1:
-            raise ValueError(f"n_obs must be >= 1; got {self.n_obs!r}")
+            raise ValueError(f"n_obs must be a positive int (got {self.n_obs!r})")
         base = operator.index(self.base_seed)
         if base < 0:
-            raise ValueError(f"base_seed must be >= 0; got {self.base_seed!r}")
+            raise ValueError(f"base_seed must be a nonnegative int (got {self.base_seed!r})")
         object.__setattr__(self, "n_obs", n_obs)
         object.__setattr__(self, "base_seed", base)
 
     def weights_for(self, rep_id: int) -> np.ndarray:
-        """Replication ``rep_id``'s ``(n_obs,)`` multiplier weights."""
         return multiplier_weights(self.n_obs, self.base_seed, rep_id)
 
 
@@ -89,15 +83,15 @@ def _weight_source_seed(weights: object) -> int | None:
 
 def _validate_n_bootstrap(value: object) -> int:
     if isinstance(value, (bool, np.bool_)):
-        raise TypeError("n_bootstrap must be an integer >= 1; got bool")
+        raise TypeError("n_bootstrap must be a positive int, not bool")
     try:
         out = int(operator.index(value))
     except TypeError as exc:
         raise TypeError(
-            f"n_bootstrap must be an integer >= 1; got {type(value).__name__}"
+            f"n_bootstrap must be a positive int, not {type(value).__name__}"
         ) from exc
     if out < 1:
-        raise ValueError(f"n_bootstrap must be >= 1; got {value!r}")
+        raise ValueError(f"n_bootstrap must be a positive int (got {value!r})")
     return out
 
 
@@ -132,7 +126,7 @@ def bootstrap(
     reinstalled onto each replication's fresh master before its first solve
     (typically the point estimate and its active set). Warm replications
     usually converge in far fewer iterations but walk a different cut path
-    than cold ones; the defaults keep every replication cold.
+    than cold ones.
 
     :class:`NativeDraws` and the distributed
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed` use different
@@ -141,7 +135,7 @@ def bootstrap(
 
     When ``dual_store_dir`` is given, duals stream to that directory one at a
     time and ``BootstrapResult.duals`` stays ``None``. ``activity`` surfaces
-    root-only progress; omitting it (default ``None``) builds no sinks.
+    root-only progress; omitting it builds no sinks.
 
     Returns a :class:`~combrum.result.BootstrapResult` with ``thetas`` of shape
     ``(n_bootstrap, K)`` and a convergence mask.
@@ -163,9 +157,6 @@ def bootstrap(
     features = model.features
     observed_features = model.observed_features
 
-    def formulation_factory():
-        return model.formulation(model.features)
-
     observed_bundles = data.observed_bundles
     shocks = data.shocks
     observables = data.observables
@@ -180,13 +171,13 @@ def bootstrap(
     shocks = np.asarray(shocks)
     if observed_bundles.ndim != 2 or observed_bundles.shape[0] != n_obs:
         raise ValueError(
-            "observed_bundles must be 2-D (N, M) with N = len(observables) ="
-            f" {n_obs}; got shape {observed_bundles.shape}"
+            "expected observed_bundles of shape (N, M) with N ="
+            f" len(observables) = {n_obs}, got shape {observed_bundles.shape}"
         )
     if shocks.ndim < 2 or shocks.shape[0] != n_obs:
         raise ValueError(
-            "shocks must have shape (N, S, ...) with N ="
-            f" {n_obs}; got shape {shocks.shape}"
+            f"expected shocks of shape (N, S, ...) with N = {n_obs},"
+            f" got shape {shocks.shape}"
         )
     n_simulations = int(shocks.shape[1])
     n_agents = n_obs * n_simulations
@@ -252,7 +243,7 @@ def bootstrap(
             for b in range(n_bootstrap):
                 rep_t0 = perf_counter() if log_details else None
                 weights_b = np.asarray(weights.weights_for(b), dtype=np.float64)
-                formulation = formulation_factory()
+                formulation = model.formulation(model.features)
                 built = build_fit_context(
                     parameters,
                     observables=observables,

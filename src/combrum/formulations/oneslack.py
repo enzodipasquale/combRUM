@@ -35,7 +35,13 @@ import numpy as np
 
 from combrum.context import FitContext
 from combrum.demand import Demand
-from combrum.formulation import Evaluation, Formulation, FormulationResult
+from combrum.formulation import (
+    Evaluation,
+    Formulation,
+    FormulationResult,
+    _require_owner_master,
+    _staged_penalty,
+)
 from combrum.interface_resolution import (
     FeatureMap,
     Mode,
@@ -100,8 +106,7 @@ class OneSlack(Formulation):
     The master lives only on the owner rank (``ctx.owner_rank``, default 0;
     ``ctx.master_backend``; ``None`` elsewhere); every touch happens
     owner-guarded inside a transport collective, followed by one broadcast of
-    the full decision state. Each iteration ships at most one row, so
-    ``ctx.cut_policy`` is not consulted.
+    the full decision state.
     """
 
     def __init__(self, features: FeatureMap | Callable[..., Any]) -> None:
@@ -109,26 +114,13 @@ class OneSlack(Formulation):
         # the mode is resolved at setup (it needs the transport for rank
         # agreement).
         self._features_arg = features
-        # Optional capture sink, attached via set_trace_sink. Every capture
-        # block guards on `self._trace_sink is not None`, so the no-sink path
-        # builds no record.
         self._trace_sink: TraceSink | None = None
         self._pending: _Pending | None = None
         self._iteration = 0
 
     def prepare_penalty_solve(self, ref: np.ndarray, weight: float) -> None:
         """Stage the next proximal objective change for ``apply_step``."""
-        ref_arr = np.asarray(ref, dtype=np.float64)
-        if ref_arr.shape != (self._ctx.K,):
-            raise ValueError(
-                f"ref must have shape ({self._ctx.K},); got {ref_arr.shape}"
-            )
-        weight_value = float(weight)
-        if not np.isfinite(weight_value):
-            raise ValueError(f"weight must be finite; got {weight!r}")
-        staged_ref = np.array(ref_arr, dtype=np.float64, copy=True)
-        staged_ref.setflags(write=False)
-        self._pending_penalty = (staged_ref, weight_value)
+        self._pending_penalty = _staged_penalty(ref, weight, self._ctx.K)
 
     def set_trace_sink(self, sink: TraceSink | None) -> None:
         """Attach (or detach) the capture sink; default is detached.
@@ -142,9 +134,8 @@ class OneSlack(Formulation):
     def setup(self, ctx: FitContext) -> None:
         self._ctx = ctx
         self._transport = ctx.transport
-        # The master is hosted on ctx.owner_rank; this rank holds it iff it
-        # is the owner. Every master touch + bcast uses owner_rank, so a
-        # non-root owner hosts its master without a forked path.
+        # Every master touch + bcast uses owner_rank, so a non-root owner
+        # hosts its master without a forked path.
         self._owner_rank = ctx.owner_rank
         self._is_owner = ctx.transport.rank == self._owner_rank
         self._master: MasterBackend | None = ctx.master_backend
@@ -166,16 +157,7 @@ class OneSlack(Formulation):
         # agreed verdict on every rank instead of stranding peers in the bcast.
         with self._transport.collective():
             if self._is_owner:
-                if self._master is None:
-                    raise ValueError(
-                        "OneSlack is master-based by definition:"
-                        " ctx.master_backend must be set on the owner rank"
-                    )
-                if not isinstance(self._master, MasterBackend):
-                    raise ValueError(
-                        "ctx.master_backend must implement MasterBackend;"
-                        f" got {type(self._master).__name__}"
-                    )
+                _require_owner_master(self._master, MasterBackend, "OneSlack")
                 # theta_init is deliberately not a first query point: the
                 # empty relaxation determines its own optimum, and a query
                 # that is no master solution would report a violation
@@ -381,7 +363,6 @@ class OneSlack(Formulation):
         return state.progressed
 
     def evaluate(self, demands: Mapping[int, Demand]) -> Evaluation:
-        # Bundled path: contribute, SUM-reduce, finalise.
         c = self.contribute(demands)
         agg = np.asarray(
             self._transport.sum_reproducible(c.terms, c.ids),
@@ -436,9 +417,7 @@ class OneSlack(Formulation):
 
     def result(self) -> FormulationResult:
         # All published values were mirrored at the last update, so the answer
-        # is identical on every rank with no further communication. Per-agent
-        # optionals are None: this method holds no per-agent slack, cut set, or
-        # dual to publish.
+        # is identical on every rank with no further communication.
         return FormulationResult(
             theta_hat=self._theta,
             objective=self._objective,

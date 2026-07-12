@@ -116,7 +116,7 @@ def test_round_robin_rank_local_zero_communication() -> None:
 
 def test_round_robin_chunks_validation() -> None:
     for bad in (0, -2, 1.5):
-        with pytest.raises(ValueError, match="chunks must be an integer >= 1"):
+        with pytest.raises(ValueError, match="chunks must be a positive integer"):
             RoundRobin(bad)  # type: ignore[arg-type]
     assert RoundRobin(np.int64(2)).select(0, 4).sum() == 2
 

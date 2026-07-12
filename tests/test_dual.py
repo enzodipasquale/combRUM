@@ -84,16 +84,18 @@ def test_float_rep_id_rejected_not_truncated() -> None:
 
 def test_non_integer_id_arrays_rejected() -> None:
     # Integer dtype is required, not coerced: float ids would truncate silently.
-    with pytest.raises(ValueError, match="agent_ids must be a 1-D integer"):
+    with pytest.raises(ValueError, match="expected a 1-D integer array for agent_ids"):
         make_dual(agent_ids=np.array([0.0, 1.0, 1.0]))
-    with pytest.raises(ValueError, match="bundle_row_ids must be a 1-D integer"):
+    with pytest.raises(
+        ValueError, match="expected a 1-D integer array for bundle_row_ids"
+    ):
         make_dual(bundle_row_ids=np.array([0.0, 1.0, 0.0]))
 
 
 def test_bundle_table_must_be_2d() -> None:
-    with pytest.raises(ValueError, match=r"bundle_table must be 2-D"):
+    with pytest.raises(ValueError, match=r"expected a 2-D \(n_bundles, M\) bundle_table"):
         make_dual(bundle_table=np.zeros(4))
-    with pytest.raises(ValueError, match=r"bundle_table must be 2-D"):
+    with pytest.raises(ValueError, match=r"expected a 2-D \(n_bundles, M\) bundle_table"):
         make_dual(bundle_table=np.zeros((2, 2, 2)))
 
 

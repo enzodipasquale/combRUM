@@ -29,20 +29,10 @@ import numpy as np
 from combrum.reductions import canonical_sum, canonical_sum_window_rows
 from combrum.transport._common import (
     agent_owner_ranks as _agent_owner_ranks,
-)
-from combrum.transport._common import (
     ids_validated as _ids_validated,
-)
-from combrum.transport._common import (
     route_agent_axis_validated as _route_agent_axis_validated,
-)
-from combrum.transport._common import (
     route_local_ids_owned_validated as _route_local_ids_owned_validated,
-)
-from combrum.transport._common import (
     route_values_validated as _route_values_validated,
-)
-from combrum.transport._common import (
     scatter_arrays_validated as _scatter_arrays_validated,
 )
 from combrum.transport.base import (
@@ -65,7 +55,6 @@ _T = TypeVar("_T")
 
 
 def _mpi() -> Any:
-    """Import mpi4py on first use and return its ``MPI`` namespace."""
     try:
         from mpi4py import MPI
     except ImportError as exc:
@@ -301,20 +290,44 @@ def _scatter_verdict(
         return {}, ("error", str(exc))
 
 
-def _node_arrays_validated(arrays: object) -> dict[str, np.ndarray]:
-    """Publisher-side validation.
+def _owners_validated(
+    owners: object, size: int, *, what: str
+) -> tuple[np.ndarray, str | None]:
+    """Canonical int64 owners plus an error message (``None`` when valid).
 
-    Returns ``asarray`` views, not copies: the single publish copy
-    happens straight into the shared window, with no staging duplicate.
+    The verdict comes back as data rather than a raise: callers sit on
+    agree-before-raise paths and must carry the message into their election
+    lanes so every rank raises together.
+    """
+    arr = np.asarray(owners)
+    if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+        return np.empty(0, dtype=np.int64), (
+            f"{what}: owners must be a 1-D integer array of ranks,"
+            f" got shape {arr.shape}, dtype {arr.dtype}"
+        )
+    canon = np.ascontiguousarray(arr, dtype=np.int64)
+    if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= size):
+        return canon, (
+            f"{what}: owners must lie in [0, size) = [0, {size}),"
+            f" got range [{int(canon.min())}, {int(canon.max())}]"
+        )
+    return canon, None
+
+
+def _node_arrays_validated(arrays: object) -> dict[str, np.ndarray]:
+    """Validate and stage ``asarray`` views, not copies: the single publish
+    copy happens straight into the shared window, with no staging duplicate.
     """
     if not isinstance(arrays, dict):
         raise ValueError(
-            "node_shared: the publishing rank must pass a dict of arrays;"
+            "node_shared: the publishing rank must pass a dict of arrays,"
             f" got {type(arrays).__name__}"
         )
     staged: dict[str, np.ndarray] = {}
     for key, value in arrays.items():
         if not isinstance(key, str):
+            # Text must match reference.py's node_shared validator: the MPI
+            # conformance battery compares the captured message across backends.
             raise ValueError(f"node_shared: array keys must be str; got {key!r}")
         arr = np.asarray(value)
         if arr.dtype == object:
@@ -368,7 +381,7 @@ class MpiTransport(Transport):
         mpi = _mpi()
         if scatter_chunk_bytes < 1:
             raise ValueError(
-                f"scatter_chunk_bytes must be >= 1; got {scatter_chunk_bytes}"
+                f"scatter_chunk_bytes must be >= 1 (got {scatter_chunk_bytes})"
             )
         self._mpi: Any = mpi
         self._comm: Intracomm = mpi.COMM_WORLD if comm is None else comm
@@ -814,30 +827,30 @@ class MpiTransport(Transport):
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}); got {root}")
         if n_global < 0:
-            raise ValueError(f"n_global must be >= 0; got {n_global}")
+            raise ValueError(f"n_global must be >= 0 (got {n_global})")
         vals = np.ascontiguousarray(values, dtype=np.float64)
         ids0 = np.asarray(global_ids)
         if ids0.ndim != 1 or not np.issubdtype(ids0.dtype, np.integer):
             raise ValueError(
-                "gather_agent_values: global_ids must be a 1-D integer array;"
-                f" rank {self._rank} passed shape {ids0.shape}, dtype {ids0.dtype}"
+                "gather_agent_values: expected 1-D integer global_ids,"
+                f" got shape {ids0.shape}, dtype {ids0.dtype} on rank {self._rank}"
             )
         ids = np.ascontiguousarray(ids0, dtype=np.int64)
         if vals.ndim != 1:
             raise ValueError(
-                "gather_agent_values: values must be one-dimensional;"
-                f" rank {self._rank} passed shape {vals.shape}"
+                "gather_agent_values: expected 1-D values,"
+                f" got shape {vals.shape} on rank {self._rank}"
             )
         if ids.shape != vals.shape:
             raise ValueError(
-                "gather_agent_values: values and global_ids must have the same"
-                f" shape; rank {self._rank} has {vals.shape} and {ids.shape}"
+                "gather_agent_values: values and global_ids shapes differ on"
+                f" rank {self._rank}: {vals.shape} vs {ids.shape}"
             )
         if ids.size and (int(ids.min()) < 0 or int(ids.max()) >= int(n_global)):
             raise ValueError(
-                "gather_agent_values: global_ids must lie in"
-                f" [0, {n_global}); rank {self._rank} got range"
-                f" [{int(ids.min())}, {int(ids.max())}]"
+                f"gather_agent_values: global_ids must lie in [0, {n_global}),"
+                f" got range [{int(ids.min())}, {int(ids.max())}]"
+                f" on rank {self._rank}"
             )
 
         meta_local = np.array([vals.size, int(n_global)], dtype=np.int64)
@@ -848,7 +861,7 @@ class MpiTransport(Transport):
         if len(sizes) != 1:
             raise ValueError(
                 "gather_agent_values: every rank must pass the same"
-                f" n_global; got {sorted(sizes)}"
+                f" n_global, got {sorted(sizes)}"
             )
         counts = meta[:, 0]
         total = int(counts.sum())
@@ -909,11 +922,9 @@ class MpiTransport(Transport):
         self._tick("allreduce")
         self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
         if int(out[0]) != -int(out[1]):
-            raise ValueError("route_agent_values: n_agents must be identical on every rank")
+            raise ValueError("route_agent_values: ranks disagree on n_agents")
         if int(out[2]) != -int(out[3]):
-            raise ValueError(
-                "route_agent_values: source must be identical on every rank"
-            )
+            raise ValueError("route_agent_values: ranks disagree on source")
         agreed_reporter = int(out[4])
         if agreed_reporter != self._size:
             self._tick("bcast")
@@ -958,6 +969,32 @@ class MpiTransport(Transport):
         if int(out[0]) != -int(out[1]) or int(out[2]) != -int(out[3]):
             raise ValueError(f"{what}: owners must be identical on every rank")
 
+    def _agree_or_report(self, error: str | None, *pair_values: int) -> np.ndarray:
+        """One MIN election round; raise the agreed verdict or return the lanes.
+
+        Lanes are ``[reporter, v, -v, ...]`` over ``pair_values``. The lowest
+        rank holding ``error`` is elected reporter and broadcasts its message,
+        so every rank raises the same :class:`TransportError`; when no rank
+        reports, the reduced lanes come back for the caller's +/- pair
+        agreement checks.
+        """
+        lane_list = [self._rank if error is not None else self._size]
+        for v in pair_values:
+            lane_list += [v, -v]
+        lanes = np.array(lane_list, dtype=np.int64)
+        out = np.empty_like(lanes)
+        self._tick("allreduce")
+        self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
+        agreed_reporter = int(out[0])
+        if agreed_reporter != self._size:
+            self._tick("bcast")
+            message = self._comm.bcast(
+                error if self._rank == agreed_reporter else None,
+                root=agreed_reporter,
+            )
+            raise TransportError(agreed_reporter, message)
+        return out
+
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
@@ -991,8 +1028,7 @@ class MpiTransport(Transport):
             )
         except Exception as exc:
             normalized = {}
-            if local_error is None:
-                local_error = f"{type(exc).__name__}: {exc}"
+            local_error = f"{type(exc).__name__}: {exc}"
         n_agents_i, src = self._agree_route_preflight(
             n_agents=n_agents,
             source=source,
@@ -1081,24 +1117,13 @@ class MpiTransport(Transport):
                 size=self._size,
                 what=what,
             )
-            owner_arr = np.asarray(owners)
-            if owner_arr.ndim != 1 or not np.issubdtype(owner_arr.dtype, np.integer):
-                raise ValueError(
-                    f"{what}: owners must be a 1-D integer array of ranks;"
-                    f" got shape {owner_arr.shape}, dtype {owner_arr.dtype}"
-                )
-            canon = np.ascontiguousarray(owner_arr, dtype=np.int64)
-            if canon.size and (
-                int(canon.min()) < 0 or int(canon.max()) >= self._size
-            ):
-                raise ValueError(
-                    f"{what}: owners must lie in [0, size) = [0, {self._size});"
-                    f" got range [{int(canon.min())}, {int(canon.max())}]"
-                )
+            canon, owner_error = _owners_validated(owners, self._size, what=what)
+            if owner_error is not None:
+                raise ValueError(owner_error)
             payload: object = {} if values_by_rep is None else values_by_rep
             if not isinstance(payload, Mapping):
                 raise ValueError(
-                    f"{what}: values_by_rep must be a mapping or None;"
+                    f"{what}: values_by_rep must be a mapping or None,"
                     f" got {type(payload).__name__}"
                 )
             normalized: dict[int, dict[int, float]] = {}
@@ -1111,7 +1136,7 @@ class MpiTransport(Transport):
                     or int(rep_key) >= B
                 ):
                     raise ValueError(
-                        f"{what}: replication ids must lie in [0, {B});"
+                        f"{what}: replication ids must lie in [0, {B}),"
                         f" got {rep_key!r}"
                     )
                 rep = int(rep_key)
@@ -1162,9 +1187,9 @@ class MpiTransport(Transport):
             )
             raise ValueError(message)
         if int(out[0]) != -int(out[1]):
-            raise ValueError(f"{what}: n_agents must be identical on every rank")
+            raise ValueError(f"{what}: ranks disagree on n_agents")
         if int(out[2]) != -int(out[3]):
-            raise ValueError(f"{what}: owners must have the same length on every rank")
+            raise ValueError(f"{what}: ranks disagree on the length of owners")
         self._agree_owner_vector(canon, what=what)
         return int(out[0]), canon, normalized
 
@@ -1357,19 +1382,7 @@ class MpiTransport(Transport):
             batch = np.empty(0, dtype=np.float64)
             error = f"batched_max: values must be numeric; {exc}"
         B = int(batch.size) if error is None else -1
-        reporter = self._rank if error is not None else self._size
-        lanes = np.array([reporter, B, -B], dtype=np.int64)
-        out_i = np.empty_like(lanes)
-        self._tick("allreduce")
-        self._comm.Allreduce(lanes, out_i, op=self._mpi.MIN)
-        agreed_reporter = int(out_i[0])
-        if agreed_reporter != self._size:
-            self._tick("bcast")
-            message = self._comm.bcast(
-                error if self._rank == agreed_reporter else None,
-                root=agreed_reporter,
-            )
-            raise TransportError(agreed_reporter, message)
+        out_i = self._agree_or_report(error, B)
         if int(out_i[1]) != -int(out_i[2]):
             raise ValueError(
                 "batched_max requires the same (B,) shape on every rank;"
@@ -1393,22 +1406,7 @@ class MpiTransport(Transport):
     def _checked_owner_matrix_inputs(
         self, values: np.ndarray, owners: np.ndarray, *, what: str
     ) -> tuple[np.ndarray, np.ndarray]:
-        arr = np.asarray(owners)
-        error: str | None = None
-        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
-            error = (
-                f"{what}: owners must be a 1-D integer array of ranks;"
-                f" got shape {arr.shape}, dtype {arr.dtype}"
-            )
-            canon = np.empty(0, dtype=np.int64)
-        else:
-            canon = np.ascontiguousarray(arr, dtype=np.int64)
-            if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= self._size):
-                error = (
-                    f"{what}: owners must lie in [0, size) ="
-                    f" [0, {self._size}); got range"
-                    f" [{int(canon.min())}, {int(canon.max())}]"
-                )
+        canon, error = _owners_validated(owners, self._size, what=what)
         try:
             vals = np.asarray(values, dtype=np.float64)
         except (TypeError, ValueError) as exc:
@@ -1418,26 +1416,14 @@ class MpiTransport(Transport):
         B = int(canon.shape[0])
         if error is None and (vals.ndim != 2 or vals.shape[0] != B):
             error = (
-                f"{what}: values must have shape (B, M) = ({B}, M);"
-                f" rank {self._rank} passed shape {vals.shape}"
+                f"{what}: values must have shape (B, M) = ({B}, M),"
+                f" got shape {vals.shape} on rank {self._rank}"
             )
         M = int(vals.shape[1]) if error is None else -1
-        reporter = self._rank if error is not None else self._size
-        lanes = np.array([reporter, B, -B, M, -M], dtype=np.int64)
-        out = np.empty_like(lanes)
-        self._tick("allreduce")
-        self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
-        agreed_reporter = int(out[0])
-        if agreed_reporter != self._size:
-            self._tick("bcast")
-            message = self._comm.bcast(
-                error if self._rank == agreed_reporter else None,
-                root=agreed_reporter,
-            )
-            raise TransportError(agreed_reporter, message)
+        out = self._agree_or_report(error, B, M)
         if int(out[1]) != -int(out[2]) or int(out[3]) != -int(out[4]):
             raise ValueError(
-                f"{what}: values must have the same (B, M) shape on every rank"
+                f"{what}: ranks disagree on the (B, M) shape of values"
             )
         self._agree_owner_vector(canon, what=what)
         return np.ascontiguousarray(vals, dtype=np.float64), canon
@@ -1445,23 +1431,8 @@ class MpiTransport(Transport):
     def _checked_exchange_cut_inputs(
         self, rows: Sequence[CutRow], owners: np.ndarray
     ) -> tuple[tuple[CutRow, ...], np.ndarray]:
-        error: str | None = None
         row_tuple: tuple[CutRow, ...] = ()
-        arr = np.asarray(owners)
-        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
-            error = (
-                "exchange_cuts: owners must be a 1-D integer array of ranks;"
-                f" got shape {arr.shape}, dtype {arr.dtype}"
-            )
-            canon = np.empty(0, dtype=np.int64)
-        else:
-            canon = np.ascontiguousarray(arr, dtype=np.int64)
-            if canon.size and (int(canon.min()) < 0 or int(canon.max()) >= self._size):
-                error = (
-                    "exchange_cuts: owners must lie in"
-                    f" [0, size) = [0, {self._size}); got range"
-                    f" [{int(canon.min())}, {int(canon.max())}]"
-                )
+        canon, error = _owners_validated(owners, self._size, what="exchange_cuts")
         if error is None:
             try:
                 row_tuple = tuple(rows)
@@ -1488,19 +1459,7 @@ class MpiTransport(Transport):
                     break
 
         B = int(canon.shape[0])
-        reporter = self._rank if error is not None else self._size
-        lanes = np.array([reporter, B, -B], dtype=np.int64)
-        out = np.empty_like(lanes)
-        self._tick("allreduce")
-        self._comm.Allreduce(lanes, out, op=self._mpi.MIN)
-        agreed_reporter = int(out[0])
-        if agreed_reporter != self._size:
-            self._tick("bcast")
-            message = self._comm.bcast(
-                error if self._rank == agreed_reporter else None,
-                root=agreed_reporter,
-            )
-            raise TransportError(agreed_reporter, message)
+        out = self._agree_or_report(error, B)
         if int(out[1]) != -int(out[2]):
             raise ValueError(
                 "exchange_cuts: owners must have the same length on every rank"

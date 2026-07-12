@@ -23,16 +23,12 @@ class ObservedObjectiveCache:
     empirical_moment: np.ndarray
 
 
-def _empty_phi(K: int) -> np.ndarray:
-    return np.empty((0, K), dtype=np.float64)
-
-
 def _checked_phi_matrix(Phi: object, n_rows: int, K: int) -> np.ndarray:
     phi = np.asarray(Phi, dtype=np.float64)
     expected = (n_rows, K)
     if phi.shape != expected:
         raise ValueError(
-            f"observed feature rows have shape {phi.shape}; expected {expected}"
+            f"expected observed feature rows of shape {expected}, got {phi.shape}"
         )
     return phi
 
@@ -42,7 +38,7 @@ def _checked_eps_vector(Eps: object, n_rows: int) -> np.ndarray:
     expected = (n_rows,)
     if eps.shape != expected:
         raise ValueError(
-            f"features_batch returned Eps with shape {eps.shape}; expected {expected}"
+            f"expected Eps of shape {expected} from features_batch, got {eps.shape}"
         )
     return eps
 
@@ -68,13 +64,13 @@ def _checked_observed_objective(
     empirical_moment = np.asarray(empirical_moment, dtype=np.float64)
     if c_theta.shape != (K,):
         raise ValueError(
-            "observed_objective returned c_theta with shape"
-            f" {c_theta.shape}; expected ({K},)"
+            f"expected c_theta of shape ({K},) from observed_objective,"
+            f" got {c_theta.shape}"
         )
     if empirical_moment.shape != (K,):
         raise ValueError(
-            "observed_objective returned empirical_moment with shape"
-            f" {empirical_moment.shape}; expected ({K},)"
+            f"expected empirical_moment of shape ({K},) from observed_objective,"
+            f" got {empirical_moment.shape}"
         )
     return c_theta, empirical_moment
 
@@ -99,7 +95,7 @@ def observed_phi_rows(
     ids = np.asarray(local_ids, dtype=np.int64)
     n_rows = int(ids.size)
     if n_rows == 0:
-        return _empty_phi(K)
+        return np.empty((0, K), dtype=np.float64)
 
     observed_bundles = np.asarray(observed_bundles)
     bundles = observed_bundles[ids % observed_bundles.shape[0]]
@@ -132,38 +128,25 @@ def _objective_from_rows(
     phi_local: np.ndarray,
     empirical_moment: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    phi = _checked_phi_matrix(phi_local, int(np.asarray(local_ids).size), K)
+    phi = _checked_phi_matrix(phi_local, local_ids.size, K)
     local_c_rows = -theta_coef[local_ids, None] * phi
     c_theta = np.asarray(
         transport.sum_reproducible(local_c_rows, local_ids), dtype=np.float64
     )
-    empirical_moment = np.asarray(empirical_moment, dtype=np.float64)
-    if empirical_moment.shape != (K,):
-        raise ValueError(
-            "cached empirical_moment has shape"
-            f" {empirical_moment.shape}; expected ({K},)"
-        )
     return c_theta, empirical_moment
 
 
 def _empirical_moment_from_rows(
     *,
-    K: int,
     N: int,
     local_ids: np.ndarray,
     transport: Transport,
     phi_local: np.ndarray,
 ) -> np.ndarray:
-    phi = _checked_phi_matrix(phi_local, int(np.asarray(local_ids).size), K)
     obs_mask = local_ids < N
-    if np.any(obs_mask):
-        obs_values = phi[obs_mask]
-        obs_ids = local_ids[obs_mask]
-    else:
-        obs_values = _empty_phi(K)
-        obs_ids = np.empty(0, dtype=np.int64)
     obs_phi_sum = np.asarray(
-        transport.sum_reproducible(obs_values, obs_ids), dtype=np.float64
+        transport.sum_reproducible(phi_local[obs_mask], local_ids[obs_mask]),
+        dtype=np.float64,
     )
     return obs_phi_sum / float(N)
 
@@ -205,14 +188,12 @@ def observed_objective_cache(
         observed_features=observed_features,
     )
     empirical_moment = _empirical_moment_from_rows(
-        K=K,
         N=N,
         local_ids=local_ids,
         transport=transport,
         phi_local=phi_local,
     )
     phi_cache = np.array(phi_local, dtype=np.float64, copy=True)
-    empirical_moment = np.asarray(empirical_moment, dtype=np.float64)
     phi_cache.setflags(write=False)
     empirical_moment.setflags(write=False)
     return ObservedObjectiveCache(
@@ -272,14 +253,13 @@ def observed_objective(
             )
         resolution = resolve_features(features)
         if transport.size == 1 and resolution.mode is Mode.OPTIMIZED:
-            ids = np.asarray(local_ids, dtype=np.int64)
             observed = np.asarray(observed_bundles)
-            bundles = observed[ids % int(N)]
+            bundles = observed[local_ids % N]
             aggregated = feature_batch_aggregate(
                 resolution.active,
-                ids,
+                local_ids,
                 bundles,
-                np.asarray(theta_coef, dtype=np.float64)[ids],
+                theta_coef[local_ids],
                 K,
             )
             if aggregated is not None:
@@ -292,10 +272,10 @@ def observed_objective(
                     dtype=np.float64,
                 )
 
-                obs_mask = ids < int(N)
-                empirical_local = np.zeros(int(K), dtype=np.float64)
+                obs_mask = local_ids < N
+                empirical_local = np.zeros(K, dtype=np.float64)
                 if np.any(obs_mask):
-                    obs_ids = ids[obs_mask]
+                    obs_ids = local_ids[obs_mask]
                     empirical_agg = feature_batch_aggregate(
                         resolution.active,
                         obs_ids,
@@ -303,11 +283,6 @@ def observed_objective(
                         np.ones(obs_ids.size, dtype=np.float64),
                         K,
                     )
-                    if empirical_agg is None:
-                        raise RuntimeError(
-                            "features_batch aggregate support changed during"
-                            " observed objective construction"
-                        )
                     empirical_local = empirical_agg[0]
                 empirical_sum = np.asarray(
                     transport.sum_reproducible(
@@ -329,16 +304,10 @@ def observed_objective(
     c_theta = np.asarray(
         transport.sum_reproducible(local_c_rows, local_ids), dtype=np.float64
     )
-
-    obs_mask = local_ids < N
-    if np.any(obs_mask):
-        obs_values = Phi[obs_mask]
-        obs_ids = local_ids[obs_mask]
-    else:
-        obs_values = _empty_phi(K)
-        obs_ids = np.empty(0, dtype=np.int64)
-    obs_phi_sum = np.asarray(
-        transport.sum_reproducible(obs_values, obs_ids), dtype=np.float64
+    empirical_moment = _empirical_moment_from_rows(
+        N=N,
+        local_ids=local_ids,
+        transport=transport,
+        phi_local=Phi,
     )
-    empirical_moment = obs_phi_sum / float(N)
     return c_theta, empirical_moment

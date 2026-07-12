@@ -2,10 +2,8 @@
 
 :class:`DualInformed` skips agents whose dual mass has concentrated on a
 single bundle, since re-pricing them is unlikely to yield a new cut.
-Skipping is bounded: agents the payload cannot vouch for are always
-re-priced, and every agent is force-revisited after
-``min_revisit_period`` iterations, because concentration is a heuristic
-over the last solve, not a proof about the next.
+Skipping is bounded, because concentration is a heuristic over the last
+solve, not a proof about the next.
 
 The root-resident dual state crosses ranks as
 :class:`DualConcentration`: parallel arrays sized by the dual support
@@ -94,8 +92,7 @@ class DualConcentration:
         bundle_key)``. Each agent's support is its cuts with dual mass
         above :data:`_SUPPORT_ATOL`; the recorded weight is the largest
         support mass normalized by the agent's total support mass. Agents
-        without support are omitted, so the payload scales with the
-        support, not the agent space.
+        without support are omitted.
         """
         per_agent: dict[int, list[float]] = {}
         for (agent_id, _bundle_key), pi in duals.items():
@@ -128,7 +125,7 @@ class DualInformed(RepricingSchedule):
         threshold = float(concentration_threshold)
         if not 0.0 < threshold <= 1.0:
             raise ValueError(
-                "concentration_threshold must lie in (0, 1];"
+                "concentration_threshold must lie in (0, 1],"
                 f" got {concentration_threshold!r}"
             )
         if (
@@ -136,7 +133,7 @@ class DualInformed(RepricingSchedule):
             or min_revisit_period < 1
         ):
             raise ValueError(
-                "min_revisit_period must be an integer >= 1;"
+                "min_revisit_period must be an int >= 1,"
                 f" got {min_revisit_period!r}"
             )
         self._threshold = threshold
