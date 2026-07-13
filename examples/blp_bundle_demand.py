@@ -274,21 +274,21 @@ class BLPDemandOracle(cb.Oracle):
         for solver in solvers:
             solver.apply_solver_settings(settings)
 
-    def price_batch(self, theta, local_ids):
+    def price_batch(self, theta, agent_ids):
         values = self.parameters.unpack(theta)
         beta = values["beta"]
         delta = values["delta"].reshape(self.T, self.M)
         quadratic = np.tensordot(values["lambda"], self.Qs, axes=([0], [0]))
 
-        obs_ids = local_ids % self.N
-        sim_ids = local_ids // self.N
+        obs_ids = agent_ids % self.N
+        sim_ids = agent_ids // self.N
         unique_obs, obs_pos = np.unique(obs_ids, return_inverse=True)
         base_linear = np.einsum("umk,k->um", self.X[unique_obs], beta, optimize=True)
         base_linear += delta[self.market_idx[unique_obs]]
         linears = base_linear[obs_pos] + self.shocks[obs_ids, sim_ids]
-        quadratics = [quadratic] * local_ids.size
+        quadratics = [quadratic] * agent_ids.size
         demands = self._pool.map(self._solve, linears, quadratics, self.capacities[obs_ids])
-        return dict(zip(local_ids, demands))
+        return dict(zip(agent_ids, demands))
 
     def teardown(self):
         self._pool.shutdown(wait=True)
@@ -402,7 +402,7 @@ def main():
         max_iterations=MAX_ITERATIONS,
         cut_policy=cb.AddAll(),
         iteration_callback=cb.point_timeout_callback(
-            cb.Schedule((cb.Phase(timeout=1.0, iters=30), cb.Phase(timeout=20.0)))
+            cb.TimeoutSchedule((cb.Phase(timeout=1.0, iters=30), cb.Phase(timeout=20.0)))
         ),
         activity=activity,
     )

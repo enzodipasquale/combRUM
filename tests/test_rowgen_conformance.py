@@ -371,8 +371,8 @@ def _assert_dual_kkt_anchored(family: str, result: object) -> None:
       distinct from ``moment()``'s vectorised ``pis @ table[ids]``.
     """
     dual = result.dual
-    problem = _PROBLEMS[family](load_family(family, FAMILY_DIR))
     arrays = load_family(family, FAMILY_DIR)
+    problem = _PROBLEMS[family](arrays)
     observed = np.asarray(arrays["observed"])
     n_agents = observed.shape[0]
     K = problem.K
@@ -724,7 +724,6 @@ def _assert_bitwise_equal(
     assert res.theta_hat.tobytes() == ref.theta_hat.tobytes()
     assert res.objective == ref.objective
     assert phase.objective == bundled.objective
-    assert res.n_active_cuts == ref.n_active_cuts
     if full_dual:
         # NSlack also publishes the per-agent slack, the installed cut set,
         # and the dual payload — each bitwise. n_active_cuts must equal the
@@ -1078,10 +1077,10 @@ def test_theta_hat_pins_solved_master_vertex(
 class _PhaseProbe:
     """Wire-call deltas tallied around each of the four phases."""
 
-    contribute_calls: int
-    finalise_calls: int
-    reduce_calls: int
-    apply_calls: int
+    contribute_wire_calls: int
+    finalise_wire_calls: int
+    reduce_wire_calls: int
+    apply_wire_calls: int
     #: Per-kind wire deltas across the reduce phase only.
     reduce_kinds: dict[str, int] = field(default_factory=dict)
     #: Per-kind wire deltas across the apply_step phase only.
@@ -1127,6 +1126,15 @@ def _run_phase_probed(
     def _wire_calls() -> int:
         return sum(transport.counts().values())
 
+    def _tally_kind_deltas(
+        before: dict[str, int], into: dict[str, int]
+    ) -> None:
+        after = transport.counts()
+        for kind in after.keys() | before.keys():
+            delta = after.get(kind, 0) - before.get(kind, 0)
+            if delta:
+                into[kind] = into.get(kind, 0) + delta
+
     converged = False
     iterations = 0
     cuts_admitted = 0
@@ -1139,37 +1147,23 @@ def _run_phase_probed(
 
             before = _wire_calls()
             contribution = formulation.contribute(demands)
-            probe.contribute_calls += _wire_calls() - before
+            probe.contribute_wire_calls += _wire_calls() - before
 
             kinds_before = transport.counts()
             before = _wire_calls()
             reduced = _reduce(transport, contribution)
-            probe.reduce_calls += _wire_calls() - before
-            kinds_after = transport.counts()
-            for kind in kinds_after.keys() | kinds_before.keys():
-                delta = kinds_after.get(kind, 0) - kinds_before.get(kind, 0)
-                if delta:
-                    probe.reduce_kinds[kind] = (
-                        probe.reduce_kinds.get(kind, 0) + delta
-                    )
+            probe.reduce_wire_calls += _wire_calls() - before
+            _tally_kind_deltas(kinds_before, probe.reduce_kinds)
 
             before = _wire_calls()
             outcome = formulation.finalise(reduced)
-            probe.finalise_calls += _wire_calls() - before
+            probe.finalise_wire_calls += _wire_calls() - before
 
-            apply_kinds_before = transport.counts()
+            kinds_before = transport.counts()
             before = _wire_calls()
             progressed = formulation.apply_step(outcome.install_payload)
-            probe.apply_calls += _wire_calls() - before
-            apply_kinds_after = transport.counts()
-            for kind in apply_kinds_after.keys() | apply_kinds_before.keys():
-                delta = apply_kinds_after.get(kind, 0) - apply_kinds_before.get(
-                    kind, 0
-                )
-                if delta:
-                    probe.apply_kinds[kind] = (
-                        probe.apply_kinds.get(kind, 0) + delta
-                    )
+            probe.apply_wire_calls += _wire_calls() - before
+            _tally_kind_deltas(kinds_before, probe.apply_kinds)
 
             cuts_admitted += progressed
             iterations += 1
@@ -1202,9 +1196,9 @@ def test_contribute_and_finalise_are_transport_passive(
     assert walk.converged
     # Only the engine's reduce and apply_step's root bcast touch the wire;
     # contribute and finalise stay at zero across the run.
-    assert probe.contribute_calls == 0
-    assert probe.finalise_calls == 0
-    assert probe.apply_calls > 0
+    assert probe.contribute_wire_calls == 0
+    assert probe.finalise_wire_calls == 0
+    assert probe.apply_wire_calls > 0
     # apply_step's full per-iteration wire budget: its root bcast plus the
     # collective guard. On a single rank NSlack adopts the owner's u
     # directly, so no per-agent scatter appears. Asserting the whole

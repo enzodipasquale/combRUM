@@ -14,7 +14,6 @@ _CANONICAL_SUM_WINDOW_BYTES = 64 * 1024 * 1024
 
 
 def canonical_sum_window_rows(width: int) -> int:
-    """Maximum global-id window width for memory-bounded row-keyed sums."""
     w = max(1, int(width))
     return max(1, _CANONICAL_SUM_WINDOW_BYTES // (8 * (w + 1)))
 
@@ -24,10 +23,6 @@ def canonical_sum(values: np.ndarray, global_ids: np.ndarray) -> np.ndarray | fl
 
     Parameters
     ----------
-    values:
-        Contributions, shape ``(n,)`` or ``(n, M)``; converted to float64.
-        ``(n, M)`` input is summed over axis 0 after sorting, one value per
-        column.
     global_ids:
         Shape ``(n,)`` integer global agent ids, one per contribution row.
         Ids must be unique within a call (pre-combine per-agent rows locally);
@@ -70,8 +65,6 @@ def canonical_sum(values: np.ndarray, global_ids: np.ndarray) -> np.ndarray | fl
                 f" duplicated ids: {unique[counts > 1].tolist()}"
             )
         order = np.argsort(ids, kind="stable")
-        # Fancy indexing materializes a fresh contiguous array so the reduce
-        # sees identical bytes/layout for any input ordering.
         canonical_ids = ids[order]
         canonical = vals[order]
     width = int(canonical.shape[1]) if vals.ndim == 2 else 1

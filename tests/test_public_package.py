@@ -23,7 +23,7 @@ from combrum import (
     LocalCluster,
     Model,
     MpiTransport,
-    NativeDraws,
+    ExponentialDraws,
     NSlack,
     OneSlack,
     Oracle,
@@ -36,7 +36,7 @@ from combrum import (
     ResolveAll,
     RoundRobin,
     RunInfoLevel,
-    Schedule,
+    TimeoutSchedule,
     SerialTransport,
     SlackStrip,
     SolverSettings,
@@ -60,6 +60,7 @@ def test_published_import_root_exports_public_surface() -> None:
         "Demand",
         "DemandBatch",
         "DualInformed",
+        "ExponentialDraws",
         "FeatureMap",
         "FitResult",
         "LoopConfig",
@@ -67,7 +68,6 @@ def test_published_import_root_exports_public_surface() -> None:
         "Model",
         "MpiTransport",
         "NSlack",
-        "NativeDraws",
         "OneSlack",
         "Oracle",
         "Parameters",
@@ -79,10 +79,10 @@ def test_published_import_root_exports_public_surface() -> None:
         "ResolveAll",
         "RoundRobin",
         "RunInfoLevel",
-        "Schedule",
         "SerialTransport",
         "SlackStrip",
         "SolverSettings",
+        "TimeoutSchedule",
         "Transport",
         "WeightSource",
         "bootstrap",
@@ -118,7 +118,7 @@ def test_published_import_root_exports_public_surface() -> None:
     assert combrum.Model is Model
     assert combrum.MpiTransport is MpiTransport
     assert combrum.NSlack is NSlack
-    assert combrum.NativeDraws is NativeDraws
+    assert combrum.ExponentialDraws is ExponentialDraws
     assert combrum.OneSlack is OneSlack
     assert combrum.Oracle is Oracle
     assert combrum.Parameters is Parameters
@@ -128,7 +128,7 @@ def test_published_import_root_exports_public_surface() -> None:
     assert combrum.RepricingSchedule is RepricingSchedule
     assert combrum.ResolveAll is ResolveAll
     assert combrum.RoundRobin is RoundRobin
-    assert combrum.Schedule is Schedule
+    assert combrum.TimeoutSchedule is TimeoutSchedule
     assert combrum.SerialTransport is SerialTransport
     assert combrum.SlackStrip is SlackStrip
     assert combrum.SolverSettings is SolverSettings
@@ -159,7 +159,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
     for removed in (
         "data",
         "observed_bundles",
-        "weights",
+        "weight_source",
         "collect_payload",
         "only_converged",
         "checkpoint_dir",
@@ -207,7 +207,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "max_iterations": 1000,
         "min_iterations": 0,
         "qp_weight": 0.0,
-        "decay": 0,
+        "qp_iterations": 0,
         "penalty_ref": "static",
         "iteration_callback": None,
         "warm_start": None,
@@ -217,7 +217,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "return_cuts": False,
         "return_cut_duals": False,
         "activity": None,
-        "level": RIL.DEFAULT,
+        "run_info_level": RIL.DEFAULT,
     }
     default_failures: list[str] = []
     for params, expected in (
@@ -256,7 +256,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "max_iterations": 1000,
         "min_iterations": 0,
         "qp_weight": 0.0,
-        "decay": 0,
+        "qp_iterations": 0,
         "penalty_ref": "static",
         "schedule": None,
         "iteration_callback": None,
@@ -268,7 +268,7 @@ def test_distributed_public_signatures_drop_single_process_params() -> None:
         "return_cuts": False,
         "return_cut_duals": False,
         "activity": None,
-        "level": RIL.DEFAULT,
+        "run_info_level": RIL.DEFAULT,
     }
     expected_bootstrap_defaults = {
         "transport": None,
@@ -369,14 +369,14 @@ def test_public_type_hints_resolve() -> None:
         is combrum.BootstrapResult
     )
 
-    # both timeout-callback factories take a Schedule and return the engine's
-    # per-iteration hook shape
+    # both timeout-callback factories take a TimeoutSchedule and return the
+    # engine's per-iteration hook shape
     from collections.abc import Callable
 
     hook_return = Callable[[int, combrum.Oracle], int | None]
     for callback in (combrum.point_timeout_callback, combrum.bootstrap_timeout_callback):
         callback_hints = typing.get_type_hints(callback)
-        assert callback_hints["schedule"] is combrum.Schedule
+        assert callback_hints["schedule"] is combrum.TimeoutSchedule
         assert callback_hints["return"] == hook_return
 
     # every concrete RepricingSchedule.select keeps the ABC contract:
@@ -422,7 +422,7 @@ def test_public_type_hints_resolve() -> None:
             "converged": np.ndarray,
             "parameters": combrum.Parameters,
             "point_estimate": (combrum.FitResult | None),
-            "u_samples": (np.ndarray | None),
+            "slack_samples": (np.ndarray | None),
             "duals": (tuple[DualSolution, ...] | None),
             "metadata": dict[str, object],
             "iterations": (int | None),
@@ -451,7 +451,7 @@ def test_public_type_hints_resolve() -> None:
         },
         "DualInformed": {
             "concentration_threshold": float,
-            "min_revisit_period": int,
+            "max_staleness": int,
         },
         "FitResult": {
             "theta_hat": np.ndarray,
@@ -470,7 +470,7 @@ def test_public_type_hints_resolve() -> None:
             "max_iterations": int,
             "schedule": (combrum.RepricingSchedule | None),
             "qp_weight": float,
-            "decay": int,
+            "qp_iterations": int,
             "penalty_ref": str,
             "min_iterations": int,
             "iteration_callback": (callback_hint | None),
@@ -490,7 +490,7 @@ def test_public_type_hints_resolve() -> None:
         },
         "MpiTransport": {"comm": (Any | None), "scatter_chunk_bytes": int},
         "NSlack": {"features": features_hint},
-        "NativeDraws": {"n_obs": int, "base_seed": int},
+        "ExponentialDraws": {"n_observations": int, "base_seed": int},
         "OneSlack": {"features": features_hint},
         "Parameters": {
             "blocks": (
@@ -514,8 +514,8 @@ def test_public_type_hints_resolve() -> None:
         "PurgeInactive": {"max_age": int},
         "ReplayedWeights": {"matrix": np.ndarray},
         "RoundRobin": {"chunks": int},
-        "Schedule": {"phases": Sequence[combrum.Phase]},
-        "SlackStrip": {"percentile": float, "hard_threshold": float},
+        "TimeoutSchedule": {"phases": Sequence[combrum.Phase]},
+        "SlackStrip": {"percentile": float, "max_live_cuts": float},
         "SolverSettings": {
             "time_limit_seconds": (float | None),
             "mip_focus": (int | None),
@@ -576,7 +576,7 @@ def test_public_type_hints_resolve() -> None:
             "max_iterations": int,
             "min_iterations": int,
             "qp_weight": float,
-            "decay": int,
+            "qp_iterations": int,
             "penalty_ref": str,
             "schedule": (combrum.RepricingSchedule | None),
             "iteration_callback": (callback_hint | None),
@@ -588,7 +588,7 @@ def test_public_type_hints_resolve() -> None:
             "return_cuts": bool,
             "return_cut_duals": bool,
             "activity": (combrum.ActivityConfig | None),
-            "level": combrum.RunInfoLevel,
+            "run_info_level": combrum.RunInfoLevel,
             "return": combrum.FitResult,
         },
         "estimate_distributed": {
@@ -602,7 +602,7 @@ def test_public_type_hints_resolve() -> None:
             "max_iterations": int,
             "min_iterations": int,
             "qp_weight": float,
-            "decay": int,
+            "qp_iterations": int,
             "penalty_ref": str,
             "iteration_callback": (callback_hint | None),
             "warm_start": (combrum.FitResult | None),
@@ -612,14 +612,14 @@ def test_public_type_hints_resolve() -> None:
             "return_cuts": bool,
             "return_cut_duals": bool,
             "activity": (combrum.ActivityConfig | None),
-            "level": combrum.RunInfoLevel,
+            "run_info_level": combrum.RunInfoLevel,
             "return": combrum.FitResult,
         },
         "bootstrap": {
             "model": combrum.Model,
             "data": combrum.Data,
             "n_bootstrap": int,
-            "weights": combrum.WeightSource,
+            "weight_source": combrum.WeightSource,
             "transport": (combrum.Transport | None),
             "master_backend": str,
             "master_params": (dict[str, object] | None),
@@ -654,11 +654,11 @@ def test_public_type_hints_resolve() -> None:
             "return": combrum.BootstrapResult,
         },
         "point_timeout_callback": {
-            "schedule": combrum.Schedule,
+            "schedule": combrum.TimeoutSchedule,
             "return": callback_hint,
         },
         "bootstrap_timeout_callback": {
-            "schedule": combrum.Schedule,
+            "schedule": combrum.TimeoutSchedule,
             "return": callback_hint,
         },
     }

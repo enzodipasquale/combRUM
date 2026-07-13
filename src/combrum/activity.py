@@ -7,14 +7,10 @@ import sys
 from dataclasses import dataclass
 from typing import Protocol, TextIO
 
-# Only ActivityConfig is public API; the events, sink, and formatter below are
-# internal and reached by fully qualified path if at all.
 __all__ = ["ActivityConfig"]
 
 
 class ActivityLevel(str, enum.Enum):
-    """How much algorithm activity a caller wants surfaced."""
-
     OFF = "off"
     SUMMARY = "summary"
     ITERATIONS = "iterations"
@@ -211,15 +207,11 @@ ActivityEvent = (
 
 
 class ActivitySink(Protocol):
-    """A side-effect target for activity events."""
-
     def emit(self, event: ActivityEvent) -> None: ...
 
 
 @dataclass(slots=True)
 class ActivityRun:
-    """Root-local activity fan-out for one algorithm run."""
-
     config: ActivityConfig
     sink: ActivitySink | None = None
 
@@ -232,7 +224,7 @@ class ActivityRun:
             self.sink.emit(event)
 
     def close(self) -> None:
-        """No persistent sinks to close; kept for the context-manager API."""
+        """No persistent sinks to release."""
 
     def __enter__(self) -> ActivityRun:
         return self
@@ -247,8 +239,6 @@ def build_activity_run(
     is_root: bool,
     stream: TextIO | None = None,
 ) -> ActivityRun:
-    """Build the root-only progress sink outside hot loops."""
-
     cfg = config if config is not None else ActivityConfig()
     if not cfg.enabled or not is_root or not cfg.stdout:
         return ActivityRun(config=cfg)
@@ -297,8 +287,6 @@ class SafeActivitySink:
 
 
 class RootTableFormatter:
-    """ASCII root-table formatter for human progress logs."""
-
     def __init__(
         self,
         *,
@@ -511,9 +499,7 @@ class RootTableFormatter:
         previous: tuple[str, ...] | None,
         current: tuple[str, ...],
     ) -> bool:
-        if previous != current:
-            return True
-        return row_count % 80 == 0
+        return previous != current or row_count % 80 == 0
 
 
 def _optional_columns(

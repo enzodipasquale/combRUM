@@ -222,8 +222,8 @@ class SkeletonOracle(Oracle):
     def __init__(self, problem: SkeletonProblem) -> None:
         self._problem = problem
 
-    def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
-        self._problem.setup(local_ids)
+    def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
+        self._problem.setup(agent_ids)
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
         return self._problem.price(theta, agent_id)
@@ -453,8 +453,6 @@ def test_update_enforces_theta_bounds_clip() -> None:
     }
     theta_init = np.zeros(2)
     step = 0.1
-    agg = np.array([1.0, -1.0])
-    unclipped = theta_init + step * agg  # [0.1, -0.1]
     lower = np.array([-10.0, -0.05])
     upper = np.array([0.05, 10.0])
     expected = np.array([0.05, -0.05])  # unclipped clipped into the tight box
@@ -469,9 +467,6 @@ def test_update_enforces_theta_bounds_clip() -> None:
     # Both components must sit exactly on their bounds, not at the
     # unconstrained iterate.
     assert form._theta.tobytes() == expected.tobytes()
-    assert form._theta[0] == upper[0]
-    assert form._theta[1] == lower[1]
-    assert not np.array_equal(form._theta, unclipped)
 
 
 def test_best_total_regret_sums_all_violated_agents() -> None:

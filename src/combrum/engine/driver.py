@@ -8,12 +8,7 @@ replication retire independently.
 
 The driver owns the cross-rank collectives (through
 :func:`~combrum.engine.fitstep.fit_step`) so the formulation stays
-transport-passive. At B=1 the live set is a single replication and the
-reductions are ``allreduce_max``/``sum_reproducible``.
-
-The driver takes a built :class:`~combrum.context.FitContext`, an oracle, a
-formulation, and the loop config. The public ``estimate`` API is layered above
-this loop.
+transport-passive.
 """
 
 from __future__ import annotations
@@ -55,8 +50,8 @@ def _validate_schedule_formulation(
     if not isinstance(schedule, RepricingSchedule):
         raise TypeError(
             "schedule must be a RepricingSchedule such as ResolveAll,"
-            " RoundRobin, or DualInformed; combrum.Schedule is for timeout"
-            " callbacks passed through iteration_callback"
+            " RoundRobin, or DualInformed; combrum.TimeoutSchedule is for"
+            " timeout callbacks passed through iteration_callback"
         )
     cls = type(formulation)
     if (
@@ -90,7 +85,7 @@ def _coerce_iteration_count(name: str, value: int, minimum: int) -> int:
 def _validate_loop_controls(
     max_iterations: int,
     qp_weight: float,
-    decay: int,
+    qp_iterations: int,
     penalty_ref: str,
     min_iterations: int = 0,
 ) -> None:
@@ -114,11 +109,10 @@ def _validate_loop_controls(
         raise ValueError(f"qp_weight must be finite; got {qp_weight!r}")
     if qp_value < 0.0:
         raise ValueError(f"qp_weight must be >= 0; got {qp_weight!r}")
-    # The published duals would otherwise be multipliers of a penalized problem.
-    if qp_value > 0.0 and decay <= 0:
+    if qp_value > 0.0 and qp_iterations <= 0:
         raise ValueError(
-            "qp_weight>0 needs decay>=1 so the weight reaches 0"
-            f" (got decay={decay!r})"
+            "qp_weight>0 needs qp_iterations>=1 so the weight reaches 0"
+            f" (got qp_iterations={qp_iterations!r})"
         )
     if penalty_ref not in ("dynamic", "static"):
         raise ValueError(
@@ -130,25 +124,12 @@ def _validate_loop_controls(
 class LoopConfig:
     """Loop controls for the driver (not the agent space, which lives on
     :class:`~combrum.context.FitContext`).
-
-    ``schedule`` is the optional re-pricing schedule (None = full sweep every
-    iteration). ``qp_weight > 0`` with
-    ``decay >= 1`` holds a proximal penalty at ``qp_weight`` for ``decay``
-    iterations, then drops it to exactly zero so the terminating solve is a
-    pure LP (a constant weight keeps the master's quadratic term unchanged,
-    so penalty re-solves stay warm-started); ``penalty_ref``
-    picks the anchor (``"static"`` = fixed seed/origin; ``"dynamic"`` = current
-    theta). ``min_iterations`` floors convergence. ``iteration_callback`` is an
-    optional per-iteration hook that may update oracle-owned solver settings and
-    return an additional convergence floor for that iteration. ``activity`` is
-    internal row-generation progress plumbing the engine populates, not a
-    user-set knob.
     """
 
     max_iterations: int
     schedule: RepricingSchedule | None = None
     qp_weight: float = 0.0
-    decay: int = 0
+    qp_iterations: int = 0
     penalty_ref: str = "static"
     min_iterations: int = 0
     iteration_callback: Callable[[int, Oracle], int | None] | None = None
@@ -158,7 +139,7 @@ class LoopConfig:
         _validate_loop_controls(
             self.max_iterations,
             self.qp_weight,
-            self.decay,
+            self.qp_iterations,
             self.penalty_ref,
             self.min_iterations,
         )
@@ -166,13 +147,6 @@ class LoopConfig:
 
 @dataclass(frozen=True)
 class LoopDiagnostics:
-    """Diagnostics captured from one driver run.
-
-    ``final_penalty_weight`` is the weight behind the published theta (zero on
-    every accepted convergence, so the terminating solve is certifiably a pure
-    LP).
-    """
-
     converged: bool
     iterations: int
     cuts_admitted: int
@@ -181,15 +155,11 @@ class LoopDiagnostics:
 
 @dataclass(frozen=True)
 class LoopOutcome:
-    """A driver run's published answer plus the loop bookkeeping."""
-
     result: FormulationResult
     diagnostics: LoopDiagnostics
 
 
 def _resolve_price(oracle: Oracle, transport) -> Resolution:
-    # Resolve price | price_batch ONCE, before any data-dependent branch, with
-    # a cross-rank agreement round so every rank uses the same verdict.
     return resolve(
         oracle,
         surface="price",
@@ -213,8 +183,8 @@ def run_fit(
     """Run the B=1 phase-path convergence loop to a published answer.
 
     ``ctx`` is a built :class:`~combrum.context.FitContext` (the master, if
-    any, already on ``ctx.master_backend`` on rank 0); ``oracle`` and
-    ``formulation`` are constructed but not yet set up. The driver runs::
+    any, already on ``ctx.master_backend`` on ``ctx.owner_rank``); ``oracle``
+    and ``formulation`` are constructed but not yet set up. The driver runs::
 
         setup (oracle + formulation + resolve the price interface)
         repeat: solve -> [schedule mask] -> fit_step (price/contribute/
@@ -241,29 +211,20 @@ def run_fit(
     max_iterations = int(config.max_iterations)
     tolerance = ctx.tolerance
 
-    # Live-set mask over the replication set: one entry per replication, True
-    # while still converging. At B=1 a single-element mask; the loop stops once
-    # no rep is live.
     n_reps = 1
     live = np.ones(n_reps, dtype=bool)
 
-    # Static anchor for the penalty schedule: theta_init (the warm-start
-    # proximal anchor) if given, else the origin. Ignored on the pure-LP path.
     static_ref = (
         np.zeros(ctx.K, dtype=np.float64)
         if ctx.theta_init is None
         else np.asarray(ctx.theta_init, dtype=np.float64)
     )
 
-    penalty_on = config.qp_weight > 0.0 and config.decay > 0
-    master = ctx.master_backend  # root-only; None elsewhere
+    penalty_on = config.qp_weight > 0.0 and config.qp_iterations > 0
+    master = ctx.master_backend
 
-    # Floor convergence at decay+1 so the weight has already dropped to 0 before
-    # acceptance. The real guard is the priced_weight==0 check at the stop rule:
-    # it certifies the theta that was actually priced, so acceptance may wait
-    # one more iteration after the weight is reverted to zero.
     base_convergence_floor = (
-        max(config.min_iterations, config.decay + 1)
+        max(config.min_iterations, config.qp_iterations + 1)
         if penalty_on
         else config.min_iterations
     )
@@ -296,27 +257,17 @@ def run_fit(
                 activity_level=activity.config.level,
             )
         )
-    # Last iteration each agent was re-priced; only scheduled fits need this
-    # dense bookkeeping.
     last_resolved = (
         np.full(n_agents, -1, dtype=np.int64) if schedule is not None else None
     )
-    # First sweep is always full: no dual signal yet, and a partial sweep that
-    # reports convergence must be re-certified by a full sweep (unpriced agents
-    # may still be violated).
     force_full = True
-    # Weight behind the theta the current iteration prices. The stop rule
-    # certifies convergence only when this is 0, so the published answer is
-    # always a pure-LP solution.
     priced_weight = 0.0
-    # Weight behind the published theta, surfaced in the diagnostics.
     last_solve_weight = 0.0
     last_violation: float | None = None
     last_logged_gap: float | None = None
     try:
         collective_call(transport, lambda: oracle.setup(transport, local_ids))
         formulation.setup(ctx)
-        # Resolve the price interface once, after setup's collective.
         price_resolution = _resolve_price(oracle, transport)
         for it in range(max_iterations):
             if not live.any():
@@ -338,13 +289,7 @@ def run_fit(
                 if force_full or priced_weight > 0.0:
                     mask = np.ones(n_agents, dtype=bool)
                 else:
-                    # Condense the master's per-cut LP duals into the
-                    # O(support) payload on the owner, broadcast it
-                    # (O(support), never an n_agents mask bcast), and let every
-                    # rank derive the identical mask. A positive priced_weight
-                    # means the last priced theta came from a QP, whose duals
-                    # are not LP dual certificates, so that case takes the
-                    # full-sweep branch above.
+
                     def _dual_payload() -> DualConcentration | None:
                         if transport.rank != owner_rank:
                             return None
@@ -360,26 +305,12 @@ def run_fit(
                         last_resolved=last_resolved,
                     )
                 this_full = bool(mask.all())
-                # This rank's owned ids that the global mask selected this iteration.
-                # Keep the hot path array-backed; converting large full sweeps to
-                # Python lists would defeat batched oracle vectorization.
                 scheduled_local_ids = (
                     local_ids if this_full else local_ids[mask[local_ids]]
                 )
 
-            # Penalty weight for this iteration: qp_weight while it < decay,
-            # exactly 0 from then on (pure LP). The weight is held constant
-            # across the proximal phase because any weight change forces the
-            # backend to re-push the whole quadratic objective and cold-start
-            # the next solve; at a fixed weight a penalty re-solve is a
-            # theta-only linear edit on a warm basis. The driver stages
-            # objective changes on formulations that support it, and the
-            # formulation applies the pending penalty immediately before its
-            # one owner-side solve. Thus cut installs and objective changes
-            # share a warm re-solve instead of solving the old relaxation and
-            # then the cut-augmented one.
             weight_t = (
-                config.qp_weight if penalty_on and it < config.decay else 0.0
+                config.qp_weight if penalty_on and it < config.qp_iterations else 0.0
             )
 
             needs_penalty_solve = penalty_on and (
@@ -408,8 +339,6 @@ def run_fit(
 
                     before_apply = _before_apply
 
-            # The reductions and owners vector match the bundled path, so on
-            # the pure-LP path the published answer is byte-equal to it.
             step = fit_step(
                 formulation,
                 transport=transport,
@@ -427,6 +356,13 @@ def run_fit(
                 last_resolved[mask] = it
             iterations += 1
             last_violation = float(step.violation)
+            hit_tolerance = step.violation <= tolerance
+            accepted = (
+                hit_tolerance
+                and this_full
+                and iterations >= convergence_floor
+                and priced_weight == 0.0
+            )
 
             if activity_details:
                 now = time.perf_counter()
@@ -460,12 +396,7 @@ def run_fit(
                         reduce_rounds=int(step.reduce_rounds),
                         exchange_rounds=int(step.exchange_rounds),
                         full_sweep=this_full,
-                        convergence_candidate=(
-                            step.violation <= tolerance
-                            and this_full
-                            and iterations >= convergence_floor
-                            and priced_weight == 0.0
-                        ),
+                        convergence_candidate=accepted,
                         price_seconds=float(step.pricing_seconds),
                         master_seconds=float(step.master_seconds),
                         iteration_seconds=(float(now - iter_t0) if iter_t0 else None),
@@ -476,24 +407,11 @@ def run_fit(
                 )
                 last_logged_gap = float(step.violation)
 
-            if step.violation <= tolerance:
-                # A violation<=tol certificate is honest only when the priced
-                # theta came from a pure-LP solve, so gate on priced_weight==0
-                # (and the decay floor); otherwise keep re-pricing the full
-                # sweep until both hold.
-                if (
-                    this_full
-                    and iterations >= convergence_floor
-                    and priced_weight == 0.0
-                ):
-                    # Retire this replication; at B=1 that empties the live set.
-                    live[:] = False
-                    converged = True
-                    break
-                # A partial sweep cannot certify: force a full sweep next.
-                force_full = True
-            else:
-                force_full = False
+            if accepted:
+                live[:] = False
+                converged = True
+                break
+            force_full = hit_tolerance
             priced_weight = weight_t
         result = formulation.result()
         if activity_enabled:

@@ -10,11 +10,6 @@ import numpy as np
 def validated_u_coefs(
     u_coef: object,
 ) -> tuple[Callable[[int], float] | None, np.ndarray | None]:
-    """Split ``u_coef`` into its callable or validated-array form.
-
-    Returns ``(callable, None)`` or ``(None, array)``; the array form is a
-    read-only finite float64 vector indexed by agent id.
-    """
     if callable(u_coef):
         return u_coef, None
     coefs = np.asarray(u_coef)
@@ -29,6 +24,14 @@ def validated_u_coefs(
         raise ValueError(f"u_coef[{bad}] must be finite; got {coefs[bad]!r}")
     coefs.setflags(write=False)
     return None, coefs
+
+
+def validated_u_coef_cover(u_coefs: np.ndarray | None, n_agents: int | None) -> None:
+    if u_coefs is not None and n_agents is not None and u_coefs.size < n_agents:
+        raise ValueError(
+            f"u_coef array must cover all {n_agents} agents,"
+            f" but has only {u_coefs.size} coefficients"
+        )
 
 
 def validated_construction(

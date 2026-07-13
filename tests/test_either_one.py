@@ -428,8 +428,8 @@ class _NeitherToy(Oracle):
 class _DivergentBatchToy(ToyOracle):
     """Both supplied, but price_batch perturbs one payoff past the bar."""
 
-    def price_batch(self, theta, local_ids):
-        out = dict(super().price_batch(theta, local_ids))
+    def price_batch(self, theta, agent_ids):
+        out = dict(super().price_batch(theta, agent_ids))
         first = next(iter(out))
         d = out[first]
         out[first] = Demand.exact(bundle=d.bundle, payoff=d.payoff + 1e-6)
@@ -442,9 +442,9 @@ class _ExtraIdBatchToy(ToyOracle):
     The requested subset itself conforms — only the extra id is wrong.
     """
 
-    def price_batch(self, theta, local_ids):
-        out = dict(super().price_batch(theta, local_ids))
-        requested = {int(i) for i in np.asarray(local_ids)}
+    def price_batch(self, theta, agent_ids):
+        out = dict(super().price_batch(theta, agent_ids))
+        requested = {int(i) for i in np.asarray(agent_ids)}
         extra = next(i for i in range(self._r.shape[0]) if i not in requested)
         out[extra] = self.price(theta, extra)
         return out
@@ -459,8 +459,8 @@ class _MissingIdBatchToy(ToyOracle):
 
     price = Oracle.price  # keep the raising default -> optimized-only
 
-    def price_batch(self, theta, local_ids):
-        out = dict(super().price_batch(theta, local_ids))
+    def price_batch(self, theta, agent_ids):
+        out = dict(super().price_batch(theta, agent_ids))
         out.pop(next(iter(out)))
         return out
 
@@ -470,10 +470,10 @@ class _RankPartialDivergentOracle(Oracle):
         bundle = np.array([int(agent_id)], dtype=np.float64)
         return Demand.exact(bundle=bundle, payoff=float(agent_id))
 
-    def price_batch(self, theta, local_ids):  # type: ignore[no-untyped-def]
+    def price_batch(self, theta, agent_ids):  # type: ignore[no-untyped-def]
         out = {
             int(agent_id): self.price(theta, int(agent_id))
-            for agent_id in np.asarray(local_ids, dtype=np.int64)
+            for agent_id in np.asarray(agent_ids, dtype=np.int64)
         }
         if 0 in out:
             demand = out[0]
@@ -672,7 +672,7 @@ def test_price_both_divergence_falls_back_to_per_agent() -> None:
 
 
 def test_price_batch_extra_id_outside_request_rejects_divergence() -> None:
-    # price_batch must key exactly local_ids: one extra id (a stale/foreign
+    # price_batch must key exactly agent_ids: one extra id (a stale/foreign
     # shard) must fail even though every requested id conforms.
     toy = load_toy()
     oracle = _ExtraIdBatchToy(toy)
@@ -698,12 +698,8 @@ def test_price_batch_missing_id_inside_request_rejects_divergence() -> None:
     with pytest.raises(
         ValueError,
         match=rf"extra ids \[\], missing ids \[{dropped_id}\]",
-    ) as excinfo:
+    ):
         price_demands(res, theta, ids)
-    # the message must report the exact extra/missing sets, not just raise
-    text = str(excinfo.value)
-    assert f"extra ids {sorted(set())}" in text
-    assert f"missing ids {sorted({dropped_id})}" in text
 
 
 def test_fit_step_price_conformance_failure_is_rank_agreed() -> None:

@@ -386,7 +386,7 @@ def _pricing_theta(K: int) -> np.ndarray:
 
 @needs_highs
 @pytest.mark.parametrize("family", ["toy", "qkp"])
-def test_aggregate_key_contribute_weights_per_agent_rows(family) -> None:
+def test_oneslack_contribute_weights_per_agent_rows(family) -> None:
     # Per-agent (non-optimized) features path: contribute must return one
     # w_a * (phi_a | eps_a) row per local agent, keyed by that agent's id.
     problem_fn, load_fn = _CONTRIB_PROBLEMS[family]
@@ -445,7 +445,7 @@ class _AggregateFeatureMap(FeatureMap):
 
 @needs_highs
 @pytest.mark.parametrize("family", ["toy", "qkp"])
-def test_aggregate_key_contribute_weights_optimized_aggregate(family) -> None:
+def test_oneslack_contribute_weights_optimized_aggregate(family) -> None:
     # OPTIMIZED aggregate fast path: contribute passes weights[ids] into
     # feature_batch_aggregate. The walk fixtures do not carry an aggregate
     # member, so this test drives a map that has one and compares the

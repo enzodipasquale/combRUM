@@ -1,12 +1,4 @@
 """Resolve a per-agent / batched method pair to the member a provider overrode.
-
-Method pairs like ``price``/``price_batch`` and ``features``/``features_batch``
-both raise by default; a provider overrides at least one. We resolve the pair
-once into a :class:`Resolution` the caller dispatches on. Override detection
-walks the whole MRO and binds the class method, so an instance-level
-monkeypatch is ignored. When both members are overridden the batched one runs
-and :func:`assert_conforms` checks it against the per-agent member; under MPI
-the resolution must agree across ranks (see :func:`check_agreement`).
 """
 
 from __future__ import annotations
@@ -21,8 +13,6 @@ import numpy as np
 
 from combrum.transport.base import Transport
 
-# Max drift allowed between the batched and per-agent outputs on continuous
-# fields; discrete fields are compared byte-exact and never use this.
 CONTINUOUS_TOL: float = 1e-13
 
 
@@ -38,9 +28,9 @@ def _continuous_drift(opt: np.ndarray, ref: np.ndarray) -> float:
 class Mode(Enum):
     """Which member of a method pair a provider resolved to."""
 
-    DEFAULT = "default"  # only the per-agent member is overridden
-    OPTIMIZED = "optimized"  # only the batched member is overridden
-    BOTH = "both"  # both overridden; the batched path runs, gated by assert_conforms
+    DEFAULT = "default"
+    OPTIMIZED = "optimized"
+    BOTH = "both"
 
 
 @dataclass(frozen=True)
@@ -49,46 +39,44 @@ class Resolution:
 
     ``surface`` is the pair name ("price", "features"); ``active`` is the bound
     class function the caller invokes; ``reference`` is the bound per-agent
-    member, present only in :attr:`Mode.BOTH` as the conformance reference and
-    divergence fallback, else ``None``.
+    member, present only in :attr:`Mode.BOTH` as the conformance reference,
+    else ``None``.
     """
 
     surface: str
     mode: Mode
     active: Callable[..., Any]
     reference: Callable[..., Any] | None
-    # provider class identity, folded into the rank-agreement token
     _module: str
     _qualname: str
 
     @property
     def runs_optimized(self) -> bool:
-        """True iff the active member is the batched/optimized one."""
         return self.mode in (Mode.OPTIMIZED, Mode.BOTH)
 
     @property
     def token(self) -> tuple[str, str, str, str]:
-        """Rank-agreement fingerprint ``(surface, module, qualname, mode)``.
-
-        Identical on every rank by construction; fold into an existing
-        setup broadcast and call :func:`check_agreement`.
+        """Derived from the provider class alone, never per-rank state, so a
+        cross-rank mismatch can only mean a divergent build; fold into an
+        existing setup broadcast and call :func:`check_agreement`.
         """
         return (self.surface, self._module, self._qualname, self.mode.value)
 
 
 def needs_conformance_guard(*resolutions: object) -> bool:
-    """Whether any resolved method pair can run a strict BOTH check."""
     return any(
         getattr(resolution, "mode", None) is Mode.BOTH for resolution in resolutions
     )
 
 
 def _is_overridden(instance: object, name: str, base_default: Any) -> bool:
-    # getattr over the whole MRO (not __dict__, which misses intermediate-base
-    # overrides), comparing unbound function objects (bound methods never
-    # compare identical).
     reached = getattr(type(instance), name, None)
     return reached is not None and reached is not base_default
+
+
+def _bind(cls: type, name: str, instance: object) -> Callable[..., Any]:
+    func = getattr(cls, name)
+    return func.__get__(instance, cls)
 
 
 def resolve_local(
@@ -102,9 +90,7 @@ def resolve_local(
 ) -> Resolution:
     """Resolve one surface once, without any cross-rank round.
 
-    ``default_name`` / ``optimized_name`` are the member names on
-    ``instance``'s class; ``default_func`` / ``optimized_func`` are the base
-    default function objects override detection compares against. Comm-free;
+    Comm-free;
     the caller folds :attr:`Resolution.token` into its own setup broadcast
     (or uses :func:`resolve`, which adds the round).
 
@@ -194,13 +180,6 @@ def check_agreement(
         )
 
 
-def _bind(cls: type, name: str, instance: object) -> Callable[..., Any]:
-    # __get__ off the class, not the instance, so an instance-level attribute
-    # of the same name cannot shadow the bound class method.
-    func = getattr(cls, name)
-    return func.__get__(instance, cls)
-
-
 def dispatch(
     resolution: Resolution,
     *,
@@ -219,7 +198,7 @@ def dispatch(
     if mode is Mode.OPTIMIZED:
         return on_optimized(resolution.active)
     if mode is Mode.BOTH:
-        assert resolution.reference is not None  # Mode.BOTH always carries it
+        assert resolution.reference is not None
         return on_both(resolution.active, resolution.reference)
     raise AssertionError(f"unhandled resolution mode: {mode!r}")
 
@@ -251,7 +230,7 @@ def assert_conforms(
             if (
                 opt.shape != ref.shape
                 or opt.dtype != ref.dtype
-                or not (opt.tobytes() == ref.tobytes())
+                or opt.tobytes() != ref.tobytes()
             ):
                 raise AssertionError(
                     f"method-pair conformance for {surface!r}: discrete field"
@@ -289,8 +268,8 @@ class FeatureMap:
     :meth:`combrum.oracle.Oracle.price_batch`, which solves the demand problem.
 
     When both are overridden, ``features_batch`` must match per-agent
-    ``features`` applied row-by-row within the conformance contract; the
-    per-agent member is the divergence fallback.
+    ``features`` applied row-by-row within the conformance contract;
+    divergence raises.
     """
 
     def features(self, agent_id: int, bundle: np.ndarray) -> tuple[np.ndarray, float]:
@@ -340,8 +319,7 @@ def resolve_features(features: object, surface: str = "features") -> Resolution:
             optimized_func=FeatureMap.features_batch,
         )
     if callable(features):
-        # No members to detect; the token keys on the callable's identity.
-        module = getattr(features, "__module__", type(features).__module__)
+        module = getattr(features, "__module__", None)
         if module is None:
             module = type(features).__module__
         qualname = getattr(features, "__qualname__", type(features).__name__)
@@ -360,7 +338,6 @@ def resolve_features(features: object, surface: str = "features") -> Resolution:
 
 
 def supports_feature_batch_aggregate(member: Callable[..., Any]) -> bool:
-    """Whether ``features_batch`` advertises weighted aggregate mode."""
     return _aggregate_wants_k(member) is not None
 
 
@@ -378,11 +355,7 @@ def _aggregate_capable(params: Mapping[str, inspect.Parameter]) -> bool:
 
 
 def _aggregate_wants_k(member: Callable[..., Any]) -> bool | None:
-    """``None`` when ``member`` lacks aggregate mode, else whether it takes K.
-
-    One signature inspection per fit: callers resolve at setup and pass the
-    verdict to :func:`_aggregate_call` every iteration.
-    """
+    """``None`` when ``member`` lacks aggregate mode, else whether it takes K."""
     try:
         params = inspect.signature(member).parameters
     except (TypeError, ValueError):
@@ -428,7 +401,6 @@ def feature_batch_aggregate(
     weights: np.ndarray,
     K: int,
 ) -> tuple[np.ndarray, float] | None:
-    """Call optional aggregate mode on a batched feature map if available."""
     wants_k = _aggregate_wants_k(member)
     if wants_k is None:
         return None
@@ -440,7 +412,6 @@ def _per_agent_rows(
     ids: Sequence[int],
     bundles: Sequence[np.ndarray],
 ) -> list[tuple[np.ndarray, float]]:
-    # Per-agent member once per id, normalized to (float64 phi, float eps).
     out: list[tuple[np.ndarray, float]] = []
     for agent_id, bundle in zip(ids, bundles):
         phi, eps = member(int(agent_id), bundle)
@@ -453,8 +424,6 @@ def _batched_rows(
     ids: Sequence[int],
     bundles: Sequence[np.ndarray],
 ) -> list[tuple[np.ndarray, float]]:
-    # Batched member once over the subset, split into the same per-row
-    # (float64 phi, float eps) pairs the per-agent path produces.
     id_arr = np.asarray(ids, dtype=np.int64)
     bundle_arr = np.asarray(bundles)
     phi_mat, eps_vec = member(id_arr, bundle_arr)
@@ -482,12 +451,8 @@ def feature_rows(
     * ``OPTIMIZED``: the batched member, one call over the subset.
     * ``BOTH``: the batched member, then :func:`assert_conforms` against the
       per-agent member; raises on divergence.
-
-    ``ids`` are global agent ids; ``bundles`` are the matching chosen bundles.
     """
     if len(ids) == 0:
-        # Empty shard: return before any batched-member call, whose shape
-        # contract may not survive a zero-length axis.
         return []
     return dispatch(
         resolution,
@@ -506,24 +471,16 @@ def _conform_rows(
     ids: Sequence[int],
     bundles: Sequence[np.ndarray],
 ) -> list[tuple[np.ndarray, float]]:
-    # Run the optimized batch, gate against the per-agent reference. phi is
-    # checked on both axes: its sign/zero-mask discretely (support
-    # preservation), its values continuously; eps is continuous.
     opt = _batched_rows(batched, ids, bundles)
     ref = _per_agent_rows(per_agent, ids, bundles)
     assert_conforms(
         surface,
         optimized=[(phi, np.sign(phi), eps) for phi, eps in opt],
         reference=[(phi, np.sign(phi), eps) for phi, eps in ref],
-        discrete=(1,),  # the sign/zero-mask of phi (support-preserving)
-        continuous=(0, 2),  # phi values and eps
+        discrete=(1,),
+        continuous=(0, 2),
     )
     return opt
-
-
-# Price surface, symmetric to the features surface: the per-agent member prices
-# one (theta, agent_id) -> Demand; the batched member prices a shard
-# (theta, local_ids) -> {id: Demand}. Demand is duck-typed (.bundle/.payoff/.gap).
 
 
 def _per_agent_demands(
@@ -531,7 +488,7 @@ def _per_agent_demands(
     theta: np.ndarray,
     ids: Sequence[int] | np.ndarray,
 ) -> dict[int, Any]:
-    return {int(a): member(theta, int(a)) for a in ids}
+    return {a: member(theta, a) for a in map(int, ids)}
 
 
 def conform_demands(
@@ -544,7 +501,7 @@ def conform_demands(
 ) -> None:
     """Hard-fail unless the batch's Demands match the per-agent Demands.
 
-    The price analog of :func:`assert_conforms`: per id the chosen
+    Per id the chosen
     ``bundle`` is compared byte-identical, ``payoff`` and ``gap`` within
     ``tol``; an id the batch failed to price is a mismatch.
     """
@@ -576,8 +533,8 @@ def conform_demands(
         surface,
         optimized=opt_fields,
         reference=ref_fields,
-        discrete=(0,),  # the chosen bundle (bytes + dtype exact)
-        continuous=(1, 2),  # payoff and the certified gap
+        discrete=(0,),
+        continuous=(1, 2),
         tol=tol,
     )
 
@@ -585,9 +542,6 @@ def conform_demands(
 def _batched_demands(
     member: Callable[..., Any], theta: np.ndarray, ids: Sequence[int] | np.ndarray
 ) -> Mapping[int, Any]:
-    # Optimized member once over the shard. Contract is shard-exact: the
-    # mapping must key exactly local_ids (extra/missing ids break the per-rank
-    # O(shard) bound), validated here rather than handed to the engine.
     requested = np.asarray(ids, dtype=np.int64)
     raw = member(theta, requested)
     raw_ids = getattr(raw, "ids", None)
@@ -605,8 +559,8 @@ def _batched_demands(
         raise ValueError(
             "price_batch returned a mapping outside its requested domain"
             f" (extra ids {sorted(got - want)}, missing ids"
-            f" {sorted(want - got)}): price_batch(theta, local_ids) must key"
-            " exactly local_ids; this keeps the result shard-local"
+            f" {sorted(want - got)}): price_batch(theta, agent_ids) must key"
+            " exactly agent_ids; this keeps the result shard-local"
         )
     return out
 
@@ -614,12 +568,7 @@ def _batched_demands(
 def price_demands(
     resolution: Resolution, theta: np.ndarray, ids: Sequence[int]
 ) -> Mapping[int, Any]:
-    """Resolve ``(theta, ids) -> {id: Demand}`` by the mode.
-
-    Symmetric to :func:`feature_rows`, with :func:`conform_demands` as the
-    ``BOTH`` gate. ``ids`` are global agent ids; an empty shard prices
-    nothing.
-    """
+    """Resolve ``(theta, ids) -> {id: Demand}`` by the mode."""
     id_arr = np.asarray(ids, dtype=np.int64)
     if id_arr.size == 0:
         return {}

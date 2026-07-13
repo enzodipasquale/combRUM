@@ -158,7 +158,7 @@ def test_select_resolves_all_without_signal() -> None:
 
 
 def test_select_skips_concentrated_but_recent() -> None:
-    sched = DualInformed(concentration_threshold=0.9, min_revisit_period=5)
+    sched = DualInformed(concentration_threshold=0.9, max_staleness=5)
     conc = DualConcentration(np.array([1, 2]), np.array([0.95, 0.40]))
     last = np.array([3, 3, 3, 3], dtype=np.int64)  # all priced at iter 3
     mask = sched.select(4, 4, dual=conc, last_resolved=last)
@@ -169,14 +169,14 @@ def test_select_skips_concentrated_but_recent() -> None:
     assert mask.dtype == bool and mask.shape == (4,)
     # Boundary: weight exactly at the threshold is skipped (>=, not >). Kept
     # recent (iter 1 - last 0 < period) so only the concentration clause decides.
-    exact = DualInformed(concentration_threshold=1.0, min_revisit_period=5)
+    exact = DualInformed(concentration_threshold=1.0, max_staleness=5)
     conc_exact = DualConcentration(np.array([1]), np.array([1.0]))
     edge = exact.select(1, 4, dual=conc_exact, last_resolved=np.zeros(4, np.int64))
     assert edge.tolist() == [True, False, True, True]
 
 
 def test_select_forced_revisit_overrides_concentration() -> None:
-    sched = DualInformed(concentration_threshold=0.9, min_revisit_period=5)
+    sched = DualInformed(concentration_threshold=0.9, max_staleness=5)
     conc = DualConcentration(np.array([1]), np.array([0.99]))
     last = np.array([0, 0, 0, 0], dtype=np.int64)
     # Agent 1 is concentrated, but last priced 6 iters ago (>= period): the
@@ -193,16 +193,16 @@ def test_select_forced_revisit_overrides_concentration() -> None:
 def test_select_validates_construction() -> None:
     with pytest.raises(ValueError, match="concentration_threshold"):
         DualInformed(concentration_threshold=0.0)
-    with pytest.raises(ValueError, match="min_revisit_period"):
-        DualInformed(min_revisit_period=0)
+    with pytest.raises(ValueError, match="max_staleness"):
+        DualInformed(max_staleness=0)
     # max_weights never exceed 1.0, so a threshold above 1.0 would make the
     # skip filter a permanent no-op
     with pytest.raises(ValueError, match="lie in"):
         DualInformed(concentration_threshold=1.5)
     # the period is an iteration count; a float would break the staleness
     # arithmetic
-    with pytest.raises(ValueError, match="min_revisit_period"):
-        DualInformed(min_revisit_period=5.5)
+    with pytest.raises(ValueError, match="max_staleness"):
+        DualInformed(max_staleness=5.5)
 
 
 def test_select_rejects_non_concentration_dual() -> None:
@@ -236,7 +236,7 @@ def _run_dual_informed(arrays, backend: str = "gurobi"):
         NSlack,
         SerialTransport(),
         backend=backend,
-        schedule=DualInformed(concentration_threshold=0.9, min_revisit_period=PERIOD),
+        schedule=DualInformed(concentration_threshold=0.9, max_staleness=PERIOD),
     )
 
 
@@ -268,7 +268,7 @@ def test_dual_informed_forced_revisit_bound_holds() -> None:
         NSlack,
         SerialTransport(),
         backend="gurobi",
-        schedule=DualInformed(concentration_threshold=0.9, min_revisit_period=period),
+        schedule=DualInformed(concentration_threshold=0.9, max_staleness=period),
     )
     masks = np.array(run.schedule_masks)  # (iterations, n_agents)
     gaps = [
@@ -324,7 +324,7 @@ def test_dual_informed_rank_invariant(backend: str) -> None:
         NSlack,
         SerialTransport(),
         backend=backend,
-        schedule=DualInformed(min_revisit_period=PERIOD),
+        schedule=DualInformed(max_staleness=PERIOD),
     )
     results = LocalCluster(2).run(
         lambda transport: run_walk(
@@ -333,7 +333,7 @@ def test_dual_informed_rank_invariant(backend: str) -> None:
             NSlack,
             transport,
             backend=backend,
-            schedule=DualInformed(min_revisit_period=PERIOD),
+            schedule=DualInformed(max_staleness=PERIOD),
         )
     )
     assert len(results) == 2

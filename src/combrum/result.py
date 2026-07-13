@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from combrum.certification import Certification
+from combrum.certification import Certification, certification_metadata
 from combrum.dual import DualSolution
 from combrum.parameters import Parameters
 from combrum.runinfo import RunMetadata
@@ -22,7 +22,6 @@ def _readonly(arr: np.ndarray) -> np.ndarray:
 
 
 def _restore_readonly(obj: object, names: tuple[str, ...]) -> None:
-    # Pickle/deepcopy drops numpy's WRITEABLE=False flag.
     for name in names:
         value = obj.__dict__.get(name)
         if isinstance(value, np.ndarray):
@@ -43,16 +42,6 @@ def _certification_from_metadata(value: object) -> Certification:
     )
 
 
-def _certification_metadata(certification: Certification) -> dict[str, object]:
-    unknown = not np.isfinite(certification.worst_gap)
-    return {
-        "n_priced": int(certification.n_priced),
-        "n_inexact": int(certification.n_inexact),
-        "worst_gap": None if unknown else float(certification.worst_gap),
-        "worst_gap_unknown": bool(unknown),
-    }
-
-
 def _merge_certifications(
     results: Sequence["BootstrapResult"],
 ) -> dict[str, object] | None:
@@ -71,7 +60,7 @@ def _merge_certifications(
     n_priced = sum(cert.n_priced for cert in certifications)
     n_inexact = sum(cert.n_inexact for cert in certifications)
     worst_gap = max(cert.worst_gap for cert in certifications)
-    return _certification_metadata(
+    return certification_metadata(
         Certification(
             n_priced=n_priced,
             n_inexact=n_inexact,
@@ -145,7 +134,10 @@ class FitResult:
         return self.parameters.unpack(self.empirical_moment)
 
     def to_dict(self) -> dict[str, object]:
-        """JSON-ready estimate fields; excludes run_info, cuts, and cut_duals."""
+        """JSON-ready estimate fields.
+
+        Excludes parameters, run_info, cuts, and cut_duals.
+        """
         return {
             "theta_hat": self.theta_hat.tolist(),
             "objective": float(self.objective),
@@ -185,7 +177,7 @@ class BootstrapResult:
     ``thetas`` has one row per replication and ``converged`` flags which rows
     converged; ``mean()``, ``se()``, ``cov()``, and ``ci()`` summarize over the
     converged rows by default. ``point_estimate`` is the full-sample fit when
-    requested, and ``u_samples`` holds the per-replication agent slacks shaped
+    requested, and ``slack_samples`` holds the per-replication agent slacks shaped
     ``(B, n_agents)``. ``duals`` carries one dual payload per replication, or is
     ``None`` when the duals were streamed to ``dual_store_dir`` instead (then
     ``n_duals_stored`` counts the files written). ``iterations`` is the
@@ -198,7 +190,7 @@ class BootstrapResult:
     converged: np.ndarray
     parameters: Parameters
     point_estimate: FitResult | None = None
-    u_samples: np.ndarray | None = None
+    slack_samples: np.ndarray | None = None
     duals: tuple[DualSolution, ...] | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     iterations: int | None = None
@@ -229,14 +221,14 @@ class BootstrapResult:
             )
         object.__setattr__(self, "converged", _readonly(converged))
 
-        if self.u_samples is not None:
-            u_samples = np.asarray(self.u_samples)
-            if u_samples.ndim < 1 or u_samples.shape[0] != B:
+        if self.slack_samples is not None:
+            slack_samples = np.asarray(self.slack_samples)
+            if slack_samples.ndim < 1 or slack_samples.shape[0] != B:
                 raise ValueError(
-                    f"expected u_samples with leading dimension B = {B},"
-                    f" got shape {u_samples.shape}"
+                    f"expected slack_samples with leading dimension B = {B},"
+                    f" got shape {slack_samples.shape}"
                 )
-            object.__setattr__(self, "u_samples", _readonly(u_samples))
+            object.__setattr__(self, "slack_samples", _readonly(slack_samples))
 
         if self.duals is not None:
             duals = tuple(self.duals)
@@ -249,7 +241,7 @@ class BootstrapResult:
 
     def __setstate__(self, state: dict[str, object]) -> None:
         self.__dict__.update(state)
-        _restore_readonly(self, ("thetas", "converged", "u_samples"))
+        _restore_readonly(self, ("thetas", "converged", "slack_samples"))
 
     @property
     def n_converged(self) -> int:
@@ -268,7 +260,6 @@ class BootstrapResult:
             )
         excluded = self.converged.size - self.n_converged
         if excluded:
-            # Warn so excluded replications aren't mistaken for full-sample inference.
             warnings.warn(
                 f"summaries exclude {excluded} non-converged"
                 f" replication(s) of {self.converged.size};"
@@ -311,7 +302,6 @@ class BootstrapResult:
         ``only_converged`` selection.
         """
         selected = self._selected_for_ddof1(only_converged, "cov")
-        # atleast_2d: numpy collapses the K = 1 covariance to a scalar.
         return np.atleast_2d(np.cov(selected, rowvar=False, ddof=1))
 
     def ci(
@@ -382,22 +372,22 @@ class BootstrapResult:
                         " provenance across shards; got differing theta_hat"
                     )
 
-        has_u = [r.u_samples is not None for r in results]
-        u_samples = None
-        if any(has_u):
-            if not all(has_u):
+        has_slack = [r.slack_samples is not None for r in results]
+        slack_samples = None
+        if any(has_slack):
+            if not all(has_slack):
                 raise ValueError(
-                    "concat requires u_samples on all shards or on none;"
+                    "concat requires slack_samples on all shards or on none;"
                     " got a mixture that cannot define a common"
                     " replication alignment"
                 )
-            trailing = {r.u_samples.shape[1:] for r in results}
+            trailing = {r.slack_samples.shape[1:] for r in results}
             if len(trailing) > 1:
                 raise ValueError(
-                    "concat requires matching u_samples payload shapes;"
+                    "concat requires matching slack_samples payload shapes;"
                     f" got trailing shapes {sorted(trailing)}"
                 )
-            u_samples = np.concatenate([r.u_samples for r in results], axis=0)
+            slack_samples = np.concatenate([r.slack_samples for r in results], axis=0)
 
         has_duals = [r.duals is not None for r in results]
         duals = None
@@ -422,14 +412,12 @@ class BootstrapResult:
         merged_certification = _merge_certifications(results)
         if merged_certification is not None:
             metadata["certification"] = merged_certification
-        # iterations / dual_store_dir / n_duals_stored / run_info left at defaults:
-        # no single value is valid across merged shards.
         return cls(
             thetas=np.concatenate([r.thetas for r in results], axis=0),
             converged=np.concatenate([r.converged for r in results], axis=0),
             parameters=first.parameters,
             point_estimate=first.point_estimate,
-            u_samples=u_samples,
+            slack_samples=slack_samples,
             duals=duals,
             metadata=metadata,
         )

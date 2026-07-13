@@ -47,20 +47,19 @@ def ids_validated(local_ids: object, n_global: int | None, what: str) -> np.ndar
     ids = np.asarray(local_ids)
     if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
         raise ValueError(
-            f"{what}: local_ids must be a 1-D integer array of global agent"
+            f"{what}: agent_ids must be a 1-D integer array of global agent"
             f" ids; got shape {ids.shape}, dtype {ids.dtype}"
         )
     if ids.size and n_global is not None:
         if int(ids.min()) < 0 or int(ids.max()) >= n_global:
             raise ValueError(
-                f"{what}: local_ids must lie in [0, {n_global});"
+                f"{what}: agent_ids must lie in [0, {n_global});"
                 f" got range [{int(ids.min())}, {int(ids.max())}]"
             )
     return ids
 
 
 def agent_owner_ranks(agent_ids: np.ndarray, n_agents: int, size: int) -> np.ndarray:
-    """Rank owning each in-range agent id under contiguous global-agent sharding."""
     base, extra = divmod(int(n_agents), int(size))
     ranks = np.arange(size, dtype=np.int64)
     starts = ranks * base + np.minimum(ranks, extra)
@@ -68,8 +67,6 @@ def agent_owner_ranks(agent_ids: np.ndarray, n_agents: int, size: int) -> np.nda
 
 
 def owned_agent_ids(n_agents: int, rank: int, size: int) -> np.ndarray:
-    """Contiguous global-agent ids owned by ``rank``."""
-
     start, stop = owned_agent_bounds(n_agents, rank, size)
     return np.arange(start, stop, dtype=np.int64)
 
@@ -121,26 +118,24 @@ def route_local_ids_owned_validated(
     size: int,
     what: str,
 ) -> np.ndarray:
-    """Validate that every supplied id belongs to ``rank``'s agent shard."""
-
     if not isinstance(local_ids, np.ndarray):
         raise ValueError(
-            f"{what}: local_ids must be a numpy ndarray; got {type(local_ids).__name__}"
+            f"{what}: agent_ids must be a numpy ndarray; got {type(local_ids).__name__}"
         )
     ids = local_ids
     if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
         raise ValueError(
-            f"{what}: local_ids must be a 1-D integer array of global agent"
+            f"{what}: agent_ids must be a 1-D integer array of global agent"
             f" ids; got shape {ids.shape}, dtype {ids.dtype}"
         )
     if ids.size:
         if int(ids.min()) < 0 or int(ids.max()) >= int(n_agents):
             raise ValueError(
-                f"{what}: local_ids must lie in [0, {n_agents});"
+                f"{what}: agent_ids must lie in [0, {n_agents});"
                 f" got range [{int(ids.min())}, {int(ids.max())}]"
             )
         if ids.size > 1 and not bool(np.all(ids[1:] > ids[:-1])):
-            raise ValueError(f"{what}: local_ids must be sorted and unique")
+            raise ValueError(f"{what}: agent_ids must be sorted and unique")
     start, stop = owned_agent_bounds(n_agents, rank, size)
     if ids.size and (int(ids.min()) < start or int(ids.max()) >= stop):
         if start < stop:
@@ -148,7 +143,7 @@ def route_local_ids_owned_validated(
         else:
             expected_desc = "empty"
         raise ValueError(
-            f"{what}: local_ids must belong to rank {rank}'s contiguous"
+            f"{what}: agent_ids must belong to rank {rank}'s contiguous"
             f" global-agent shard ({expected_desc}); got out-of-shard ids"
         )
     return ids
@@ -192,8 +187,6 @@ def route_values_validated(
         gid = int(key)
         if gid in normalized:
             raise ValueError(f"{what}: duplicate value key {gid}")
-        # Fast path for the dominant payload shape (plain floats, np.float64):
-        # skip the 0-d array round-trip below.
         if isinstance(value, float):
             normalized[gid] = float(value)
             continue

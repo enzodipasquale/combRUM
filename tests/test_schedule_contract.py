@@ -167,6 +167,6 @@ def test_round_robin_repr_shows_chunks() -> None:
 
 def test_dual_informed_repr_shows_params() -> None:
     assert (
-        repr(DualInformed(concentration_threshold=0.75, min_revisit_period=8))
-        == "DualInformed(concentration_threshold=0.75, min_revisit_period=8)"
+        repr(DualInformed(concentration_threshold=0.75, max_staleness=8))
+        == "DualInformed(concentration_threshold=0.75, max_staleness=8)"
     )

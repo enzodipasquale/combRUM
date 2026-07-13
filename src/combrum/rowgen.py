@@ -5,23 +5,6 @@ engine drives, so the engine, not the method, owns the cross-rank
 reduce and exchange. With the collective hoisted out of the method, one
 engine can fold several live replications through one reduce/exchange
 super-step instead of paying one collective per replication.
-
-* :meth:`RowGenStep.contribute`: transport-free, rank-local. Folds a
-  rank's priced demands into a :class:`Contribution`.
-* the engine reduces per-rank :class:`Contribution` into :class:`Reduced`
-  (MAX-reduce + cut exchange, or reproducible SUM).
-* :meth:`RowGenStep.finalise`: transport-free, rank-local. Maps the
-  reduced value onto a :class:`StepOutcome`.
-* :meth:`RowGenStep.apply_step`: root-only install/solve plus the single
-  master-state broadcast (master lives on rank 0 alone).
-
-The two reduction shapes:
-
-* per-agent-slack (NSlack): MAX-reduce a scalar and exchange the
-  locally-violated rows with :class:`MaxContribution` / :class:`MaxReduced`.
-* aggregate-slack (OneSlack): reproducible SUM of per-agent weighted
-  vectors keyed on global id with :class:`SumContribution` /
-  :class:`SumReduced`.
 """
 
 from __future__ import annotations
@@ -51,11 +34,12 @@ class MaxContribution:
 
 @dataclass(frozen=True)
 class SumContribution:
-    """Aggregate-slack reduction half: per-agent vectors to SUM.
+    """Aggregate-slack reduction half: weighted vectors to SUM.
 
-    ``terms`` is ``(n_local, M)``, one weighted ``(phi | eps)`` row per
-    local agent, and ``ids`` is ``(n_local,)`` the matching global agent
-    ids. The engine SUMs these keyed on ``ids``; the reduction is
+    ``terms`` is ``(n_rows, M)`` weighted ``(phi | eps)`` rows and ``ids``
+    the matching ``(n_rows,)`` sum keys: one row per local agent keyed by
+    global agent id, or one pre-summed row under OneSlack's single-rank
+    fast path. The engine SUMs these keyed on ``ids``; the reduction is
     reproducible, so the aggregate lands bitwise identical on every rank.
     """
 
@@ -63,8 +47,6 @@ class SumContribution:
     ids: np.ndarray
 
 
-# rank-local reduction half; the engine dispatches on the concrete type, so a
-# new reduction shape is a member it must handle, not a droppable key
 Contribution = MaxContribution | SumContribution
 
 
@@ -128,9 +110,10 @@ class RowGenStep(Protocol):
         ...
 
     def apply_step(self, install_payload: object) -> int:
-        """Install the payload on root, solve, and broadcast the master state.
+        """Install the payload on the owner rank, solve, and broadcast the
+        master state.
 
-        The method's one inherent root collective. Returns the progress
-        count (cuts admitted); ``0`` is a valid step.
+        The method's one inherent owner-rooted collective. Returns the
+        progress count (cuts newly installed); ``0`` is a valid step.
         """
         ...

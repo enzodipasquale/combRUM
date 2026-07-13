@@ -1,9 +1,4 @@
-"""Shared fit-context builder: single owner of estimation context assembly.
-
-Both the point estimate (:func:`combrum.engine.estimate`) and the
-bootstrap/sweep build their per-rank fit context here. All optional inputs at
-their default (``None``) reproduce the point-estimate context.
-"""
+"""Shared fit-context builder: single owner of estimation context assembly."""
 
 from __future__ import annotations
 
@@ -33,13 +28,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class BuiltContext:
-    """Assembled fit context plus observed-data quantities folded into a result.
-
-    ``ctx`` is the per-rank :class:`~combrum.context.FitContext` (master on
-    rank 0, cuts reinstalled for a warm start). ``c_theta`` is the reduced
-    master objective vector. ``empirical_moment`` is the observed-data moment
-    (per-observation mean of observed-bundle feature rows), held on every rank.
-    """
+    """Assembled fit context plus observed-data quantities folded into a result."""
 
     ctx: FitContext
     c_theta: np.ndarray
@@ -131,8 +120,6 @@ def build_fit_context(
     S = int(shocks.shape[1])
     n_agents = N * S
 
-    # Interleaved shard a % size == rank, matching run_fit's per-rank ownership
-    # so every cut and reduction is keyed identically.
     local_ids = np.arange(transport.rank, n_agents, transport.size, dtype=np.int64)
 
     if weights is None:
@@ -149,8 +136,6 @@ def build_fit_context(
             )
         if not np.all(np.isfinite(w)) or np.any(w < 0.0):
             raise ValueError("weights must be finite and nonnegative")
-        # np.tile, not np.repeat: agent order is a = s*N + i, so the S copies
-        # of observation i sit at a % N == i.
         agent_w = np.tile(w, S)
         theta_coef = agent_w
         agent_weights = agent_w
@@ -175,20 +160,12 @@ def build_fit_context(
 
     def _rank0_master() -> Any:
         if master is not None:
-            # Persistent-master reuse: skip make_master and reinstall (build-only).
-            # c_theta / empirical_moment are still recomputed above, never baked
-            # into the reused master. Rank-0 only.
             return master
-        # NSlack masters take the weight vector directly; OneSlack holds one
-        # aggregate slack, so a unit callable serves its single lazy column.
         u_coef = (
             (lambda agent_id: 1.0)
             if isinstance(formulation, OneSlack)
             else agent_weights
         )
-        # On a degenerate optimal face the published vertex depends on the
-        # simplex config, so Gurobi defaults to warm-started primal simplex.
-        # Caller-supplied master_params override these defaults key by key.
         params = _master_params_for_backend(backend_for_master, master_params)
         master_obj = make_master(
             K,
@@ -197,15 +174,10 @@ def build_fit_context(
             u_coef,
             backend=backend_for_master,
             params=params,
-            # Pre-declare per-agent u-columns only for per-agent-slack;
-            # OneSlack has one aggregate slack, so n_agents columns would be
-            # spurious and degeneracy-inducing.
             n_agents=None if isinstance(formulation, OneSlack) else n_agents,
             env=master_env,
         )
         if warm_cuts is not None:
-            # Reinstall the prior cut set BEFORE setup's solve so the
-            # formulation rebuilds its bookkeeping from the warm relaxation.
             master_obj.reinstall(prepare_warm_cuts(formulation, warm_cuts))
         return master_obj
 

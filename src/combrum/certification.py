@@ -11,11 +11,8 @@ import numpy as np
 class Certification:
     """Aggregate exactness of the pricing calls behind one result.
 
-    ``n_priced`` is the number of pricing calls aggregated, ``n_inexact``
-    those that could not certify exactness, and ``worst_gap`` the largest
-    per-call gap. ``math.inf`` means at least one inexact call had an
-    unknown finite bound gap. Invariant: ``worst_gap == 0`` iff
-    ``n_inexact == 0``.
+    ``math.inf`` means at least one inexact call had an
+    unknown finite bound gap.
     """
 
     n_priced: int
@@ -35,7 +32,6 @@ class Certification:
             )
         object.__setattr__(self, "n_inexact", int(self.n_inexact))
         worst_gap = float(self.worst_gap)
-        # "not >=" also rejects NaN.
         if not worst_gap >= 0.0:
             raise ValueError(f"worst_gap must be >= 0; got {worst_gap}")
         if self.n_inexact == 0 and worst_gap != 0.0:
@@ -49,3 +45,21 @@ class Certification:
                 f" (n_inexact = {self.n_inexact}); got {worst_gap}"
             )
         object.__setattr__(self, "worst_gap", worst_gap)
+
+
+def certification_metadata(certification: Certification) -> dict[str, object]:
+    """JSON-plain dict of a Certification for ``FitResult.metadata``.
+
+    Returns native ints/float, never the typed object: ``to_dict()`` passes
+    ``metadata`` through unchanged, so a typed object there would break
+    ``json.dumps(fit.to_dict())``. Unknown bound gaps are encoded without
+    non-finite floats so callers can use strict JSON.
+    """
+    worst_gap = float(certification.worst_gap)
+    worst_gap_unknown = not np.isfinite(worst_gap)
+    return {
+        "n_priced": int(certification.n_priced),
+        "n_inexact": int(certification.n_inexact),
+        "worst_gap": None if worst_gap_unknown else worst_gap,
+        "worst_gap_unknown": bool(worst_gap_unknown),
+    }

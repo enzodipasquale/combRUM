@@ -22,12 +22,7 @@ from combrum.transport.base import Transport
 
 
 class ResultPublication(IntFlag):
-    """Final artifacts a formulation should publish after convergence.
-
-    ``SUMMARY`` is theta/objective/count only; the ordinary flags opt into
-    agent-axis slack, installed rows, or the dual payload. ``FULL`` requests
-    all three and broadcasts them to every rank.
-    """
+    """Final artifacts a formulation should publish after convergence."""
 
     SUMMARY = 0
     SLACK = auto()
@@ -74,7 +69,6 @@ def _coerce_result_publication(value: object) -> ResultPublication:
 
 
 def _readonly(arr: np.ndarray) -> np.ndarray:
-    # Mutable ndarray payloads would defeat the frozen dataclass guarantee.
     arr.setflags(write=False)
     return arr
 
@@ -92,18 +86,7 @@ def _coerce_agent_vector(ctx: FitContext, name: str) -> None:
 
 @dataclass(frozen=True)
 class FitContext:
-    """Geometry and interfaces handed from the driver to a formulation for one fit.
-
-    ``transport`` is required even for serial runs (use the serial reference)
-    so no code path is single-rank only. ``master_backend``, ``cut_policy``,
-    and ``schedule`` default to ``None`` for master-free methods.
-    ``master_params`` carries backend-owned knobs opaquely. ``theta_init`` is
-    the single seed field (start point, proximal reference, warm-start anchor);
-    method-specific hyperparameters do not belong on this class.
-
-    Invariants are validated at construction; array fields are coerced with
-    :func:`numpy.asarray` and stored read-only.
-    """
+    """Geometry and interfaces handed from the driver to a formulation for one fit."""
 
     K: int
     N: int
@@ -120,19 +103,15 @@ class FitContext:
     cut_policy: CutPolicy | None = None
     schedule: RepricingSchedule | None = None
     master_params: dict[str, object] = field(default_factory=dict)
-    # Rank hosting this fit's master; default 0 is root-hosted. Setting it
-    # lets a formulation host its master off root without forking install/solve.
     owner_rank: int = 0
     result_publication: ResultPublication = ResultPublication.FULL
     weight_mode: Literal["dense", "distributed"] = "dense"
 
     @property
     def n_agents(self) -> int:
-        # Derived, never stored: a stored copy could drift from N * S.
         return self.N * self.S
 
     def slack_weight(self, agent_id: int) -> float:
-        """Coefficient for agent ``agent_id``'s slack variable."""
         if self.weight_mode == "dense":
             return float(self.agent_weights[int(agent_id)])  # type: ignore[index]
         assert self.slack_coef is not None
@@ -243,7 +222,6 @@ class FitContext:
                 "transport must implement combrum.transport.base.Transport;"
                 f" got {type(self.transport).__name__}"
             )
-        # Optional interfaces (master_backend/cut_policy/schedule) stay duck-typed.
         if not isinstance(self.master_params, dict):
             raise ValueError(
                 "master_params must be a dict of backend-owned knobs;"

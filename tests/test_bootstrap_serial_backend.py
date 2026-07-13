@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import combrum
-from combrum.bootstrap import NativeDraws
+from combrum.bootstrap import ExponentialDraws
 from combrum.formulation import FormulationResult
 from combrum.interface_resolution import FeatureMap
 from combrum.model import Data, Model
@@ -70,7 +70,9 @@ def _run_fake_bootstrap(monkeypatch, model, data, *, n_bootstrap=4):
         model,
         data,
         n_bootstrap=n_bootstrap,
-        weights=NativeDraws(n_obs=len(data.observables), base_seed=7),
+        weight_source=ExponentialDraws(
+            n_observations=len(data.observables), base_seed=7
+        ),
         transport=SerialTransport(),
         master_backend="auto",
     )
@@ -139,7 +141,7 @@ def test_serial_bootstrap_passes_warm_start_to_every_replication(
         _theta_model(),
         _zeros_data(),
         n_bootstrap=3,
-        weights=NativeDraws(n_obs=2, base_seed=7),
+        weight_source=ExponentialDraws(n_observations=2, base_seed=7),
         warm_start=point,
         warm_cuts=rows,
     )
@@ -158,7 +160,9 @@ def test_serial_bootstrap_resolves_backend_once(monkeypatch) -> None:
     assert run.build_resolved == ["highs", "highs", "highs", "highs"]
 
     # same base_seed as the run; weights_for(b) is rep b's RNG substream
-    oracle = NativeDraws(n_obs=len(data.observables), base_seed=7)
+    oracle = ExponentialDraws(
+        n_observations=len(data.observables), base_seed=7
+    )
     assert len(run.captured_weights) == 4
     for b, seen in enumerate(run.captured_weights):
         assert np.array_equal(seen, oracle.weights_for(b))
@@ -206,7 +210,7 @@ def test_serial_bootstrap_rejects_multirank_dense_transport() -> None:
                 model,
                 data,
                 n_bootstrap=1,
-                weights=NativeDraws(n_obs=2, base_seed=7),
+                weight_source=ExponentialDraws(n_observations=2, base_seed=7),
                 transport=transport,
             )
         except ValueError as exc:
@@ -225,7 +229,7 @@ def test_serial_bootstrap_rejects_multirank_dense_transport() -> None:
 def test_serial_bootstrap_validates_data_shapes_before_cache_build() -> None:
     bootstrap_mod = importlib.import_module("combrum.bootstrap")
     model = _theta_model()
-    weights = NativeDraws(n_obs=2, base_seed=7)
+    weight_source = ExponentialDraws(n_observations=2, base_seed=7)
 
     bad_shocks = Data(
         observed_bundles=np.zeros((2, 1), dtype=bool),
@@ -233,7 +237,9 @@ def test_serial_bootstrap_validates_data_shapes_before_cache_build() -> None:
         observables=np.arange(2),
     )
     with pytest.raises(ValueError, match=r"expected shocks of shape \(N, S, \.\.\.\)"):
-        bootstrap_mod.bootstrap(model, bad_shocks, n_bootstrap=1, weights=weights)
+        bootstrap_mod.bootstrap(
+            model, bad_shocks, n_bootstrap=1, weight_source=weight_source
+        )
 
     bad_observed = Data(
         observed_bundles=np.zeros(2, dtype=bool),
@@ -243,7 +249,9 @@ def test_serial_bootstrap_validates_data_shapes_before_cache_build() -> None:
     with pytest.raises(
         ValueError, match=r"expected observed_bundles of shape \(N, M\)"
     ):
-        bootstrap_mod.bootstrap(model, bad_observed, n_bootstrap=1, weights=weights)
+        bootstrap_mod.bootstrap(
+            model, bad_observed, n_bootstrap=1, weight_source=weight_source
+        )
 
 
 def test_serial_bootstrap_reuses_observed_rows_for_materialized_path(

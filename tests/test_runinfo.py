@@ -1,7 +1,7 @@
 """The opt-in run-metadata side-channel costs the default path nothing.
 
-``estimate`` takes a ``level: RunInfoLevel`` and attaches ``RunMetadata`` to
-``run_info``. Two invariants hold at every level:
+``estimate`` takes a ``run_info_level: RunInfoLevel`` and attaches
+``RunMetadata`` to ``run_info``. Two invariants hold at every level:
 
 * Metadata is built from already-computed data plus cached rank-local reads,
   so OFF/DEFAULT/META issue identical collectives; FULL adds exactly one
@@ -131,7 +131,7 @@ def _estimate(
         master_backend=master_backend,
         tolerance=TOLERANCE,
         max_iterations=MAX_ITERATIONS,
-        level=level,
+        run_info_level=level,
     )
 
 
@@ -196,12 +196,6 @@ def test_default_surfaces_tier0_only() -> None:
     # hand-built topology and against SerialTransport().node.
     assert isinstance(ri.node, NodeTopology)
     assert ri.node == NodeTopology(node_id=0, node_rank=0, node_size=1, n_nodes=1)
-    assert (ri.node.node_id, ri.node.node_rank, ri.node.node_size, ri.node.n_nodes) == (
-        0,
-        0,
-        1,
-        1,
-    )
     assert ri.node == SerialTransport().node
     # estimate.py bcasts one runtime_seconds into both FitResult and
     # RunMetadata, so the two are the same value bit for bit.
@@ -349,8 +343,8 @@ def test_collect_provenance_composes_optional_fields_exactly(monkeypatch) -> Non
     prov = runinfo.collect_provenance("auto", resolved_backend="highs")
 
     assert prov.mpi_lib == "Open MPI v9.9.9, faked banner"
-    assert prov.gurobi_version == "11.2.3"  # ".".join(map(str, (11, 2, 3)))
-    assert prov.blas == "openblas/0.3.21"   # name/version, both present & known
+    assert prov.gurobi_version == "11.2.3"
+    assert prov.blas == "openblas/0.3.21"  # name/version, both present & known
     # The always-populated head + backend passthrough round out the full object.
     assert prov.python_version == platform.python_version()
     assert prov.numpy_version == np.__version__
@@ -538,8 +532,8 @@ def test_dense_estimate_rejects_multirank_transport_at_every_level(
     """The dense estimator refuses a non-serial transport at every level.
 
     ``estimate`` guards ``reject_multirank_dense_transport`` before it inspects
-    ``level``, so OFF through FULL all raise without constructing RunMetadata
-    or reaching the Tier-2 collective.
+    ``run_info_level``, so OFF through FULL all raise without constructing
+    RunMetadata or reaching the Tier-2 collective.
     """
     with pytest.raises(ValueError, match="does not support non-serial"):
         LocalCluster(size).run(lambda t: _estimate("qkp", t, level=level))

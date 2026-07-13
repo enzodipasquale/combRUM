@@ -1,9 +1,7 @@
 """Cross-rank communication contract for the distributed estimator.
 
 :class:`Transport` is the only interface through which ranks exchange data.
-Each primitive states the canonical order it uses: global agent id for row-keyed
-sums, contributing rank index for fixed-rank aggregates, and canonical cut keys
-for cut exchange. Reference implementations live in
+Reference implementations live in
 :mod:`combrum.transport.reference`; conforming implementations must match them
 under the conformance suite, bitwise wherever a docstring says so.
 """
@@ -31,9 +29,6 @@ _CUT_ROW_WIRE_HEADER_BYTES = 5 * np.dtype(np.float64).itemsize
 class NodeTopology:
     """One rank's place in the node layout.
 
-    ``node_id`` is the hosting node in ``[0, n_nodes)``; ``node_rank`` is this
-    rank's index among its node's ranks in ``[0, node_size)``; ``node_size`` is
-    the number of ranks on this node; ``n_nodes`` is the number of nodes.
     ``node_rank == 0`` marks the node's publishing member for
     :meth:`Transport.node_shared`.
     """
@@ -64,7 +59,7 @@ class TransportError(RuntimeError):
     """A transport-level failure agreed across ranks.
 
     ``rank`` is the origin rank; every rank of a collective raises the same
-    origin. ``message`` preserves the original error text.
+    origin.
     """
 
     def __init__(self, rank: int, message: str) -> None:
@@ -187,7 +182,6 @@ class CutRow:
             bundle_key=new_key,
         )
         if new_key == self.bundle_key:
-            # Same key, same bundle: carry the decode memo to the new row.
             cached = self.__dict__.get("_bundle")
             if cached is not None:
                 object.__setattr__(row, "_bundle", cached)
@@ -206,8 +200,7 @@ class CutRow:
         (those produced by :class:`~combrum.NSlack`). Raises ``ValueError``
         for cuts whose key is an opaque aggregate digest
         (:class:`~combrum.OneSlack`), which pool many bundles and so carry no
-        single generating bundle. Decoded once per row: installed rows are
-        read across many iterations, so the decode is memoized.
+        single generating bundle.
         """
         cached = self.__dict__.get("_bundle")
         if cached is None:
@@ -216,8 +209,6 @@ class CutRow:
         return cached
 
     def __getstate__(self) -> dict[str, object]:
-        # The decoded-bundle memo stays process-local: re-decoding on the
-        # receiving side is cheaper than shipping the array beside its bytes.
         state = dict(self.__dict__)
         state.pop("_bundle", None)
         return state
@@ -351,7 +342,7 @@ class Transport(ABC):
     def scatter_by_agent(
         self,
         arrays: dict[str, np.ndarray] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         root: int = 0,
     ) -> dict[str, np.ndarray]:
@@ -360,8 +351,8 @@ class Transport(ABC):
         Rank ``root`` passes ``arrays``: a dict of arrays whose axis 0 is
         indexed by global agent id (every value shares the same axis-0
         length); every other rank passes ``None``. Each rank passes its own
-        ``local_ids`` (1-D integer global ids) and receives exactly
-        ``{key: arrays[key][local_ids]}``, its rows in ``local_ids`` order,
+        ``agent_ids`` (1-D integer global ids) and receives exactly
+        ``{key: arrays[key][agent_ids]}``, its rows in ``agent_ids`` order,
         as read-only arrays.
 
         The mapping is the whole contract; how the rows travel is each
@@ -390,7 +381,7 @@ class Transport(ABC):
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         source: int,
         n_agents: int,
@@ -406,7 +397,7 @@ class Transport(ABC):
     def route_agent_values_batched(
         self,
         values_by_rep: Mapping[int, Mapping[int, float]] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         owners: np.ndarray,
         n_agents: int,

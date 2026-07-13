@@ -242,7 +242,7 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
                 max_iterations=3,
                 schedule=_Schedule(),
                 qp_weight=1.0,
-                decay=1,
+                qp_iterations=1,
                 penalty_ref=penalty_ref,
                 activity=activity,
             ),
@@ -260,14 +260,15 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
             tuple(master.refs),
         )
 
-    # weight(it) = qp_weight while it < decay, else exactly 0, recomputed here
-    # from the config values rather than read from any driver local. With
-    # qp_weight=1.0 and decay=1 the owner installs exactly (1.0, 0.0): the QP
-    # solve, then one revert solve back to a pure LP — later zero-weight
-    # iterations must not keep re-solving an already-pure master.
-    qp_weight, decay = 1.0, 1
+    # weight(it) = qp_weight while it < qp_iterations, else exactly 0,
+    # recomputed here from the config values rather than read from any driver
+    # local. With qp_weight=1.0 and qp_iterations=1 the owner installs exactly
+    # (1.0, 0.0): the QP solve, then one revert solve back to a pure LP —
+    # later zero-weight iterations must not keep re-solving an already-pure
+    # master.
+    qp_weight, qp_iterations = 1.0, 1
     expected_weights = tuple(
-        qp_weight if it < decay else 0.0 for it in range(2)
+        qp_weight if it < qp_iterations else 0.0 for it in range(2)
     )
     final_weight = expected_weights[-1]
 
@@ -351,7 +352,7 @@ def test_driver_stages_penalty_on_formulation_when_supported(monkeypatch) -> Non
         LoopConfig(
             max_iterations=2,
             qp_weight=1.0,
-            decay=1,
+            qp_iterations=1,
             penalty_ref="dynamic",
         ),
     )

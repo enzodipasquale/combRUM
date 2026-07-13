@@ -170,6 +170,15 @@ def _min_seconds(fn, reps: int = _REPS) -> float:
     return best
 
 
+def _single_sort_reduce(vals: np.ndarray, ids: np.ndarray) -> np.ndarray:
+    """One argsort, one gather, one reduce — the kernel's dominant cost paid
+    exactly once, minus canonical_sum's uniqueness/validation bookkeeping.
+    A healthy kernel sits just above this; a redundant argsort shows up as a
+    near-doubling."""
+    order = np.argsort(ids, kind="stable")
+    return np.add.reduce(vals[order], axis=0)
+
+
 def test_canonical_sum_overhead_is_bounded_not_a_cliff() -> None:
     rng = np.random.default_rng(20260613)
     # Scrambled unique global ids: the case where the sort actually reorders.
@@ -250,15 +259,6 @@ _GROWTH_OVERHEAD_CEILING = 45.0
 #: skips. A single redundant argsort pushes the ratio to ~1.8-1.95x; 1.5 sits
 #: in that gap.
 _REFERENCE_CEILING = 1.5
-
-
-def _single_sort_reduce(vals: np.ndarray, ids: np.ndarray) -> np.ndarray:
-    """One argsort, one gather, one reduce — the kernel's dominant cost paid
-    exactly once, minus canonical_sum's uniqueness/validation bookkeeping.
-    A healthy kernel sits just above this; a redundant argsort shows up as a
-    near-doubling."""
-    order = np.argsort(ids, kind="stable")
-    return np.add.reduce(vals[order], axis=0)
 
 
 def test_canonical_sum_cost_grows_subquadratically() -> None:

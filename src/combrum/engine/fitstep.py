@@ -13,8 +13,8 @@ One iteration, for a :class:`~combrum.rowgen.RowGenStep` formulation:
    engine reduces, dispatching on the concrete contribution type.
 4. finalise (transport-free): the formulation maps the reduced value
    onto a :class:`~combrum.rowgen.StepOutcome`.
-5. apply_step (root-only): the formulation installs/solves on root and
-   mirrors the master state in its one inherent root bcast.
+5. apply_step (owner-only): the formulation installs/solves on the owner
+   rank and mirrors the master state in its one inherent owner-rooted bcast.
 
 The reduce/exchange shapes match the formulations' bundled reduce exactly
 (``allreduce_max`` + ``exchange_cuts`` for MAX, ``sum_reproducible`` for SUM),
@@ -50,19 +50,7 @@ from combrum.transport.base import Transport
 
 @dataclass(frozen=True)
 class StepResult:
-    """One fit-step's outcome plus the per-step collective tally.
-
-    ``violation`` is the stop-rule distance; ``progressed`` is the
-    method-owned progress count from ``apply_step`` (cuts admitted; ``0`` is a
-    normal step). ``reduce_rounds`` / ``exchange_rounds`` are the engine-side
-    collective counts for this step.
-
-    ``n_priced`` / ``n_inexact`` are this rank's shard tally (demands priced and
-    how many had ``gap > 0``), rank-local with no communication round.
-
-    The timing fields are local wall times around existing phases (no extra
-    collectives or solver calls).
-    """
+    """One fit-step's outcome plus the per-step collective tally."""
 
     violation: float
     progressed: int
@@ -81,18 +69,7 @@ def reduce_contribution(
     *,
     owner_rank: int = 0,
 ) -> tuple[Reduced, int, int]:
-    """Reduce + exchange a contribution, dispatched on its concrete type.
-
-    Returns the :class:`~combrum.rowgen.Reduced` plus this step's
-    ``(reduce_rounds, exchange_rounds)`` collective counts.
-
-    * :class:`~combrum.rowgen.MaxContribution`: ``allreduce_max`` of the
-      rank-local worst, then one ``exchange_cuts`` routing locally-violated
-      rows to their owning rank. Two rounds.
-    * :class:`~combrum.rowgen.SumContribution`: one ``sum_reproducible`` keyed
-      on global ids, landing the aggregate bitwise-identical on every rank. One
-      round, no exchange.
-    """
+    """Reduce + exchange a contribution, dispatched on its concrete type."""
     if isinstance(contribution, MaxContribution):
         owners = np.array([int(owner_rank)], dtype=np.int64)
         global_worst = transport.allreduce_max(contribution.worst)
@@ -122,10 +99,6 @@ def fit_step(
     demand_sink: Callable[..., None] | None = None,
 ) -> StepResult:
     """Run one engine-owned fit-step over a transport-passive formulation.
-
-    Drives the phase pipeline in the module docstring, with the engine owning
-    the one collective set (:func:`reduce_contribution`) between contribute and
-    finalise.
 
     ``before_apply`` is an optional hook run after finalise and before
     apply_step. The penalty path uses it for formulations without
@@ -165,7 +138,7 @@ def fit_step(
                 worst_gap=worst_gap,
             )
         contribution = formulation.contribute(demands)
-        return demands, contribution, n_priced, n_inexact, worst_gap
+        return contribution, n_priced, n_inexact
 
     price_t0 = time.perf_counter()
     guard_pricing = transport.size > 1 or needs_conformance_guard(
@@ -173,15 +146,9 @@ def fit_step(
     )
     if guard_pricing:
         with transport.collective():
-            (
-                demands,
-                contribution,
-                n_priced,
-                n_inexact,
-                worst_gap,
-            ) = _price_and_contribute()
+            contribution, n_priced, n_inexact = _price_and_contribute()
     else:
-        demands, contribution, n_priced, n_inexact, worst_gap = _price_and_contribute()
+        contribution, n_priced, n_inexact = _price_and_contribute()
     price_t1 = time.perf_counter()
     reduced, reduce_rounds, exchange_rounds = reduce_contribution(
         transport, contribution, owner_rank=owner_rank

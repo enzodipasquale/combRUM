@@ -1,8 +1,4 @@
-"""Ordered named parameter blocks: the layout of the flat theta vector.
-
-A :class:`Parameters` layout determines ``K``, the bound vectors, and the
-named accessors on every result type.
-"""
+"""Ordered named parameter blocks: the layout of the flat theta vector."""
 
 from __future__ import annotations
 
@@ -38,7 +34,6 @@ def _parse_spec(name: str, spec: BlockSpec, offset: int) -> _Block:
         raise ValueError(
             f"parameter block {name!r}: expected integer k >= 1, got {k!r}"
         )
-    # "not lb <= ub" also rejects NaN bounds, which compare False both ways.
     if not lb <= ub:
         raise ValueError(
             f"parameter block {name!r}: lb <= ub required; got lb={lb}, ub={ub}"
@@ -151,7 +146,6 @@ class Parameters:
         return tuple((b.name, b.lb, b.ub, b.size) for b in self._blocks)
 
     def __getstate__(self) -> tuple[tuple[str, BlockSpec], ...]:
-        """Pickle payload; __reduce__ rebuilds through __init__, not __setstate__."""
         return tuple((b.name, (b.lb, b.ub, b.size)) for b in self._blocks)
 
     def __reduce__(
@@ -160,7 +154,6 @@ class Parameters:
         return (type(self), (self.__getstate__(),))
 
     def __eq__(self, other: object) -> bool:
-        # Layout equality gates result merging: theta entries must align exactly.
         if not isinstance(other, Parameters):
             return NotImplemented
         return self._spec() == other._spec()

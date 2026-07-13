@@ -1,14 +1,4 @@
-"""Run metadata surfaced on a fit result.
-
-:class:`RunMetadata` exposes already-computed provenance and diagnostics;
-:class:`RunInfoLevel` gates how much is attached:
-
-* ``OFF`` attaches nothing (``run_info=None``).
-* ``DEFAULT`` attaches rank-local diagnostics, certification, runtime, and the
-  rank/size/node layout with no new computation or collective.
-* ``META`` adds one-time rank-local provenance and a single rank-0 peak-RSS read.
-* ``FULL`` adds the cross-rank aggregate peaks.
-"""
+"""Run metadata surfaced on a fit result."""
 
 from __future__ import annotations
 
@@ -42,10 +32,8 @@ class RunInfoLevel(enum.IntEnum):
 class Provenance:
     """The run's environment fingerprint.
 
-    ``mpi_lib``, ``blas``, and ``gurobi_version`` are ``None`` when the
-    corresponding library or config is unavailable. ``resolved_backend`` is
-    the concrete backend selected after ``"auto"`` resolution when the caller
-    provides it.
+    ``resolved_backend`` is the concrete backend selected after ``"auto"``
+    resolution when the caller provides it.
     """
 
     python_version: str
@@ -82,7 +70,6 @@ class RunMetadata:
     rss_max_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        # Fail fast on a malformed node layout rather than at downstream read.
         if not isinstance(self.node, NodeTopology):
             raise TypeError(
                 "expected a transport NodeTopology for RunMetadata.node,"
@@ -110,12 +97,7 @@ def collect_provenance(
     *,
     resolved_backend: str | None = None,
 ) -> Provenance:
-    """Probe the run's environment fingerprint.
-
-    ``mpi_lib`` comes from ``mpi4py``, ``blas`` from ``numpy.show_config``
-    (numpy >= 1.25), and ``gurobi_version`` as a dotted string from
-    ``gurobipy``.
-    """
+    """Probe the run's environment fingerprint."""
     try:
         from mpi4py import MPI  # noqa: PLC0415
 

@@ -193,7 +193,7 @@ class NetworkDemandOracle(cb.Oracle):
         self.edge_cols = arrays["edge_cols"]
         self.shocks = arrays["shocks"]
 
-    def price_batch(self, theta: np.ndarray, local_ids: np.ndarray) -> dict[int, cb.Demand]:
+    def price_batch(self, theta: np.ndarray, agent_ids: np.ndarray) -> dict[int, cb.Demand]:
         alpha = theta[: self.T]
         beta = theta[self.T : self.T + K_BETA]
         gamma = theta[-1]
@@ -202,7 +202,7 @@ class NetworkDemandOracle(cb.Oracle):
         )
         pair = np.full(self.edge_rows.size, gamma)
         demands: dict[int, cb.Demand] = {}
-        for agent_id in local_ids:
+        for agent_id in agent_ids:
             obs_id = agent_id % self.N
             sim_id = agent_id // self.N
             linear = base + self.shocks[obs_id, sim_id]

@@ -1,8 +1,8 @@
-"""Proximal penalty: decay-to-pure-LP correctness and the iteration win.
+"""Proximal penalty: fixed-then-off pure-LP correctness and the iteration win.
 
 Both legs drive the penalty through the test-local walk's schedule
-(``qp_weight``/``decay``/``penalty_ref``): the weight is held at
-``qp_weight`` for ``decay`` iterations and then drops to exactly zero, so
+(``qp_weight``/``qp_iterations``/``penalty_ref``): the weight is held at
+``qp_weight`` for ``qp_iterations`` iterations and then drops to exactly zero, so
 the terminating solve is always a pure LP whose duals are true LP duals. The walk mirrors the production
 driver's objective-staging path, with ``MasterBackend.set_penalty`` as the
 backend contract surface.
@@ -51,8 +51,8 @@ pytestmark = pytest.mark.slow
 PARITY_BAND = 1e-9
 FLAT_FACE_RAW_OBJECTIVE = -1.0
 
-# Penalty schedule for the flat-face fixture: weight 10 held for `decay`
-# iterations, then 0, so the terminating solve is a pure LP.
+# Penalty schedule for the flat-face fixture: weight 10 held for
+# `qp_iterations` iterations, then 0, so the terminating solve is a pure LP.
 FLAT_QP_WEIGHT = 10.0
 FLAT_DECAY = 3
 FLAT_REF = "static"
@@ -211,7 +211,7 @@ def test_flat_face_is_degenerate_and_penalty_selects_a_determinate_point() -> (
 
 
 # --------------------------------------------------------------------------
-# (b): the decay walk — unique answer, pure-LP terminating solve, equal obj
+# (b): the qp_iterations walk — unique answer, pure-LP terminating solve, equal obj
 # --------------------------------------------------------------------------
 
 
@@ -228,7 +228,7 @@ def test_penalty_walk_is_unique_pure_lp_and_objective_matches_no_penalty() -> (
             SerialTransport(),
             arrays,
             qp_weight=FLAT_QP_WEIGHT,
-            decay=FLAT_DECAY,
+            qp_iterations=FLAT_DECAY,
             penalty_ref=FLAT_REF,
         )
 
@@ -240,7 +240,7 @@ def test_penalty_walk_is_unique_pure_lp_and_objective_matches_no_penalty() -> (
     assert first.result.theta_hat.tobytes() == second.result.theta_hat.tobytes()
     assert first.objective == second.objective
 
-    # The weight finished decaying before convergence was accepted, so the
+    # The weight dropped to zero before convergence was accepted, so the
     # published theta carries no residual quadratic term.
     assert first.final_penalty_weight == 0.0
 
@@ -270,7 +270,7 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
         SerialTransport(),
         arrays,
         qp_weight=FLAT_QP_WEIGHT,
-        decay=FLAT_DECAY,
+        qp_iterations=FLAT_DECAY,
         penalty_ref=FLAT_REF,
     )
     assert outcome.converged
@@ -307,7 +307,7 @@ def test_penalty_walk_terminating_duals_are_valid_lp_duals() -> None:
     observed = arrays["observed"]
     n_agents_selecting = observed.astype(np.int64).sum(axis=0)
     c_theta = -n_agents_selecting.astype(np.float64)
-    assert c_theta[0] == -2.0  # items 0/2 select item 0
+    assert c_theta[0] == -2.0  # agents 0/2 select item 0
     assert c_theta[1] == 0.0  # no agent selects item 1
 
     # theta_0 is the identified coordinate; it lands strictly inside the box,
@@ -411,7 +411,7 @@ def test_highs_penalty_hard_errors_no_silent_approximation() -> None:
             SerialTransport(),
             backend="highs",
             qp_weight=FLAT_QP_WEIGHT,
-            decay=FLAT_DECAY,
+            qp_iterations=FLAT_DECAY,
             penalty_ref=FLAT_REF,
         )
 
@@ -429,7 +429,7 @@ def test_penalty_walk_rank_invariant_bitwise(size: int) -> None:
     # must publish bitwise-identical results.
     arrays = flat_face_arrays()
     penalty = dict(
-        qp_weight=FLAT_QP_WEIGHT, decay=FLAT_DECAY, penalty_ref=FLAT_REF
+        qp_weight=FLAT_QP_WEIGHT, qp_iterations=FLAT_DECAY, penalty_ref=FLAT_REF
     )
     serial = _flat_walk(SerialTransport(), arrays, **penalty)
     results = LocalCluster(size).run(
@@ -459,8 +459,8 @@ assert len(G5_SIZES) >= 2
 G5_N_ITEMS = 8
 # The penalty schedule that wins across the swept sizes (selected from the
 # dynamic-vs-static measurement below; static is the stronger performer on
-# this family). qp_weight=1 is a light proximal regulariser; decay=3 hands
-# the tail back to a pure LP early.
+# this family). qp_weight=1 is a light proximal regulariser; qp_iterations=3
+# hands the tail back to a pure LP early.
 G5_QP_WEIGHT = 1.0
 G5_DECAY = 3
 G5_REF = "static"
@@ -491,7 +491,7 @@ def _slow_walk(arrays: dict[str, np.ndarray], **penalty):
 def _lp_and_qp(arrays: dict[str, np.ndarray], ref: str = G5_REF):
     lp = _slow_walk(arrays)
     qp = _slow_walk(
-        arrays, qp_weight=G5_QP_WEIGHT, decay=G5_DECAY, penalty_ref=ref
+        arrays, qp_weight=G5_QP_WEIGHT, qp_iterations=G5_DECAY, penalty_ref=ref
     )
     return lp, qp
 
@@ -540,7 +540,7 @@ def test_penalty_wall_clock_and_rss_within_soft_ceilings(n_obs: int) -> None:
         lambda: _slow_walk(
             arrays,
             qp_weight=G5_QP_WEIGHT,
-            decay=G5_DECAY,
+            qp_iterations=G5_DECAY,
             penalty_ref=G5_REF,
         )
     )
@@ -579,13 +579,13 @@ def test_dynamic_vs_static_reference_comparison_data() -> None:
         static = _slow_walk(
             arrays,
             qp_weight=G5_QP_WEIGHT,
-            decay=G5_DECAY,
+            qp_iterations=G5_DECAY,
             penalty_ref="static",
         )
         dynamic = _slow_walk(
             arrays,
             qp_weight=G5_QP_WEIGHT,
-            decay=G5_DECAY,
+            qp_iterations=G5_DECAY,
             penalty_ref="dynamic",
         )
         for label, run in (("static", static), ("dynamic", dynamic)):

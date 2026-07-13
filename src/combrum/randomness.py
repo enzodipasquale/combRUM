@@ -1,10 +1,7 @@
 """Replication draw derivation and replayed-weight injection.
 
 :func:`rep_seed` is placement-invariant: the stream of replication ``b``
-is a pure function of ``(base_seed, b)``. ``SeedSequence.spawn`` is
-rejected because it is stateful (each call advances the parent's spawn
-key), which would make the same replication draw differently depending
-on slot or order.
+is a pure function of ``(base_seed, b)``.
 """
 
 from __future__ import annotations
@@ -20,7 +17,6 @@ BOOTSTRAP_NAMESPACE = 0xC0B2202606250001
 
 
 def rep_seed(base_seed: int, rep_id: int) -> np.random.SeedSequence:
-    """Placement-invariant seed of replication ``rep_id``."""
     base = operator.index(base_seed)
     rep = operator.index(rep_id)
     if base < 0:
@@ -31,7 +27,6 @@ def rep_seed(base_seed: int, rep_id: int) -> np.random.SeedSequence:
 
 
 def rep_rng(base_seed: int, rep_id: int) -> np.random.Generator:
-    """Fresh PCG64 generator over :func:`rep_seed` of the replication."""
     return np.random.Generator(np.random.PCG64(rep_seed(base_seed, rep_id)))
 
 
@@ -44,9 +39,7 @@ def _normalize_to_sum(raw: np.ndarray, n: int) -> np.ndarray:
 
 
 def multiplier_weights(n_units: int, base_seed: int, rep_id: int) -> np.ndarray:
-    """Exponential multiplier weights for replication ``rep_id``.
-
-    Normalized to sum to ``n_units`` so the bootstrap criterion keeps the
+    """Normalized to sum to ``n_units`` so the bootstrap criterion keeps the
     same scale as the unit-weight point estimate.
     """
     n = operator.index(n_units)
@@ -66,7 +59,6 @@ def _splitmix64_step(x: int) -> int:
 
 
 def _splitmix64_steps(x: np.ndarray) -> np.ndarray:
-    # uint64 wraparound reproduces _splitmix64_step elementwise, bit for bit.
     x = x + np.uint64(0x9E3779B97F4A7C15)
     z = (x ^ (x >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
     z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
@@ -91,14 +83,7 @@ def _bootstrap_word(base_seed: int, rep_id: int, obs_id: int) -> int:
 
 
 def bootstrap_multiplier(base_seed: int, rep_id: int, obs_id: int) -> float:
-    """Counter-based exponential multiplier for one observed unit.
-
-    The draw is a pure function of ``(base_seed, rep_id, obs_id)``. Distributed
-    callers can compute any observation's raw multiplier without carrying a
-    generator stream or materializing the whole observation axis.
-    """
     word = _bootstrap_word(base_seed, rep_id, obs_id)
-    # Half-open [0, 1): never feed log1p the rounded endpoint u == 1.0.
     u = ((word >> 11) & ((1 << 53) - 1)) * 2.0**-53
     return -math.log1p(-u)
 
@@ -106,11 +91,7 @@ def bootstrap_multiplier(base_seed: int, rep_id: int, obs_id: int) -> float:
 def bootstrap_multipliers(
     base_seed: int, rep_id: int, obs_ids: np.ndarray
 ) -> np.ndarray:
-    """Vector of :func:`bootstrap_multiplier` draws over ``obs_ids``.
-
-    Bitwise-equal to the scalar draw at every observation, so batched and
-    per-observation callers stay interchangeable.
-    """
+    """Bitwise-equal to the scalar draw at every observation."""
     obs = np.asarray(obs_ids)
     if obs.ndim != 1 or not np.issubdtype(obs.dtype, np.integer):
         raise ValueError(
@@ -121,7 +102,6 @@ def bootstrap_multipliers(
         raise ValueError(
             f"bootstrap RNG keys must be nonnegative; obs_id={int(obs.min())!r}"
         )
-    # The (base_seed, rep_id) prefix of the mix is observation-invariant.
     x = BOOTSTRAP_NAMESPACE
     for name, field in (("base_seed", base_seed), ("rep_id", rep_id)):
         value = operator.index(field)
@@ -139,7 +119,6 @@ def bootstrap_multipliers(
 def bootstrap_observation_weights(
     n_observations: int, base_seed: int, rep_id: int
 ) -> np.ndarray:
-    """Observation-axis multiplier weights, normalized to sum to ``N``."""
     n = operator.index(n_observations)
     if n < 1:
         raise ValueError(f"n_observations must be >= 1; got {n_observations!r}")

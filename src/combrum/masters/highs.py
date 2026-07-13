@@ -8,13 +8,15 @@ from dataclasses import dataclass
 import numpy as np
 
 from combrum.master import CutReadings, MasterBackend
-from combrum.masters._common import validated_construction, validated_u_coefs
+from combrum.masters._common import (
+    validated_construction,
+    validated_u_coef_cover,
+    validated_u_coefs,
+)
 from combrum.transport.base import CutRow
 
 
 def available() -> bool:
-    """True when highspy imports and a solver instance constructs."""
-    # Broad excepts: any import-time or construction failure means not available.
     try:
         import highspy
     except Exception:
@@ -28,11 +30,6 @@ def available() -> bool:
 
 @dataclass
 class _Solution:
-    """Last solve copied out at solve time; sorted views and dual/slack
-    readings memoize lazily. Cut installs and RHS edits drop the whole
-    object, so accessors raise until the next solve.
-    """
-
     theta: np.ndarray
     objective: float
     row_keys: tuple[tuple[int, bytes], ...]
@@ -45,11 +42,7 @@ class _Solution:
 
 
 class HighsMaster(MasterBackend):
-    """One replication's relaxation hosted on a per-instance HiGHS model.
-
-    Slack columns are created lazily at an agent's first installed cut, so
-    master width tracks the active agent set unless ``n_agents`` is given.
-    """
+    """One replication's relaxation hosted on a per-instance HiGHS model."""
 
     def __init__(
         self,
@@ -66,19 +59,11 @@ class HighsMaster(MasterBackend):
             K, theta_bounds, c_theta
         )
         self._u_coef, self._u_coefs = validated_u_coefs(u_coef)
-        if self._u_coefs is not None and self._n_agents is not None:
-            if self._u_coefs.size < self._n_agents:
-                raise ValueError(
-                    f"u_coef array must cover all {self._n_agents} agents,"
-                    f" but has only {self._u_coefs.size} coefficients"
-                )
+        validated_u_coef_cover(self._u_coefs, self._n_agents)
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
-        # Slack coefficients read once and kept for the master's lifetime:
-        # reinstall must restore the exact objective an agent entered with.
         self._u_obj: dict[int, float] = {}
-        # Import here, not module scope: building a master commits to highspy.
         import highspy
 
         self._highspy = highspy
@@ -86,6 +71,10 @@ class HighsMaster(MasterBackend):
 
     def _invalidate_solution(self) -> None:
         self._solution = None
+
+    def _check_status(self, status: object, operation: str) -> None:
+        if status == self._highspy.HighsStatus.kError:
+            raise RuntimeError(f"{operation} returned kError")
 
     def _build(self) -> None:
         solver = self._highspy.Highs()
@@ -123,10 +112,6 @@ class HighsMaster(MasterBackend):
         self._u_read: tuple[list[int], np.ndarray] | None = None
         self._solution: _Solution | None = None
         if self._n_agents is not None:
-            # Pre-declare all u-columns in agent order: a fixed column structure
-            # makes a warm in-place re-solve deterministic even at a degenerate
-            # optimum. With the default lower bound, a cutless agent's u sits at
-            # lb=0 -> 0, leaving the estimate unchanged.
             n = self._n_agents
             inf = float(self._highspy.kHighsInf)
             self._check_status(
@@ -147,7 +132,6 @@ class HighsMaster(MasterBackend):
             self._u_upper = dict.fromkeys(range(n), inf)
             self._n_cols += n
 
-    # -- cut management ----------------------------------------------------
 
     def add_cuts(self, rows: Sequence[CutRow]) -> int:
         fresh: dict[tuple[int, bytes], CutRow] = {}
@@ -157,8 +141,6 @@ class HighsMaster(MasterBackend):
                 continue
             self._validate_row(row)
             fresh[key] = row
-        # Invalidate before the installs so a mid-batch solver error cannot
-        # leave accessors reporting pre-add results.
         if fresh:
             self._invalidate_solution()
             self._u_read = None
@@ -167,11 +149,6 @@ class HighsMaster(MasterBackend):
         return len(fresh)
 
     def _install_batch(self, rows: Sequence[CutRow]) -> None:
-        # Canonical row order means new agents appear in ascending order, so
-        # batch column creation reproduces the creation order — and with it
-        # the exact column indexing — of a one-row-at-a-time install. Row
-        # order and the per-row sparse pattern (nonzero theta entries, then
-        # the u column) likewise match the one-row form.
         first_rows: dict[int, CutRow] = {}
         for row in rows:
             first_rows.setdefault(row.agent_id, row)
@@ -192,7 +169,6 @@ class HighsMaster(MasterBackend):
         starts = ends - (nnz + 1)
         indices = np.empty(int(ends[-1]), dtype=np.int32)
         values = np.empty(int(ends[-1]), dtype=np.float64)
-        # Row-major nonzero positions, shifted right by one u slot per prior row.
         theta_rows, theta_cols = np.nonzero(mask)
         theta_pos = np.arange(theta_cols.size) + theta_rows
         indices[theta_pos] = theta_cols.astype(np.int32)
@@ -297,10 +273,6 @@ class HighsMaster(MasterBackend):
         self.add_cuts(rows)
 
     def remove_cuts(self, keys: Iterable[tuple[int, bytes]]) -> int:
-        # In-place: delete retired rows, keeping other rows, u-columns, and the
-        # warm basis. deleteRows shifts remaining rows down preserving order;
-        # kept indices are recompacted below to match. Result equals
-        # reinstall(kept).
         retired = [k for k in set(keys) if k in self._row_index]
         if not retired:
             return 0
@@ -310,8 +282,6 @@ class HighsMaster(MasterBackend):
         for k in retired:
             del self._installed[k]
             del self._row_index[k]
-        # Recompact tracked indices to contiguous 0..n-1 in surviving row
-        # order; _row_keys already carries the old-index order.
         self._row_keys = [k for k in self._row_keys if k in self._row_index]
         self._row_index = {k: i for i, k in enumerate(self._row_keys)}
         self._u_read = None
@@ -319,19 +289,11 @@ class HighsMaster(MasterBackend):
         return len(retired)
 
     def set_rhs(self, updates: Mapping[tuple[int, bytes], float]) -> None:
-        # Validate the whole key set before mutating: makes the update
-        # all-or-nothing, so a missing key cannot leave the relaxation
-        # partially changed.
         for key in updates:
             if key not in self._row_index:
                 raise KeyError(key)
-        # Invalidate the cached solve before the writes so a mid-loop solver
-        # error cannot leave accessors reporting pre-edit results.
         self._invalidate_solution()
         keys = list(updates)
-        # Cut is `>=`: only the lower bound is the RHS; upper stays at infinity
-        # to keep the row one-sided. One batched changeRowsBounds crosses the
-        # pybind boundary once for the whole set instead of once per cut.
         indices = np.fromiter(
             (self._row_index[key] for key in keys), dtype=np.int32, count=len(keys)
         )
@@ -344,22 +306,12 @@ class HighsMaster(MasterBackend):
             raise RuntimeError(
                 f"changeRowsBounds returned {status.name}; expected kOk"
             )
-        # Mirror the new RHS into the installed rows (no solver call): the
-        # epsilon-only _replace shares phi and the decoded-bundle memo with the
-        # old row.
         rows = [
             self._installed[key]._replace(epsilon=new_eps)
             for key, new_eps in zip(keys, lowers.tolist())
         ]
         for key, row in zip(keys, rows):
             self._installed[key] = row
-        # Refresh finite u-upper bounds. The candidate for every updated cut is
-        # one O(K) reduction; compute them all in a single vectorized pass (as
-        # _install_batch does) rather than a per-row _finite_u_upper, which
-        # re-runs np.where once per cut and dominates set_rhs at large cut
-        # counts. The per-agent loosen-only guard stays per-key inside
-        # _update_u_upper (it may issue a changeColBounds, but only when a slack
-        # upper actually loosens, not in steady state).
         if self._u_lower_bound is not None:
             phi = np.vstack([row.phi for row in rows])
             candidates = np.maximum(
@@ -395,14 +347,12 @@ class HighsMaster(MasterBackend):
         self._check_status(status, f"changeColBounds(u[{row.agent_id}])")
         self._u_upper[row.agent_id] = candidate
 
-    # -- solving and reporting ----------------------------------------------
 
     def solve(self) -> None:
         run_status = self._h.run()
         model_status = self._h.getModelStatus()
         optimal = self._highspy.HighsModelStatus.kOptimal
         if run_status != self._highspy.HighsStatus.kOk or (model_status != optimal):
-            # anything but Optimal is solver distress here (see MasterBackend.solve).
             raise RuntimeError(
                 "master solve terminated"
                 f" {self._h.modelStatusToString(model_status)}"
@@ -419,8 +369,6 @@ class HighsMaster(MasterBackend):
         )
 
     def _u_values_now(self, col_values: np.ndarray) -> dict[int, float]:
-        # (agent ids, u columns) of the active set, cached until the installed
-        # row membership changes; the per-solve read is then one gather.
         if self._u_read is None:
             agent_ids = sorted({int(agent_id) for agent_id, _key in self._installed})
             cols = np.fromiter(
@@ -468,8 +416,6 @@ class HighsMaster(MasterBackend):
     def _sorted_rows(
         self, last: _Solution
     ) -> tuple[tuple[tuple[int, bytes], ...], np.ndarray]:
-        # Canonical-order view of the solved rows, built on first use only:
-        # solve() itself never needs it.
         if last.sorted_row_keys is None:
             last.sorted_row_keys = tuple(sorted(last.row_keys))
             index = {key: i for i, key in enumerate(last.row_keys)}
@@ -525,7 +471,6 @@ class HighsMaster(MasterBackend):
             last.row_slacks = row_slacks
         return last.row_slacks
 
-    # -- objective shaping ---------------------------------------------------
 
     def set_penalty(self, ref: np.ndarray, weight: float) -> None:
         ref = np.array(ref, dtype=np.float64)
@@ -539,16 +484,8 @@ class HighsMaster(MasterBackend):
             " quadratic-capable backend such as gurobi"
         )
 
-    def _check_status(self, status: object, operation: str) -> None:
-        # kWarning is success with a note (e.g. addRow drops |value| <= 1e-9
-        # matrix entries); only kError means the edit did not take effect.
-        if status == self._highspy.HighsStatus.kError:
-            raise RuntimeError(f"{operation} returned kError")
-
-    # -- lifecycle ------------------------------------------------------------
 
     def close(self) -> None:
-        """Release the solver instance."""
         if self._h is not None:
             self._h.clear()
             self._h = None

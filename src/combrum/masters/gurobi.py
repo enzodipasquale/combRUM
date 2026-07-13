@@ -5,8 +5,6 @@ shared process-global default is never used so masters don't couple
 lifetimes and license checkouts. A caller building many sequential
 masters may pass one started ``env`` instead — the caller then owns its
 lifetime, and each ``Env.start()`` it saves is one license checkout.
-Output is muted before start (also silencing the license banner); the
-caller's ``params`` may re-enable it.
 """
 
 from __future__ import annotations
@@ -17,7 +15,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from combrum.master import CutReadings, MasterBackend
-from combrum.masters._common import validated_construction, validated_u_coefs
+from combrum.masters._common import (
+    validated_construction,
+    validated_u_coef_cover,
+    validated_u_coefs,
+)
 from combrum.transport.base import CutRow
 
 _CUT_BATCH_SIZE = 4096
@@ -30,7 +32,6 @@ def available() -> bool:
     license, so backend auto-selection must check that an environment
     actually starts.
     """
-    # Any import- or license-time failure means not available.
     try:
         import gurobipy
     except Exception:
@@ -44,7 +45,6 @@ def available() -> bool:
 
 
 def _started_env(gurobipy: object) -> object:
-    # Mute output before start() so the license banner never prints.
     env = gurobipy.Env(empty=True)
     env.setParam("OutputFlag", 0)
     env.start()
@@ -62,8 +62,9 @@ def _status_name(gurobipy: object, status: int) -> str:
 @dataclass(frozen=True)
 class _Solution:
     """Last solve copied out at solve time, so accessors keep reporting it
-    after later cut installs or objective edits invalidate the solver's own
-    query surface.
+    after later cut installs invalidate the solver's own query surface.
+    Removals, RHS edits, and penalty edits drop it, so accessors raise
+    until the next solve.
     """
 
     theta: np.ndarray
@@ -71,12 +72,7 @@ class _Solution:
 
 
 class GurobiMaster(MasterBackend):
-    """Master relaxation hosted on a per-instance Gurobi model.
-
-    Slack columns are created lazily at an agent's first cut (or all up
-    front when ``n_agents`` is given). :meth:`set_penalty` installs the
-    quadratic term natively and removes it entirely on revert.
-    """
+    """Master relaxation hosted on a per-instance Gurobi model."""
 
     def __init__(
         self,
@@ -97,18 +93,10 @@ class GurobiMaster(MasterBackend):
             K, theta_bounds, c_theta
         )
         self._u_coef, self._u_coefs = validated_u_coefs(u_coef)
-        if self._u_coefs is not None and self._n_agents is not None:
-            if self._u_coefs.size < self._n_agents:
-                raise ValueError(
-                    f"u_coef array must cover all {self._n_agents} agents,"
-                    f" but has only {self._u_coefs.size} coefficients"
-                )
+        validated_u_coef_cover(self._u_coefs, self._n_agents)
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
-        # Per-agent slack coefficients read once and kept for the master's
-        # lifetime: penalty revert and reinstall must restore the exact
-        # objective an agent entered with.
         self._u_obj: dict[int, float] = {}
         import gurobipy
 
@@ -117,9 +105,6 @@ class GurobiMaster(MasterBackend):
         self._build()
 
     def _invalidate_solution(self) -> None:
-        # The sorted-block cache survives invalidation: it is keyed on
-        # _constrs_version, so it stays valid across solves that leave the
-        # installed row set unchanged (e.g. after set_rhs).
         self._solution = None
         self._solved_keys = None
         self._cut_duals = None
@@ -144,9 +129,6 @@ class GurobiMaster(MasterBackend):
         self._u_mvar = None
         self._penalty: tuple[np.ndarray, float] | None = None
         self._solution: _Solution | None = None
-        # Bumped on every installed-row membership change; solve() stamps the
-        # key snapshot with it so readers can reuse the sorted MConstr block
-        # for as long as the row set stands.
         self._constrs_version = 0
         self._solved_version = -1
         self._solved_keys: tuple[tuple[int, bytes], ...] | None = None
@@ -179,21 +161,20 @@ class GurobiMaster(MasterBackend):
             out[agent_id] = self._slack_coef(agent_id)
         return out
 
-    # -- cut management ----------------------------------------------------
 
     def add_cuts(self, rows: Sequence[CutRow]) -> int:
-        fresh: list[CutRow] = []
+        fresh: dict[tuple[int, bytes], CutRow] = {}
         for row in rows:
             key = (row.agent_id, row.bundle_key)
-            if key not in self._installed:
-                self._installed[key] = row
-                fresh.append(row)
-        # Install in canonical key order so equal row sets build identical
-        # models regardless of in-batch arrival permutation.
-        ordered = sorted(fresh, key=lambda r: (r.agent_id, r.bundle_key))
-        if ordered:
-            self._install_batch(ordered)
+            if key in self._installed or key in fresh:
+                continue
+            fresh[key] = row
+        if fresh:
             self._constrs_version += 1
+            ordered = sorted(
+                fresh.values(), key=lambda r: (r.agent_id, r.bundle_key)
+            )
+            self._install_batch(ordered)
         return len(fresh)
 
     def _install_batch(self, rows: Sequence[CutRow]) -> None:
@@ -204,13 +185,13 @@ class GurobiMaster(MasterBackend):
                 if agent_id not in self._u_vars
             ]
             if missing:
-                u_obj = np.fromiter(
+                coefs = np.fromiter(
                     (self._slack_coef(agent_id) for agent_id in missing),
                     dtype=np.float64,
                     count=len(missing),
                 )
                 new_vars = self._model.addMVar(
-                    len(missing), lb=self._u_lb(), obj=u_obj
+                    len(missing), lb=self._u_lb(), obj=coefs
                 ).tolist()
                 self._u_vars.update(zip(missing, new_vars))
                 self._invalidate_objective_cache()
@@ -238,7 +219,9 @@ class GurobiMaster(MasterBackend):
                 u_block >= phi @ self._theta_mvar + epsilon
             ).tolist()
             for row, constr in zip(chunk, constrs):
-                self._constrs[(row.agent_id, row.bundle_key)] = constr
+                key = (row.agent_id, row.bundle_key)
+                self._constrs[key] = constr
+                self._installed[key] = row
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
@@ -253,18 +236,11 @@ class GurobiMaster(MasterBackend):
         return len(self._installed)
 
     def reinstall(self, rows: Sequence[CutRow]) -> None:
-        # Full dispose + rebuild (the reinstall contract; surgical removal would
-        # leave solver history). Rebuilding also drops the penalty, so this is a
-        # pure LP.
         self._model.dispose()
         self._build()
         self.add_cuts(rows)
 
     def remove_cuts(self, keys: Iterable[tuple[int, bytes]]) -> int:
-        # In-place retirement at O(retired): remove each retired constraint,
-        # leaving other rows, the pre-declared u-columns, and the warm basis
-        # untouched (no dispose/rebuild). Fixed column structure keeps the warm
-        # re-solve vertex deterministic; the result equals reinstall(kept).
         removed = 0
         for key in set(keys):
             constr = self._constrs.pop(key, None)
@@ -289,13 +265,11 @@ class GurobiMaster(MasterBackend):
         for key, new_eps in zip(keys, values):
             self._installed[key] = self._installed[key]._replace(epsilon=new_eps)
 
-    # -- solving and reporting ----------------------------------------------
 
     def solve(self) -> None:
         self._model.optimize()
         status = self._model.Status
         if status != self._gp.GRB.OPTIMAL:
-            # non-OPTIMAL is solver distress (see MasterBackend.solve), not a state.
             raise RuntimeError(
                 "master solve terminated"
                 f" {_status_name(self._gp, status)}; expected OPTIMAL"
@@ -306,9 +280,6 @@ class GurobiMaster(MasterBackend):
             theta=theta,
             objective=float(self._model.ObjVal),
         )
-        # Snapshot the solved key set (not the dict): later installs only ever
-        # ADD keys, and removals invalidate the solution, so readers can fetch
-        # the live constraint objects by these keys.
         self._solved_keys = tuple(self._constrs)
         self._solved_version = self._constrs_version
         self._cut_duals = None
@@ -322,8 +293,6 @@ class GurobiMaster(MasterBackend):
                 if var.VBasis in (grb.NONBASIC_LOWER, grb.NONBASIC_UPPER):
                     out[k] = float(var.RC)
             return out
-        # An active penalty is not an LP certificate even when Gurobi solves it
-        # by a simplex-capable path; report bound signals by primal proximity.
         tol = float(self._model.Params.FeasibilityTol)
         for k, var in enumerate(self._theta_vars):
             at_lower = float(theta[k]) - float(self._lower[k]) <= tol
@@ -380,8 +349,6 @@ class GurobiMaster(MasterBackend):
         dual_arr = np.asarray(block.getAttr("Pi"), dtype=np.float64) if dual else None
         slack_arr = None
         if slack:
-            # Gurobi's row-sense Slack is negative for loose ``>=`` rows; negate
-            # so binding ~= 0 and larger positive = looser.
             slack_arr = -np.asarray(block.getAttr("Slack"), dtype=np.float64)
         return CutReadings(keys=keys, dual=dual_arr, slack=slack_arr)
 
@@ -407,7 +374,6 @@ class GurobiMaster(MasterBackend):
             self._bound_duals = self._bound_duals_now(solution.theta)
         return dict(self._bound_duals)
 
-    # -- objective shaping ---------------------------------------------------
 
     def _invalidate_objective_cache(self) -> None:
         self._linear_mvar = None
@@ -422,8 +388,6 @@ class GurobiMaster(MasterBackend):
             if self._penalty is not None:
                 self._penalty = None
                 self._invalidate_solution()
-                # Restore the linear objective so the terminating solve is a
-                # true LP whose duals belong to the unpenalized relaxation.
                 self._set_linear_objective()
             return
         self._set_quadratic_objective(ref, float(weight))
@@ -482,17 +446,9 @@ class GurobiMaster(MasterBackend):
     def _set_quadratic_objective(self, ref: np.ndarray, weight: float) -> None:
         installed = self._penalty
         if installed is not None and weight == installed[1]:
-            # Q = weight*I is already installed: rewrite only the theta
-            # objective coefficients and the constant. setMObjective replaces
-            # the whole objective and drops the simplex warm basis, so the
-            # equal-weight re-anchor must never route through it; this path
-            # is what keeps penalty re-solves warm across iterations.
             self._theta_mvar.Obj = self._c - 2.0 * weight * ref
             self._model.ObjCon = weight * float(ref @ ref)
             return
-        # Weight change or first install: gurobipy has no in-place edit of
-        # the quadratic term, so re-setting Q takes the full matrix-objective
-        # push (and the next solve starts cold).
         theta_linear = -2.0 * weight * ref
         constant = weight * float(ref @ ref)
         variables, coeffs = self._linear_coefficients(theta_linear)
@@ -513,10 +469,8 @@ class GurobiMaster(MasterBackend):
             self._theta_eye = sparse.eye(self._K, format="csr", dtype=np.float64)
         return self._theta_eye
 
-    # -- lifecycle ------------------------------------------------------------
 
     def close(self) -> None:
-        """Release the model, and the environment when this master owns it."""
         if self._model is not None:
             self._model.dispose()
             self._model = None

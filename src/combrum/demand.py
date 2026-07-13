@@ -58,11 +58,9 @@ def _coerce_id_key(agent_id: int) -> int:
 class Demand:
     """One agent's priced outcome: chosen bundle, payoff, certified gap.
 
-    ``bundle`` is the chosen bundle (shape/dtype are model-owned, stored
-    read-only). ``payoff`` is its achieved subproblem value at the queried
-    theta. ``gap`` is the certified optimality gap of this pricing call,
-    with ``0.0`` meaning proven exact and ``math.inf`` meaning an incumbent
-    was found but the oracle has no usable finite certificate.
+    ``gap`` is the certified optimality gap, with ``0.0`` meaning proven exact
+    and ``math.inf`` meaning an incumbent was found but the oracle has no usable
+    finite certificate.
     """
 
     bundle: np.ndarray
@@ -72,7 +70,6 @@ class Demand:
     def __post_init__(self) -> None:
         bundle = np.asarray(self.bundle)
         if bundle.dtype == object:
-            # Read-only flags can't protect object-array contents; frozen would break.
             raise ValueError("bundle must be a non-object ndarray payload")
         bundle.setflags(write=False)
         object.__setattr__(self, "bundle", bundle)
@@ -81,7 +78,6 @@ class Demand:
             raise ValueError(f"payoff must be finite; got {payoff}")
         object.__setattr__(self, "payoff", payoff)
         gap = float(self.gap)
-        # "not >=" also rejects NaN (compares False both ways).
         if not gap >= 0.0:
             raise ValueError(f"gap must be >= 0 (0.0 = proven exact); got {gap}")
         object.__setattr__(self, "gap", gap)
@@ -105,9 +101,8 @@ class Demand:
     ) -> Demand:
         """Feasible incumbent without proof of exactness.
 
-        ``gap`` is an optional bound: a finite positive value is kept as a
-        certificate, while missing, zero, negative, NaN, and infinite gaps
-        become ``math.inf``.
+        ``gap`` is an optional bound: a finite positive value is kept, while
+        missing, zero, negative, NaN, and infinite gaps become ``math.inf``.
         """
         if gap is None:
             gap_value = math.inf
@@ -119,12 +114,7 @@ class Demand:
 
 @dataclass(frozen=True)
 class DemandBatch(Mapping[int, Demand]):
-    """Array-backed batch of priced outcomes.
-
-    Vectorized ``Mapping[int, Demand]`` for ``Oracle.price_batch``: keeps
-    ``ids``, ``bundles``, ``payoffs``, and ``gaps`` as arrays rather than
-    materializing one :class:`Demand` per agent.
-    """
+    """Array-backed ``Mapping[int, Demand]`` batch of priced outcomes."""
 
     ids: np.ndarray
     bundles: np.ndarray

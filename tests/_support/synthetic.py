@@ -114,11 +114,11 @@ def _bundle_keys(bundles: np.ndarray) -> np.ndarray:
 
     Each key is exactly what a cut store dedups on: the byte string
     :func:`combrum.transport.base._pack_bundle` produces for the row
-    (``dtype.str`` tag + ``b":"`` + raw bytes). Stored in an ``object`` array
-    of ``bytes`` rather than a fixed-width ``S`` array: NumPy strips trailing
-    NUL bytes from ``S`` elements on readback, which would drop the tail of a
-    bundle key ending in ``False`` and no longer be byte-identical to the
-    store's key.
+    (header + ``dtype.str`` tag + shape + raw bytes). Stored in an
+    ``object`` array of ``bytes`` rather than a fixed-width ``S`` array:
+    NumPy strips trailing NUL bytes from ``S`` elements on readback, which
+    would drop the tail of a bundle key ending in ``False`` and no longer be
+    byte-identical to the store's key.
     """
     return np.array([_pack_bundle(row) for row in bundles], dtype=object)
 
@@ -133,15 +133,15 @@ def stripping_snapshot_fixture(n_cuts: int, seed: int) -> dict[str, object]:
     Returns:
         ``{"agent_ids", "bundle_keys", "slacks", "expected_keep", "threshold",
         "hard_cap_active"}``: per-cut owning agent (``int64``), bundle key
-        (fixed-width bytes), nonnegative slack (``float64``; 0 = binding,
-        larger = looser), the expected keep mask (``bool``), the
+        (``object`` array of ``bytes``), nonnegative slack (``float64``;
+        0 = binding, larger = looser), the expected keep mask (``bool``), the
         95th-percentile slack
         cutoff ``threshold`` (``float``), and ``hard_cap_active`` (``bool``,
         whether the hard cap overrode the percentile keep).
 
     The keep rule keeps row ``i`` iff ``slacks[i] <= percentile(slacks,
-    95.0)``; if that keeps more than the hard threshold, it instead keeps only
-    the ``hard_threshold`` smallest slacks.
+    95.0)``; if that keeps more than the hard cap, it instead keeps only
+    the ``max_live_cuts`` smallest slacks.
 
     Slacks are bimodal (tight body in ``[0, 1]``, loose outliers in ``[3, 8]``)
     so the snapshot always keeps at least one cut and strips at least one.
@@ -224,7 +224,7 @@ def large_m_generator(T: int, n_rows: int, seed: int) -> dict[str, object]:
 
 
 def _assert_cert_gap_floor_holds() -> None:
-    """Import-time self-check: the injected band spans ``(1e-4, 1e-2]``.
+    """Import-time self-check: the injected band spans ``[1e-4, 1e-2)``.
 
     ``_CERT_GAP_FLOOR`` must sit at or above ``_MIN_MEANINGFUL_GAP`` by value,
     and over the seed sweep the empirical minimum and maximum injected gaps

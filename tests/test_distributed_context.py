@@ -400,8 +400,6 @@ def test_distributed_observed_reductions_are_keyed_by_observations() -> None:
     assert transport.sum_shapes == [(11, 3), (11, 3)]
     for ids in transport.sum_ids:
         np.testing.assert_array_equal(ids, np.arange(11, dtype=np.int64))
-        assert ids.min() >= 0
-        assert ids.max() < 11
     assert transport.bytes_moved()["sum_reproducible"] == 2 * (
         11 * 3 * 8 + 11 * 8
     )
@@ -730,26 +728,26 @@ def _cut_row(agent_id: int, bundle_key: bytes) -> CutRow:
 def test_nslack_validates_lazy_slack_strip_with_no_installed_rows() -> None:
     formulation = NSlack(lambda agent_id, bundle: (bundle, 0.0))
     formulation._ctx = SimpleNamespace(weight_mode="distributed", K=3)
-    policy = SlackStrip(hard_threshold=2)
+    policy = SlackStrip(max_live_cuts=2)
 
     with pytest.raises(ValueError, match="K \\+ installed_agents"):
         formulation._purge(policy, policy_profile(policy), ())
 
 
 def test_nslack_lazy_slack_strip_counts_distinct_installed_agents() -> None:
-    # hard_threshold == K, so only the installed_agents term can push the
+    # max_live_cuts == K, so only the installed_agents term can push the
     # total over the guard: the empty case passes (3 >= 3), and each populated
     # case below must raise on that term alone.
     formulation = NSlack(lambda agent_id, bundle: (bundle, 0.0))
     formulation._ctx = SimpleNamespace(weight_mode="distributed", K=3)
-    policy = SlackStrip(hard_threshold=3)
+    policy = SlackStrip(max_live_cuts=3)
     profile = policy_profile(policy)
 
     assert formulation._purge(policy, profile, ()) == set()
 
     with pytest.raises(
         ValueError,
-        match=r"hard_threshold=3, K=3, installed_agents=2, K \+ installed_agents=5",
+        match=r"max_live_cuts=3, K=3, installed_agents=2, K \+ installed_agents=5",
     ):
         formulation._purge(
             policy, profile, (_cut_row(0, b"a"), _cut_row(1, b"b"))
@@ -759,7 +757,7 @@ def test_nslack_lazy_slack_strip_counts_distinct_installed_agents() -> None:
     # counted, not rows.
     with pytest.raises(
         ValueError,
-        match=r"hard_threshold=3, K=3, installed_agents=1, K \+ installed_agents=4",
+        match=r"max_live_cuts=3, K=3, installed_agents=1, K \+ installed_agents=4",
     ):
         formulation._purge(
             policy, profile, (_cut_row(0, b"a"), _cut_row(0, b"b"))

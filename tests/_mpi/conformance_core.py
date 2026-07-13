@@ -8,12 +8,12 @@ as a digest or bit-hex string — never as a decimal float — so equality
 of records is bitwise equality of results.
 
 Beyond the default battery, ``argv[1]`` selects a dedicated rank
-program for the memory gates (all of them emit one JSON record per
-rank):
+program (all of them emit one JSON record per rank):
 
-* ``chunked CHUNK_BYTES`` — a scatter whose shards span several chunk
-  windows at a test-reduced chunk size, checked bitwise against the
-  locally regenerated selection, with the per-chunk send/recv tallies;
+* ``chunked CHUNK_BYTES [ROOT]`` — a scatter whose shards span several
+  chunk windows at a test-reduced chunk size, checked bitwise against
+  the locally regenerated selection, with the per-chunk send/recv
+  tallies;
 * ``window-smoke`` — node_shared structural proofs: peers' window
   segments are zero bytes (single physical copy), contents match the
   publisher's bytes across processes, views are un-flippably read-only,
@@ -24,8 +24,19 @@ rank):
   table RSS-resident;
 * ``node-rss`` — before/after RSS accounting around one ~16 MiB
   node_shared publication.
+* ``skeleton-e2e FAMILY`` — the walking-skeleton family solve over
+  ``MpiTransport``, theta_hat reported as bit-hex for the serial
+  bitwise comparison.
+* ``split-axis-smoke`` — the solver-free split-axis distributed
+  context/bootstrap smoke, pooled results as bit-hex.
+* ``nslack-bootstrap`` — a small NSlack ``bootstrap_distributed`` run
+  compared bitwise against the serial reference.
 * ``exchange-bad-row`` — one rank passes an invalid cut row and every rank
   must report the same agreed transport error instead of hanging.
+* ``route-bad-value`` — one rank routes a non-float value; every rank
+  must raise an agreed validation error.
+* ``batched-max-bad-shape`` — mismatched per-rank (B,) shapes are
+  rejected by agreement before the native reduce.
 * ``sum-gather-bad-inputs`` — local validation for row-keyed sum/gather
   shape and id-dtype errors before native MPI calls.
 """
@@ -1096,8 +1107,8 @@ def _bootstrap_model_and_data() -> tuple[Any, Any]:
             self.observed = observed
             self.shocks = shocks
 
-        def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
-            self.local_ids = np.asarray(local_ids, dtype=np.int64)
+        def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
+            self.local_ids = np.asarray(agent_ids, dtype=np.int64)
 
         def setup_observed(
             self, transport: Transport, observation_ids: np.ndarray
@@ -1119,11 +1130,11 @@ def _bootstrap_model_and_data() -> tuple[Any, Any]:
             )
 
         def price_batch(
-            self, theta: np.ndarray, local_ids: np.ndarray
+            self, theta: np.ndarray, agent_ids: np.ndarray
         ) -> dict[int, Any]:
             return {
                 int(agent_id): self.price(theta, int(agent_id))
-                for agent_id in np.asarray(local_ids, dtype=np.int64)
+                for agent_id in np.asarray(agent_ids, dtype=np.int64)
             }
 
         def features(
@@ -1194,7 +1205,7 @@ def nslack_bootstrap_serial_reference() -> dict[str, Any]:
         model,
         data,
         n_bootstrap=_BOOT_B,
-        weights=_BootstrapObservationWeights(),
+        weight_source=_BootstrapObservationWeights(),
         transport=cb.SerialTransport(),
         master_backend="highs",
         tolerance=_BOOT_TOL,

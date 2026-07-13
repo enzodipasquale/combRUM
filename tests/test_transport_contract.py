@@ -101,9 +101,9 @@ def run_route_alloc_guarded(
     (``zeros``/``empty``/``full``/``ones``) intercepted: any single
     allocation of >= n_agents elements raises :class:`_DenseAllocation`
     before delegating, so the memory is never reserved. Enforces the base.py
-    contract that the primitive 'must not materialize or scan a dense
-    n_agents vector'. local_ids is a single-element array so nothing dense
-    can leak in through the caller's pricing axis."""
+    contract that implementations "must route sparse payloads without
+    materializing the full agent axis". agent_ids is a single-element array
+    so nothing dense can leak in through the caller's pricing axis."""
     dense_threshold = int(n_agents)
     real = {name: getattr(np, name) for name in ("zeros", "empty", "full", "ones")}
 
@@ -814,7 +814,7 @@ def test_route_agent_values_validation_errors_agree_across_ranks() -> None:
 
     assert LocalCluster(2).run(non_source_payload) == [True, True]
 
-    def bad_local_ids_shape(t):
+    def bad_agent_ids_shape(t):
         ids = (
             np.zeros((1, 1), dtype=np.int64)
             if t.rank == 0
@@ -831,7 +831,7 @@ def test_route_agent_values_validation_errors_agree_across_ranks() -> None:
             return "1-D integer array" in str(exc)
         return False
 
-    assert LocalCluster(2).run(bad_local_ids_shape) == [True, True]
+    assert LocalCluster(2).run(bad_agent_ids_shape) == [True, True]
 
     def bad_source_value(t):
         try:
@@ -883,7 +883,7 @@ def test_route_agent_values_sparse_delivery_one_round_and_partition() -> None:
     for rank, got in enumerate(delivered):
         assert got == expected_buckets[rank]
         assert list(got) == sorted(got)
-        for gid, value in got.items():
+        for gid, value in expected_buckets[rank].items():
             assert bits(got[gid]) == bits(value)
     assert sum(len(got) for got in delivered) == len(values)
     assert {gid for got in delivered for gid in got} == set(values)

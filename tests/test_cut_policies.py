@@ -15,7 +15,7 @@ from combrum.cut_policies import (
     MostViolated,
     PurgeInactive,
     SlackStrip,
-    SlackThreshold,
+    ViolationThreshold,
 )
 from _support.families import (
     DEFAULT_SEED,
@@ -124,7 +124,7 @@ def test_admission_policies_require_violations_parallel_to_candidates() -> None:
         MostViolated(k=1).admit(rows, np.array([1.0]), 0)
 
     with pytest.raises(ValueError, match="parallel to candidates"):
-        SlackThreshold(epsilon=0.1).admit(rows, np.ones((3, 1)), 0)
+        ViolationThreshold(epsilon=0.1).admit(rows, np.ones((3, 1)), 0)
 
 
 def test_most_violated_purge_is_noop() -> None:
@@ -134,24 +134,24 @@ def test_most_violated_purge_is_noop() -> None:
     assert policy.purge(rows, dual=None, slack=None, iteration=0) == ()
 
 
-# --- SlackThreshold -----------------------------------------------------------
+# --- ViolationThreshold -----------------------------------------------------------
 
 
 def test_slack_threshold_purge_is_noop() -> None:
-    policy = SlackThreshold(epsilon=1.0)
+    policy = ViolationThreshold(epsilon=1.0)
     rows = [_row(1, b"a"), _row(2, b"b")]
     assert policy.purge(rows, dual=None, slack=None, iteration=0) == ()
 
 
 def test_slack_threshold_admits_above_floor_only() -> None:
-    policy = SlackThreshold(epsilon=1.0)
+    policy = ViolationThreshold(epsilon=1.0)
     a, b, c = _row(1, b"a"), _row(2, b"b"), _row(3, b"c")
     assert policy.admit([a, b, c], np.array([0.5, 1.0, 2.0]), 0) == (c,)
 
 
 def test_slack_threshold_validates_epsilon() -> None:
     with pytest.raises(ValueError, match="epsilon must be"):
-        SlackThreshold(epsilon=-1.0)
+        ViolationThreshold(epsilon=-1.0)
 
 
 # --- Compose ------------------------------------------------------------------
@@ -160,7 +160,7 @@ def test_slack_threshold_validates_epsilon() -> None:
 def _expected_compose_admit(
     rows: Sequence[CutRow], viol: Sequence[float], *, k: int, epsilon: float
 ) -> tuple[CutRow, ...]:
-    """MostViolated(k) then SlackThreshold(epsilon), in plain Python."""
+    """MostViolated(k) then ViolationThreshold(epsilon), in plain Python."""
     # top k positive rows by violation, ties toward earlier, back in input order
     positive = [i for i, v in enumerate(viol) if v > 0.0]
     top = sorted(positive, key=lambda i: (-viol[i], i))[:k]
@@ -176,7 +176,7 @@ def test_compose_admit_chains_and_keeps_violations_parallel() -> None:
     # top-3 rows.
     k, epsilon = 3, 2.0
     policy = Compose(
-        admit_chain=[MostViolated(k=k), SlackThreshold(epsilon=epsilon)],
+        admit_chain=[MostViolated(k=k), ViolationThreshold(epsilon=epsilon)],
         purge_chain=[],
     )
     rows = [_row(i, bytes([i])) for i in range(4)]
@@ -221,7 +221,7 @@ def test_compose_purge_unions_votes() -> None:
     r2 = _row(3, b"c")
     installed = [r0, r1, r2]
 
-    slack_stage = SlackStrip(percentile=50.0, hard_threshold=10.0)
+    slack_stage = SlackStrip(percentile=50.0, max_live_cuts=10.0)
     purge_stage = PurgeInactive(max_age=1)
     policy = Compose(admit_chain=[], purge_chain=[slack_stage, purge_stage])
 
@@ -232,7 +232,7 @@ def test_compose_purge_unions_votes() -> None:
     retired = policy.purge(installed, dual=dual, slack=slack, iteration=1)
 
     # compare against the union of each stage's own votes
-    ss_votes = SlackStrip(percentile=50.0, hard_threshold=10.0).purge(
+    ss_votes = SlackStrip(percentile=50.0, max_live_cuts=10.0).purge(
         installed, dual=None, slack=slack, iteration=1
     )
     pi_votes = PurgeInactive(max_age=1).purge(
@@ -303,21 +303,21 @@ def test_slack_strip_validates_constructor() -> None:
         with pytest.raises(ValueError, match=r"percentile must lie in \(0, 100\]"):
             SlackStrip(percentile=bad)
 
-    # hard_threshold is a max-live constraint count, so non-integral values
+    # max_live_cuts is a max-live constraint count, so non-integral values
     # reject and so do integral values below 1.
     with pytest.raises(ValueError, match="integer-valued"):
-        SlackStrip(hard_threshold=2.5)
+        SlackStrip(max_live_cuts=2.5)
     with pytest.raises(ValueError, match=r">= 1"):
-        SlackStrip(hard_threshold=0)
+        SlackStrip(max_live_cuts=0)
 
-    # inclusive boundaries construct: percentile=100.0 and hard_threshold=1;
+    # inclusive boundaries construct: percentile=100.0 and max_live_cuts=1;
     # inf disables the cap.
     assert SlackStrip(percentile=100.0) is not None
-    assert SlackStrip(hard_threshold=1) is not None
-    assert SlackStrip(hard_threshold=float("inf")) is not None
+    assert SlackStrip(max_live_cuts=1) is not None
+    assert SlackStrip(max_live_cuts=float("inf")) is not None
 
 
-def test_slack_strip_default_percentile_is_hard_threshold_only() -> None:
+def test_slack_strip_default_percentile_is_max_live_cuts_only() -> None:
     rows = [_row(1, bytes([97 + i])) for i in range(5)]
     keys = [(row.agent_id, row.bundle_key) for row in rows]
     slack = {
@@ -327,7 +327,7 @@ def test_slack_strip_default_percentile_is_hard_threshold_only() -> None:
         keys[3]: 0.25,
         keys[4]: 2.0,
     }
-    policy = SlackStrip(hard_threshold=2.0)
+    policy = SlackStrip(max_live_cuts=2.0)
 
     retired = policy.purge(rows, dual=None, slack=slack, iteration=0)
 
@@ -348,39 +348,39 @@ def test_slack_strip_default_percentile_keeps_all_with_cap_inactive() -> None:
     keys = [(row.agent_id, row.bundle_key) for row in rows]
     slack = dict(zip(keys, [1.0, 2.0, 3.0, 4.0, 100.0]))
 
-    policy = SlackStrip(hard_threshold=float("inf"))
+    policy = SlackStrip(max_live_cuts=float("inf"))
     assert policy.purge(rows, dual=None, slack=slack, iteration=0) == ()
 
 
 def test_slack_strip_master_size_guard_reaches_composed_policies() -> None:
-    SlackStrip(hard_threshold=8).validate_master_size(
+    SlackStrip(max_live_cuts=8).validate_master_size(
         n_parameters=3, n_agents=5
     )
-    SlackStrip(hard_threshold=float("inf")).validate_master_size(
+    SlackStrip(max_live_cuts=float("inf")).validate_master_size(
         n_parameters=3, n_agents=5
     )
 
     with pytest.raises(ValueError, match=r"K \+ n_agents"):
-        SlackStrip(hard_threshold=7).validate_master_size(
+        SlackStrip(max_live_cuts=7).validate_master_size(
             n_parameters=3, n_agents=5
         )
 
     policy = Compose(
         admit_chain=[AddAll()],
-        purge_chain=[SlackStrip(hard_threshold=7)],
+        purge_chain=[SlackStrip(max_live_cuts=7)],
     )
-    with pytest.raises(ValueError, match="hard_threshold=7"):
+    with pytest.raises(ValueError, match="max_live_cuts=7"):
         policy.validate_master_size(n_parameters=3, n_agents=5)
 
 
 def _run_strip(
-    slacks: Sequence[float], *, percentile: float, hard_threshold: float
+    slacks: Sequence[float], *, percentile: float, max_live_cuts: float
 ) -> tuple[bool, ...]:
     """Run SlackStrip.purge over a slack vector; return the per-row keep mask."""
     rows = [_row(i, bytes([i])) for i in range(len(slacks))]
     keys = [(row.agent_id, row.bundle_key) for row in rows]
     slack = {keys[i]: float(slacks[i]) for i in range(len(rows))}
-    policy = SlackStrip(percentile=percentile, hard_threshold=hard_threshold)
+    policy = SlackStrip(percentile=percentile, max_live_cuts=max_live_cuts)
     retired = policy.purge(rows, dual=None, slack=slack, iteration=0)
     retired_keys = {(row.agent_id, row.bundle_key) for row in retired}
     return tuple(k not in retired_keys for k in keys)
@@ -393,24 +393,24 @@ def test_slack_strip_keep_set_matches_hand_derived_percentile() -> None:
     # sorted slacks [0,1,2,3,100], n=5, pos=(5-1)*0.95=3.8 ->
     # cutoff = 3 + 0.8*(100-3) = 80.6. Only 100.0 exceeds it.
     keep = _run_strip(
-        [0.0, 1.0, 2.0, 3.0, 100.0], percentile=95.0, hard_threshold=float("inf")
+        [0.0, 1.0, 2.0, 3.0, 100.0], percentile=95.0, max_live_cuts=float("inf")
     )
     assert keep == (True, True, True, True, False)
 
     # boundary tie: sorted [0,1,2,3,3], pos=3.8 -> cutoff = 3 + 0.8*(3-3) = 3.0.
     # Rows sitting exactly at 3.0 are kept because the rule is `slack <= cutoff`.
     tie_keep = _run_strip(
-        [0.0, 1.0, 2.0, 3.0, 3.0], percentile=95.0, hard_threshold=float("inf")
+        [0.0, 1.0, 2.0, 3.0, 3.0], percentile=95.0, max_live_cuts=float("inf")
     )
     assert tie_keep == (True, True, True, True, True)
 
 
 def test_slack_strip_hard_cap_keeps_the_smallest_slacks() -> None:
-    # When the percentile keep would retain more than hard_threshold rows,
-    # only the hard_threshold smallest (most-binding) slacks stay. p=95 keeps
+    # When the percentile keep would retain more than max_live_cuts rows,
+    # only the max_live_cuts smallest (most-binding) slacks stay. p=95 keeps
     # all six; cap=3 keeps values 1,2,3 at indices 1,3,5.
     keep = _run_strip(
-        [5.0, 1.0, 4.0, 2.0, 6.0, 3.0], percentile=95.0, hard_threshold=3
+        [5.0, 1.0, 4.0, 2.0, 6.0, 3.0], percentile=95.0, max_live_cuts=3
     )
     assert keep == (False, True, False, True, False, True)
 
@@ -421,7 +421,7 @@ def test_slack_strip_hard_cap_ties_are_stable_in_installed_order() -> None:
     # default introselect, so use a 20-wide tie. p95 strips only the tail
     # (rows 21, 22), the cap=3 keeps row 0 plus the two earliest tied rows.
     slacks = [1.0] + [5.0] * 20 + [9.0, 8.0]
-    keep = _run_strip(slacks, percentile=95.0, hard_threshold=3)
+    keep = _run_strip(slacks, percentile=95.0, max_live_cuts=3)
     expected = tuple(i in (0, 1, 2) for i in range(len(slacks)))
     assert keep == expected
 
@@ -434,7 +434,7 @@ def test_slack_strip_ignores_cuts_without_a_reading() -> None:
     keys = [(row.agent_id, row.bundle_key) for row in rows]
     slack = {keys[0]: 1.0, keys[1]: 2.0, keys[2]: 3.0, keys[3]: 10.0}
     # keys[4] has no slack reading.
-    policy = SlackStrip(percentile=70.0, hard_threshold=float("inf"))
+    policy = SlackStrip(percentile=70.0, max_live_cuts=float("inf"))
 
     retired = policy.purge(rows, dual=None, slack=slack, iteration=0)
     retired_keys = {(row.agent_id, row.bundle_key) for row in retired}
@@ -469,7 +469,7 @@ def test_slack_strip_reproduces_keep_set_on_snapshot() -> None:
     slack = {keys[i]: float(slacks[i]) for i in range(len(rows))}
 
     policy = SlackStrip(
-        percentile=STRIP_PERCENTILE, hard_threshold=STRIP_HARD_THRESHOLD
+        percentile=STRIP_PERCENTILE, max_live_cuts=STRIP_HARD_THRESHOLD
     )
     retired = policy.purge(rows, dual=None, slack=slack, iteration=0)
     retired_keys = {(row.agent_id, row.bundle_key) for row in retired}
@@ -485,14 +485,12 @@ def test_slack_strip_reproduces_keep_set_on_snapshot() -> None:
     assert len(retired) == int((~expected_keep).sum()) == 50
 
     # the rule keeps the smallest slacks, so no kept slack exceeds any
-    # stripped one; retired rows are installed identities, disjoint from kept
+    # stripped one
     assert retired_keys, "snapshot must strip at least one cut"
     assert kept_keys, "snapshot must keep at least one cut"
     max_kept_slack = max(slack[k] for k in kept_keys)
     min_stripped_slack = min(slack[k] for k in retired_keys)
     assert max_kept_slack <= min_stripped_slack
-    assert retired_keys <= set(keys)
-    assert retired_keys.isdisjoint(set(kept_keys))
 
 
 # --- live fits: built-in policies through NSlack ------------------------------

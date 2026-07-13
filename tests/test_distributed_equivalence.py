@@ -63,8 +63,8 @@ class _SplitToySurface(cb.Oracle, cb.FeatureMap):
         self.local_ids = np.empty(0, dtype=np.int64)
         self.observation_ids = np.empty(0, dtype=np.int64)
 
-    def setup(self, transport, local_ids: np.ndarray) -> None:
-        self.local_ids = np.asarray(local_ids, dtype=np.int64).copy()
+    def setup(self, transport, agent_ids: np.ndarray) -> None:
+        self.local_ids = np.asarray(agent_ids, dtype=np.int64).copy()
 
     def setup_observed(self, transport, observation_ids: np.ndarray) -> None:
         self.observation_ids = np.asarray(observation_ids, dtype=np.int64).copy()
@@ -86,11 +86,11 @@ class _SplitToySurface(cb.Oracle, cb.FeatureMap):
         )
 
     def price_batch(
-        self, theta: np.ndarray, local_ids: np.ndarray
+        self, theta: np.ndarray, agent_ids: np.ndarray
     ) -> Mapping[int, cb.Demand]:
         return {
             int(agent_id): self.price(theta, int(agent_id))
-            for agent_id in np.asarray(local_ids, dtype=np.int64)
+            for agent_id in np.asarray(agent_ids, dtype=np.int64)
         }
 
     def features(
@@ -348,7 +348,7 @@ def test_bootstrap_distributed_matches_serial_with_observation_weights() -> None
         _model(arrays),
         _data(arrays),
         n_bootstrap=_B,
-        weights=_ObservationWeightDraws(_N, _BOOT_SEED),
+        weight_source=_ObservationWeightDraws(_N, _BOOT_SEED),
         transport=cb.SerialTransport(),
         master_backend="highs",
         tolerance=TOLERANCE,

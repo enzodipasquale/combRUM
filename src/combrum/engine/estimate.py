@@ -72,28 +72,23 @@ def _run_and_package(
     parameters: Parameters,
     transport: Transport,
     activity: ActivityConfig | None,
-    level: RunInfoLevel,
+    run_info_level: RunInfoLevel,
     master_backend: str,
     resolved_master_backend: str,
     max_iterations: int,
     min_iterations: int,
     qp_weight: float,
-    decay: int,
+    qp_iterations: int,
     penalty_ref: str,
     iteration_callback: Callable[[int, Oracle], int | None] | None,
     schedule: RepricingSchedule | None = None,
 ) -> FitResult:
-    """Shared fit-run tail of :func:`estimate` and :func:`estimate_distributed`.
-
-    Every collective here (timing bcast, gap certify, FULL-level peak
-    reduction) runs inside the activity scope, before its closing summary.
-    """
     with build_activity_run(activity, is_root=transport.rank == 0) as activity_run:
         config = LoopConfig(
             max_iterations=max_iterations,
             schedule=schedule,
             qp_weight=qp_weight,
-            decay=decay,
+            qp_iterations=qp_iterations,
             penalty_ref=penalty_ref,
             min_iterations=min_iterations,
             iteration_callback=iteration_callback,
@@ -113,9 +108,9 @@ def _run_and_package(
 
         certification = tally.certify(transport)
 
-        _meta = level >= RunInfoLevel.META
+        _meta = run_info_level >= RunInfoLevel.META
         wall_max_seconds = rss_max_bytes = None
-        if level >= RunInfoLevel.FULL:
+        if run_info_level >= RunInfoLevel.FULL:
             peaks = transport.batched_max(
                 np.array([local_wall, float(peak_rss_bytes())], dtype=np.float64)
             )
@@ -123,7 +118,7 @@ def _run_and_package(
             rss_max_bytes = int(peaks[1])
         run_info = (
             RunMetadata(
-                level=level,
+                level=run_info_level,
                 rank=transport.rank,
                 size=transport.size,
                 node=transport.node,
@@ -144,7 +139,7 @@ def _run_and_package(
                 wall_max_seconds=wall_max_seconds,
                 rss_max_bytes=rss_max_bytes,
             )
-            if level >= RunInfoLevel.DEFAULT
+            if run_info_level >= RunInfoLevel.DEFAULT
             else None
         )
 
@@ -180,7 +175,7 @@ def estimate(
     max_iterations: int = 1000,
     min_iterations: int = 0,
     qp_weight: float = 0.0,
-    decay: int = 0,
+    qp_iterations: int = 0,
     penalty_ref: str = "static",
     schedule: RepricingSchedule | None = None,
     iteration_callback: Callable[[int, Oracle], int | None] | None = None,
@@ -192,7 +187,7 @@ def estimate(
     return_cuts: bool = False,
     return_cut_duals: bool = False,
     activity: ActivityConfig | None = None,
-    level: RunInfoLevel = RunInfoLevel.DEFAULT,
+    run_info_level: RunInfoLevel = RunInfoLevel.DEFAULT,
 ) -> FitResult:
     """Fit ``theta`` by row generation.
 
@@ -200,9 +195,10 @@ def estimate(
         transport: Defaults to the serial reference.
         master_backend: ``"auto"``, ``"gurobi"``, or ``"highs"``.
         master_params: Backend-owned solver knobs.
-        qp_weight, decay, penalty_ref: Proximal penalty (off by default):
-            weight ``qp_weight`` for the first ``decay`` iterations, then
-            exactly zero so the terminating solve is a pure LP.
+        qp_weight, qp_iterations, penalty_ref: Proximal penalty (off by
+            default): weight ``qp_weight`` for the first ``qp_iterations``
+            iterations, then exactly zero so the terminating solve is a
+            pure LP.
         iteration_callback: Per-iteration hook; may update oracle-owned
             settings and return an additional convergence floor.
         cut_policy: Bounds an NSlack master by retiring non-binding cuts;
@@ -244,15 +240,12 @@ def estimate(
         ):
             raise ValueError("return_cut_duals is only supported for NSlack")
 
-    # Fail fast on loop controls before any context/master setup (pinned by
-    # test_estimate_validates_loop_controls_before_context); LoopConfig also
-    # re-validates at construction.
     _validate_loop_controls(
-        max_iterations, qp_weight, decay, penalty_ref, min_iterations
+        max_iterations, qp_weight, qp_iterations, penalty_ref, min_iterations
     )
     resolved_master_backend = resolve_master_backend(
         master_backend,
-        require_quadratic=qp_weight > 0.0 and decay > 0,
+        require_quadratic=qp_weight > 0.0 and qp_iterations > 0,
         transport=transport,
     )
     built = build_fit_context(
@@ -285,13 +278,13 @@ def estimate(
         parameters=parameters,
         transport=transport,
         activity=activity,
-        level=level,
+        run_info_level=run_info_level,
         master_backend=master_backend,
         resolved_master_backend=resolved_master_backend,
         max_iterations=max_iterations,
         min_iterations=min_iterations,
         qp_weight=qp_weight,
-        decay=decay,
+        qp_iterations=qp_iterations,
         penalty_ref=penalty_ref,
         iteration_callback=iteration_callback,
         schedule=schedule,
@@ -310,7 +303,7 @@ def estimate_distributed(
     max_iterations: int = 1000,
     min_iterations: int = 0,
     qp_weight: float = 0.0,
-    decay: int = 0,
+    qp_iterations: int = 0,
     penalty_ref: str = "static",
     iteration_callback: Callable[[int, Oracle], int | None] | None = None,
     warm_start: FitResult | None = None,
@@ -320,7 +313,7 @@ def estimate_distributed(
     return_cuts: bool = False,
     return_cut_duals: bool = False,
     activity: ActivityConfig | None = None,
-    level: RunInfoLevel = RunInfoLevel.DEFAULT,
+    run_info_level: RunInfoLevel = RunInfoLevel.DEFAULT,
 ) -> FitResult:
     """Fit an NSlack model from rank-owned observed shards.
 
@@ -373,7 +366,9 @@ def estimate_distributed(
         "min_iterations", min_iterations, transport, lower=0
     )
     qp_weight = agree_public_float("qp_weight", qp_weight, transport, lower=0.0)
-    decay = agree_public_int("decay", decay, transport, lower=0)
+    qp_iterations = agree_public_int(
+        "qp_iterations", qp_iterations, transport, lower=0
+    )
     penalty_ref = str(
         agree_public_choice(
             "penalty_ref",
@@ -385,7 +380,9 @@ def estimate_distributed(
     tolerance = agree_public_float(
         "tolerance", tolerance, transport, lower=0.0, strict_lower=True
     )
-    level = RunInfoLevel(agree_public_int("level", level, transport, lower=0))
+    run_info_level = RunInfoLevel(
+        agree_public_int("run_info_level", run_info_level, transport, lower=0)
+    )
     master_params = require_public_object_agreement(
         "master_params", master_params, transport
     )
@@ -398,11 +395,11 @@ def estimate_distributed(
     )
 
     _validate_loop_controls(
-        max_iterations, qp_weight, decay, penalty_ref, min_iterations
+        max_iterations, qp_weight, qp_iterations, penalty_ref, min_iterations
     )
     resolved_master_backend = resolve_master_backend(
         master_backend,
-        require_quadratic=qp_weight > 0.0 and decay > 0,
+        require_quadratic=qp_weight > 0.0 and qp_iterations > 0,
         transport=transport,
         owner_ranks=(0,),
     )
@@ -442,13 +439,13 @@ def estimate_distributed(
         parameters=parameters,
         transport=transport,
         activity=activity,
-        level=level,
+        run_info_level=run_info_level,
         master_backend=master_backend,
         resolved_master_backend=resolved_master_backend,
         max_iterations=max_iterations,
         min_iterations=min_iterations,
         qp_weight=qp_weight,
-        decay=decay,
+        qp_iterations=qp_iterations,
         penalty_ref=penalty_ref,
         iteration_callback=iteration_callback,
     )

@@ -1,14 +1,6 @@
 """In-process reference transports.
 
-:class:`SerialTransport` is the one-rank identity; :class:`LocalCluster`
-runs R thread-ranks in one process and :class:`LocalMultirankTransport` is
-one of its ranks. Both route cross-rank semantics through the shared
-combiners below, so the two references cannot drift apart.
-
-Determinism is structural: each collective writes per-rank payloads into
-rank-indexed slots, rendezvouses at a barrier, then combines the
-identical rank-ordered snapshot through canonical orders (global agent
-id, rank index, canonical cut key). Arrival order cannot influence any
+Arrival order cannot influence any
 result, so results are bitwise reproducible under any thread scheduling.
 """
 
@@ -46,10 +38,6 @@ _T = TypeVar("_T")
 def _readonly(arr: np.ndarray) -> np.ndarray:
     arr.setflags(write=False)
     return arr
-
-
-# Shared combiners: collective semantics on rank-ordered pooled inputs;
-# serial is the pool-of-one case.
 
 
 def _combine_sum(
@@ -93,8 +81,6 @@ def _combine_sum(
             arr if arr.ndim == 2 else np.empty((0, width), dtype=np.float64)
             for arr in arrays
         ]
-    # Single contributor (the serial case): canonical_sum never mutates its
-    # inputs, so the concatenate copy is pure overhead.
     values = arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=0)
     ids = ids_parts[0] if len(ids_parts) == 1 else np.concatenate(ids_parts, axis=0)
     return canonical_sum(values, ids)
@@ -242,8 +228,6 @@ def _combine_batched_route_agent_values(
         n_agents=n_agents,
     )
     if size == 1:
-        # Rank 0 owns every agent, so per-rank bucketing is the identity; the
-        # normalized dict is already the answer, minus empty reps.
         return {int(rep): values for rep, values in by_rep.items() if values}
     out: dict[int, dict[int, float]] = {}
     for rep, values in by_rep.items():
@@ -265,8 +249,6 @@ def _combine_cuts(
 ) -> tuple[CutRow, ...]:
     B = owners.shape[0]
     mine: list[CutRow] = []
-    # Rank-major pooling + stable canonical sort: deterministic duplicate
-    # order regardless of thread finish order.
     for r, rows in enumerate(rows_by_rank):
         for row in rows:
             if not isinstance(row, CutRow):
@@ -341,8 +323,6 @@ def _combine_agent_values(
 def _scatter_select(
     arrays: dict[str, np.ndarray], ids: np.ndarray
 ) -> dict[str, np.ndarray]:
-    # Fancy indexing yields fresh arrays; flipping them read-only cannot
-    # touch the root's originals.
     return {key: _readonly(full[ids]) for key, full in arrays.items()}
 
 
@@ -358,8 +338,6 @@ def _publish_node_arrays(arrays: object) -> dict[str, np.ndarray]:
             raise ValueError(f"node_shared: array keys must be str; got {key!r}")
         buf = np.array(value, copy=True)
         if buf.dtype == object:
-            # Read-only flags do not protect object-array contents, so
-            # sharing one would break immutability.
             raise ValueError(
                 f"node_shared: array {key!r} must be numeric; got dtype object"
             )
@@ -370,12 +348,7 @@ def _publish_node_arrays(arrays: object) -> dict[str, np.ndarray]:
 def _node_view(
     published: dict[str, np.ndarray],
 ) -> Mapping[str, np.ndarray]:
-    # Per-rank views over one read-only base: the in-process analogue of a
-    # node-shared memory window.
     return MappingProxyType({key: value.view() for key, value in published.items()})
-
-
-# single-rank transport
 
 
 class SerialTransport(Transport):
@@ -400,8 +373,6 @@ class SerialTransport(Transport):
         try:
             yield
         except TransportError:
-            # Re-raise unchanged: origin rank and message must survive
-            # re-guarding.
             raise
         except Exception as exc:
             raise TransportError(0, f"{type(exc).__name__}: {exc}") from exc
@@ -432,7 +403,7 @@ class SerialTransport(Transport):
     def scatter_by_agent(
         self,
         arrays: dict[str, np.ndarray] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         root: int = 0,
     ) -> dict[str, np.ndarray]:
@@ -441,7 +412,7 @@ class SerialTransport(Transport):
         if arrays is None:
             raise ValueError("scatter_by_agent: rank 0 must pass the full arrays")
         normalized, n_global = _scatter_arrays_validated(arrays)
-        ids = _ids_validated(local_ids, n_global, "scatter_by_agent")
+        ids = _ids_validated(agent_ids, n_global, "scatter_by_agent")
         return _scatter_select(normalized, ids)
 
     def gather_agent_values(
@@ -459,7 +430,7 @@ class SerialTransport(Transport):
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         source: int,
         n_agents: int,
@@ -471,7 +442,7 @@ class SerialTransport(Transport):
             what="route_agent_values",
         )
         _route_local_ids_owned_validated(
-            local_ids,
+            agent_ids,
             n_agents=n_agents_i,
             rank=0,
             size=1,
@@ -484,15 +455,14 @@ class SerialTransport(Transport):
             source=src,
             what="route_agent_values",
         )
-        bucket = _route_bucket_for_rank(
+        return _route_bucket_for_rank(
             normalized, n_agents=n_agents_i, size=1, rank=0
         )
-        return bucket
 
     def route_agent_values_batched(
         self,
         values_by_rep: Mapping[int, Mapping[int, float]] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         owners: np.ndarray,
         n_agents: int,
@@ -504,7 +474,7 @@ class SerialTransport(Transport):
             what="route_agent_values_batched",
         )
         _route_local_ids_owned_validated(
-            local_ids,
+            agent_ids,
             n_agents=n_agents_i,
             rank=0,
             size=1,
@@ -536,9 +506,6 @@ class SerialTransport(Transport):
         return _combine_cuts([tuple(rows)], agreed, my_rank=0)
 
 
-# in-process multirank transport
-
-
 class _Rendezvous:
     """Rank-indexed slot exchange behind a reusable barrier.
 
@@ -561,8 +528,6 @@ class _Rendezvous:
         self._wait(rank)
         tags = sorted({entry[0] for entry in snapshot})  # type: ignore[index]
         if len(tags) != 1:
-            # Same snapshot on every rank, so all raise identically and
-            # none hangs; otherwise unrelated payloads combine silently.
             raise TransportError(
                 rank,
                 f"misaligned collectives in one round: {tags}",
@@ -624,16 +589,12 @@ class LocalMultirankTransport(Transport):
         if exc is None:
             verdict: tuple[int, str] | None = None
         elif isinstance(exc, TransportError):
-            # Preserve the true origin through nested guards, not the rank
-            # that re-guarded.
             verdict = (exc.rank, exc.message)
         else:
             verdict = (self._rank, f"{type(exc).__name__}: {exc}")
         gathered = self._rendezvous.exchange(self._rank, "collective.agree", verdict)
         failures = [v for v in gathered if v is not None]
         if failures:
-            # Rank-ordered slots: lowest-ranked report is the same agreed
-            # verdict on every rank.
             origin_rank, message = failures[0]  # type: ignore[misc]
             raise TransportError(origin_rank, message) from exc
 
@@ -645,8 +606,6 @@ class LocalMultirankTransport(Transport):
         )
         if self._rank == root:
             return obj  # type: ignore[return-value]
-        # Deep copy: without it, in-process aliasing would let one rank
-        # mutate another's state, a coupling no real transport has.
         return copy.deepcopy(gathered[root])  # type: ignore[return-value]
 
     def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
@@ -692,14 +651,14 @@ class LocalMultirankTransport(Transport):
     def scatter_by_agent(
         self,
         arrays: dict[str, np.ndarray] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         root: int = 0,
     ) -> dict[str, np.ndarray]:
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}), got {root}")
         gathered = self._rendezvous.exchange(
-            self._rank, f"scatter_by_agent:{root}", (arrays, local_ids)
+            self._rank, f"scatter_by_agent:{root}", (arrays, agent_ids)
         )
         root_arrays = gathered[root][0]  # type: ignore[index]
         for r in range(self._size):
@@ -715,8 +674,6 @@ class LocalMultirankTransport(Transport):
                 f"scatter_by_agent: rank {root} must pass the full arrays"
             )
         normalized, n_global = _scatter_arrays_validated(root_arrays)
-        # Validate every rank's ids on every rank: divergent caller state
-        # raises the same error everywhere instead of stranding peers.
         ids_by_rank = [
             _ids_validated(entry[1], n_global, "scatter_by_agent")  # type: ignore[index]
             for entry in gathered
@@ -758,14 +715,14 @@ class LocalMultirankTransport(Transport):
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         source: int,
         n_agents: int,
     ) -> dict[int, float]:
         payload = (
             values,
-            local_ids,
+            agent_ids,
             n_agents,
             source,
         )
@@ -804,26 +761,24 @@ class LocalMultirankTransport(Transport):
             )
             for r, entry in enumerate(gathered)
         ]
-        source_values = normalized_by_rank[src]
-        bucket = _route_bucket_for_rank(
-            source_values,
+        return _route_bucket_for_rank(
+            normalized_by_rank[src],
             n_agents=n_agents_i,
             size=self._size,
             rank=self._rank,
         )
-        return bucket
 
     def route_agent_values_batched(
         self,
         values_by_rep: Mapping[int, Mapping[int, float]] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         owners: np.ndarray,
         n_agents: int,
     ) -> dict[int, dict[int, float]]:
         payload = (
             values_by_rep,
-            local_ids,
+            agent_ids,
             owners,
             n_agents,
         )
@@ -872,8 +827,6 @@ class LocalMultirankTransport(Transport):
                     _publish_node_arrays(arrays),
                 )
             except Exception as exc:
-                # Publish the failure rather than raise before the
-                # rendezvous, or peers wait out the barrier timeout.
                 payload = ("error", f"{type(exc).__name__}: {exc}")
         else:
             payload = ("peer", None)
@@ -886,8 +839,6 @@ class LocalMultirankTransport(Transport):
         if errors:
             r0, message = errors[0]
             raise ValueError(f"node_shared: publishing failed on rank {r0}: {message}")
-        # Nodes are contiguous rank blocks, so the publisher sits
-        # node_rank slots below this rank.
         leader_rank = self._rank - self._node.node_rank
         published = gathered[leader_rank][1]  # type: ignore[index]
         return _node_view(published)  # type: ignore[arg-type]
@@ -996,7 +947,7 @@ class LocalCluster:
         def _run_rank(r: int) -> None:
             try:
                 results[r] = fn(transports[r])
-            except BaseException as exc:  # relayed below
+            except BaseException as exc:
                 errors[r] = exc
 
         threads = [
@@ -1014,8 +965,6 @@ class LocalCluster:
             thread.join(timeout=self._timeout + 5.0)
         alive = [thread.name for thread in threads if thread.is_alive()]
         if alive:
-            # Free peers parked at the barrier, then fail: a hung run must
-            # never look like a passing one.
             rendezvous.abort()
             raise RuntimeError(
                 f"local cluster ranks still running after the rendezvous"
@@ -1023,7 +972,5 @@ class LocalCluster:
             )
         first_error = next((e for e in errors if e is not None), None)
         if first_error is not None:
-            # Rank order makes the relayed error deterministic; agreement
-            # semantics belong to collective(), not here.
             raise first_error
         return list(results)  # type: ignore[arg-type]

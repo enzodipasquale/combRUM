@@ -1,8 +1,6 @@
 """The generic solve-method contract, not specific to row generation.
 
-A formulation proposes query points, folds priced subproblems into a
-progress measure, and publishes a final estimate. Nothing presumes a
-master problem, cuts, or duals.
+Nothing presumes a master problem, cuts, or duals.
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ from combrum.demand import Demand
 
 
 def _readonly(arr: np.ndarray) -> np.ndarray:
-    # A frozen dataclass with mutable ndarray payloads is not frozen.
     arr.setflags(write=False)
     return arr
 
@@ -28,8 +25,9 @@ def _staged_penalty(
 ) -> tuple[np.ndarray, float]:
     """Validate a proximal ``(ref, weight)`` pair for staging.
 
-    Returns a frozen copy of ``ref``, detached from caller memory so a
-    later mutation cannot leak into an already-staged solve.
+    ``ref`` is a frozen copy, detached from
+    caller memory so a later mutation cannot leak into an already-staged
+    solve.
     """
     ref_arr = np.asarray(ref, dtype=np.float64)
     if ref_arr.shape != (K,):
@@ -44,9 +42,7 @@ def _staged_penalty(
 def _require_owner_master(
     master: object, required: type, formulation: str
 ) -> None:
-    """Owner-rank check that a usable master backend was supplied.
-
-    ``required`` (the backend base class) rides in as an argument: this
+    """``required`` (the backend base class) rides in as an argument: this
     module deliberately has no import edge to the master layer.
     """
     if master is None:
@@ -66,8 +62,7 @@ class Evaluation:
     """One iteration's evaluated step: progress measure plus method state.
 
     The stop rule is ``violation <= tolerance``; ``violation`` is the only
-    field the caller reads. It is a method-owned distance (reduced cost,
-    trust-region gap, moment distance), not specifically a reduced cost.
+    field the caller reads.
 
     ``payload`` is method-owned evaluated state carried forward by the
     same object into :meth:`Formulation.update`; the caller never
@@ -79,7 +74,6 @@ class Evaluation:
 
     def __post_init__(self) -> None:
         violation = float(self.violation)
-        # "not >=" (vs "< 0") also rejects NaN, which cannot drive a stop rule.
         if not violation >= 0.0:
             raise ValueError(f"violation must be >= 0; got {violation}")
         object.__setattr__(self, "violation", violation)

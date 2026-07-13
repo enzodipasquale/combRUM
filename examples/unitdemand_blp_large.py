@@ -65,8 +65,8 @@ class MarketDemand(cb.Oracle, cb.FeatureMap):
             np.arange(len(agent_ids)),
         )
 
-    def price_batch(self, theta, local_ids):
-        ids, x, eps, rows = self.batch(local_ids)
+    def price_batch(self, theta, agent_ids):
+        ids, x, eps, rows = self.batch(agent_ids)
         inside_values = (
             np.einsum("ijk,k->ij", x, theta[: self.C], optimize=True)
             + theta[self.C :]

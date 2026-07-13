@@ -12,8 +12,6 @@ _HEADER = struct.Struct("!3sHH")
 
 
 def pack_bundle(bundle: np.ndarray) -> bytes:
-    """Pack dtype, shape, and raw bytes into an invertible cut key."""
-
     arr = np.ascontiguousarray(bundle)
     dtype = arr.dtype.str.encode("ascii")
     shape = np.asarray(arr.shape, dtype="<i8")
@@ -46,8 +44,6 @@ def pack_bundles(bundles: np.ndarray) -> list[bytes]:
 
 
 def canonical_bundle_key(key: bytes) -> bytes:
-    """Canonical bytes for explicit bundle keys; opaque keys pass through."""
-
     if key.startswith(_MAGIC):
         _parse_packed(key)
         return key
@@ -82,11 +78,6 @@ def _shape_struct(ndim: int) -> struct.Struct:
 
 
 def _parse_packed(key: bytes) -> tuple[np.dtype, tuple[int, ...], int]:
-    """Validated header of a packed key: (dtype, shape, payload offset).
-
-    The length arithmetic pins the payload exactly, so validation never
-    materializes the array.
-    """
     if len(key) < _HEADER.size:
         raise ValueError("bundle_key header is truncated")
     _magic, dtype_len, ndim = _HEADER.unpack_from(key)

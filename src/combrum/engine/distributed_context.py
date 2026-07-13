@@ -28,8 +28,6 @@ from combrum.transport.base import CutRow, Transport
 
 @dataclass(frozen=True)
 class DistributedObservedPrep:
-    """Observation-owned distributed geometry and observed feature rows."""
-
     K: int
     N: int
     S: int
@@ -62,7 +60,7 @@ def owned_observation_ids(n_observations: int, rank: int, size: int) -> np.ndarr
     return np.arange(start, stop, dtype=np.int64)
 
 
-def _surface_token(model: Model) -> tuple[str, str, str, bool, bool, bool]:
+def _observed_surface_token(model: Model) -> tuple[str, str, str, bool, bool, bool]:
     if model.observed_features is not None:
         source = "observed_features"
         surface = model.observed_features
@@ -93,7 +91,7 @@ def _pricing_surface_token(model: Model) -> tuple[str, str, bool]:
 
 
 def _distributed_observed_surface(model: Model, transport: Transport) -> object:
-    token = _surface_token(model)
+    token = _observed_surface_token(model)
     with transport.collective():
         root_token = transport.bcast(token if transport.rank == 0 else None)
         if token != root_token:
@@ -158,7 +156,6 @@ def prepare_distributed_observed(
     n_simulations: int,
     transport: Transport,
 ) -> DistributedObservedPrep:
-    """Prepare observation-owned feature rows and agent ids for distributed fits."""
     N = agree_public_int("n_observations", n_observations, transport, lower=1)
     S = agree_public_int("n_simulations", n_simulations, transport, lower=1)
     parameters = require_public_object_agreement(
@@ -210,7 +207,6 @@ def distributed_c_theta(
     obs_weights_local: np.ndarray | None = None,
     transport: Transport,
 ) -> np.ndarray:
-    """Observed-axis ``c_theta`` reduction for one distributed fit."""
     weights = (
         np.ones(prep.owned_obs.size, dtype=np.float64)
         if obs_weights_local is None
@@ -251,7 +247,6 @@ def build_distributed_fit_context(
     result_publication: ResultPublication | str | Iterable[str],
     guard_master: bool = True,
 ) -> BuiltContext:
-    """Build an NSlack distributed context without dense agent-weight arrays."""
     publication = _coerce_result_publication(result_publication)
     if publication & ResultPublication.BROADCAST:
         raise ValueError(

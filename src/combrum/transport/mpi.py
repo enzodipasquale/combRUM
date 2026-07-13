@@ -1,17 +1,7 @@
 """Distributed :class:`combrum.transport.base.Transport` over mpi4py.
 
-Row-keyed reductions and cut exchange preserve the same canonical contracts as
-the in-process references: global row id for row sums, and
-``(rep_id, agent_id, bundle_key)`` for cuts. Fixed-rank aggregate reductions
-such as :meth:`sum_vectors_reproducible` are deterministic for a fixed rank
-layout; they are not a row-distribution-invariant replacement for
-:meth:`sum_reproducible`.
-
 mpi4py is an optional dependency (the ``mpi`` extra); it is imported at
 instantiation, not module load, so the package imports without it.
-
-Cross-rank validation is agreed before data movement where possible, so ranks
-raise together instead of leaving peers in later collectives.
 """
 
 from __future__ import annotations
@@ -65,21 +55,12 @@ def _mpi() -> Any:
     return MPI
 
 
-# scatter_by_agent streaming chunk. Bounds the root's in-flight transient at
-# chunk_bytes x (size - 1); large enough to amortize per-message latency.
 _SCATTER_CHUNK_BYTES: int = 8 * 2**20
 
-# One tag suffices: MPI's non-overtaking rule orders messages per
-# (source, destination, tag), and root/receiver walk keys and windows in the
-# same order, so the k-th send on a channel is the k-th receive.
 _SCATTER_STREAM_TAG: int = 92
 
-# Separate from scatter streams so a result object is never confused with row
-# shards on the same channel.
 _OBJECT_TO_ROOT_TAG: int = 93
 
-# Cache-line alignment satisfies every numeric dtype and keeps adjacent arrays
-# off the same line.
 _WINDOW_ALIGN: int = 64
 
 _ROUTE_VALUE_DTYPE = np.dtype([("gid", np.int64), ("value", np.float64)])
@@ -106,10 +87,6 @@ def _chunk_spans(
     ]
 
 
-# Cut-row wire header: rep_id, agent_id (int64), epsilon (float64), phi length,
-# bundle-key length (int64); native order, no padding. Followed by phi's raw
-# float64 bytes then the bundle key. Native order is unambiguous within one MPI
-# job; raw bytes preserve exact bit patterns.
 _CUT_HEADER = struct.Struct("=qqdqq")
 assert _CUT_HEADER.size == _CUT_ROW_WIRE_HEADER_BYTES
 
@@ -134,9 +111,6 @@ def _write_cut(buf: np.ndarray, offset: int, row: CutRow) -> int:
 
 
 def _cut_record_dtype(k: int, key_len: int) -> np.dtype:
-    # Mirrors _CUT_HEADER + phi payload + key byte-for-byte: numpy packs
-    # structured dtypes without padding, so a records array views as the
-    # exact wire bytes of the equivalent _write_cut sequence.
     dtype = np.dtype(
         [
             ("rep", np.int64),
@@ -209,10 +183,6 @@ def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
     if k > 0 and key_len > 0 and len(view) % row_nbytes == 0:
         rec = np.frombuffer(view, dtype=_cut_record_dtype(k, key_len))
         if bool((rec["k"] == k).all()) and bool((rec["klen"] == key_len).all()):
-            # The fixed-stride reading is exact, not heuristic: rows sit
-            # back-to-back, so matching k/klen at every stride position pins
-            # each row's true offset by induction from row 0.
-            # One matrix copy detaches every phi from the receive buffer.
             phis = np.array(rec["phi"], dtype=np.float64)
             phis.setflags(write=False)
             keys = rec["key"].tobytes()
@@ -237,7 +207,6 @@ def _unpack_cuts(block: bytes | memoryview) -> list[CutRow]:
     while offset < len(view):
         rep_id, agent_id, epsilon, k, key_len = _CUT_HEADER.unpack_from(view, offset)
         offset += _CUT_HEADER.size
-        # Copy detaches phi so a row does not pin the whole receive buffer.
         phi = np.frombuffer(view, dtype=np.float64, count=k, offset=offset).copy()
         phi.setflags(write=False)
         offset += 8 * k
@@ -326,13 +295,9 @@ def _node_arrays_validated(arrays: object) -> dict[str, np.ndarray]:
     staged: dict[str, np.ndarray] = {}
     for key, value in arrays.items():
         if not isinstance(key, str):
-            # Text must match reference.py's node_shared validator: the MPI
-            # conformance battery compares the captured message across backends.
             raise ValueError(f"node_shared: array keys must be str; got {key!r}")
         arr = np.asarray(value)
         if arr.dtype == object:
-            # Read-only flags cannot protect object-array contents, so a
-            # shared object array would break the immutable-copy promise.
             raise ValueError(
                 f"node_shared: array {key!r} must be numeric; got dtype object"
             )
@@ -390,19 +355,14 @@ class MpiTransport(Transport):
         self._counts: dict[str, int] = {}
         self._rank: int = int(self._comm.Get_rank())
         self._size: int = int(self._comm.Get_size())
-        # Ranks sharing a memory domain form one node.
         self._tick("split_type")
         self._node_comm: Intracomm | None = self._comm.Split_type(mpi.COMM_TYPE_SHARED)
         node_rank = int(self._node_comm.Get_rank())
         node_size = int(self._node_comm.Get_size())
-        # Split_type breaks key ties by parent rank, so in-node rank 0 is the
-        # node's lowest world rank; broadcasting it identifies each node.
         self._tick("bcast")
         leader = int(self._node_comm.bcast(self._rank, root=0))
         self._tick("allgather")
         leaders: list[int] = self._comm.allgather(leader)
-        # Node ids ordered by lowest world rank: a pure function of the rank
-        # layout, independent of MPI's shared-domain enumeration order.
         ordered = sorted(set(leaders))
         self._node = NodeTopology(
             node_id=ordered.index(leader),
@@ -411,7 +371,6 @@ class MpiTransport(Transport):
             n_nodes=len(ordered),
         )
 
-    # --- introspection --------------------------------------------------
 
     def _tick(self, kind: str) -> None:
         self._counts[kind] = self._counts.get(kind, 0) + 1
@@ -432,7 +391,6 @@ class MpiTransport(Transport):
         """Zero the invocation tallies; the transport itself is untouched."""
         self._counts.clear()
 
-    # --- topology -------------------------------------------------------
 
     @property
     def rank(self) -> int:
@@ -446,7 +404,6 @@ class MpiTransport(Transport):
     def node(self) -> NodeTopology:
         return self._node
 
-    # --- collectives ------------------------------------------------------
 
     @contextmanager
     def collective(self) -> Iterator[None]:
@@ -457,16 +414,9 @@ class MpiTransport(Transport):
         except Exception as exc:
             cause = exc
             if isinstance(exc, TransportError):
-                # Preserve the true origin through nested guards.
                 verdict = (exc.rank, exc.message)
             else:
                 verdict = (self._rank, f"{type(exc).__name__}: {exc}")
-        # One word-sized round at every guard exit, success or failure, so the
-        # reduction is rank-uniform and no rank waits on a failed peer. MIN over
-        # "my rank if I hold a verdict, else size" elects the lowest REPORTING
-        # rank, which holds a verdict and can broadcast it. (Reducing the
-        # carried origin could elect a rank with nothing to say: a body may
-        # re-raise an agreed TransportError whose origin rank is healthy here.)
         code = np.array(
             [self._rank if verdict is not None else self._size],
             dtype=np.int64,
@@ -476,9 +426,7 @@ class MpiTransport(Transport):
         self._comm.Allreduce(code, agreed, op=self._mpi.MIN)
         reporter = int(agreed[0])
         if reporter == self._size:
-            return  # no rank failed
-        # Failure path only: the elected reporter broadcasts its verdict, which
-        # cannot ride a reduction. Keeps the success path at a single round.
+            return
         self._tick("bcast")
         origin, message = self._comm.bcast(
             verdict if self._rank == reporter else None, root=reporter
@@ -489,8 +437,6 @@ class MpiTransport(Transport):
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}); got {root}")
         self._tick("bcast")
-        # mpi4py's object path unpickles a fresh graph on every receiver, so
-        # received copies are private; the root gets its own object back.
         return self._comm.bcast(obj if self._rank == root else None, root=root)
 
     def send_to_root(self, obj: _T | None, *, source: int, root: int = 0) -> _T | None:
@@ -511,9 +457,6 @@ class MpiTransport(Transport):
 
     def allreduce_max(self, value: float) -> float:
         local = float(value)
-        # MPI_MAX over NaN is implementation-defined, so NaN is handled
-        # explicitly: lane 0 reduces a 0/1 NaN flag, lane 1 reduces the value
-        # with NaN replaced by -inf (inert under MAX). One round.
         is_nan = math.isnan(local)
         lanes = np.array(
             [1.0 if is_nan else 0.0, -math.inf if is_nan else local],
@@ -527,10 +470,6 @@ class MpiTransport(Transport):
     def sum_reproducible(
         self, values: np.ndarray, global_ids: np.ndarray
     ) -> np.ndarray | float:
-        # Global-id windows -> root canonical_sum per bounded window -> broadcast.
-        # The root never materializes the full row pool; each window is sized by
-        # canonical_sum_window_rows(width), and the window order matches
-        # canonical_sum's deterministic grouping.
         comm, mpi, root = self._comm, self._mpi, 0
         vals = np.asarray(values, dtype=np.float64)
         if vals.ndim not in (1, 2):
@@ -571,8 +510,6 @@ class MpiTransport(Transport):
             sorted_ids = ids
             sorted_vals = vals
 
-        # One small allgather agrees the layout and id span, O(size) not O(N):
-        # each rank's row count + (is2d, width, min_id, max_id).
         meta_local = np.array(
             [n_local, int(is2d), width, local_min, local_max], dtype=np.int64
         )
@@ -592,8 +529,7 @@ class MpiTransport(Transport):
         else:
             any2d = bool(meta[:, 1].any())
             agreed_width = int(meta[:, 2].max()) if any2d else 1
-        out = np.empty(agreed_width, dtype=np.float64)
-        out.fill(0.0)
+        out = np.zeros(agreed_width, dtype=np.float64)
         if self._rank == root:
             chunk_counts = np.empty(self._size, dtype=np.int64)
         else:
@@ -700,21 +636,17 @@ class MpiTransport(Transport):
     def scatter_by_agent(
         self,
         arrays: dict[str, np.ndarray] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         root: int = 0,
     ) -> dict[str, np.ndarray]:
         if not 0 <= root < self._size:
             raise ValueError(f"root must lie in [0, {self._size}); got {root}")
-        ids = np.asarray(local_ids)
-        # Only (presence flag, ids) travel to root; the full arrays never leave
-        # the publishing rank whole.
+        ids = np.asarray(agent_ids)
         self._tick("gather")
         gathered: list[tuple[bool, np.ndarray]] | None = self._comm.gather(
             (arrays is not None, ids), root=root
         )
-        # Root validates once and broadcasts one verdict (the wire header or a
-        # shared error text), so a bad call raises identically on every rank.
         verdict: tuple[str, Any] | None = None
         normalized: dict[str, np.ndarray] = {}
         if self._rank == root and gathered is not None:
@@ -752,8 +684,6 @@ class MpiTransport(Transport):
             row_nbytes = int(full.dtype.itemsize) * int(
                 np.prod(full.shape[1:], dtype=np.int64)
             )
-            # Root's own shard never touches the wire; the fancy-index yields
-            # fresh rows, so nothing aliases the caller's originals.
             own = full[np.asarray(gathered[root][1])]
             own.setflags(write=False)
             out[key] = own
@@ -772,11 +702,9 @@ class MpiTransport(Transport):
                     if r == root:
                         continue
                     if w >= len(spans[r]):
-                        continue  # destination r's stream already ended
+                        continue
                     start, stop = spans[r][w]
                     rank_ids = np.asarray(gathered[r][1])
-                    # The chunk buffer must outlive its Isend, hence the
-                    # in-flight list dropped only after Waitall.
                     chunk = np.ascontiguousarray(full[rank_ids[start:stop]])
                     in_flight.append(chunk)
                     self._tick("p2p_send")
@@ -804,9 +732,6 @@ class MpiTransport(Transport):
             recv = np.empty((n_local, *trailing), dtype=dtype)
             for start, stop in _chunk_spans(n_local, row_nbytes, chunk_bytes):
                 self._tick("p2p_recv")
-                # Axis-0 slices of a fresh C-contiguous array are contiguous, so
-                # each chunk lands in place with no extra copy. Raw bytes
-                # preserve the dtype's exact bit patterns.
                 self._comm.Recv(
                     [recv[start:stop], byte],
                     source=root,
@@ -952,7 +877,6 @@ class MpiTransport(Transport):
         raise ValueError(message)
 
     def _agree_owner_vector(self, owners: np.ndarray, *, what: str) -> None:
-        """Verify rank-identical owner vectors with fixed-size wire payload."""
         if owners.size == 0:
             return
         canon = np.ascontiguousarray(owners, dtype="<i8")
@@ -998,7 +922,7 @@ class MpiTransport(Transport):
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         source: int,
         n_agents: int,
@@ -1013,7 +937,7 @@ class MpiTransport(Transport):
                 what=what,
             )
             _route_local_ids_owned_validated(
-                local_ids,
+                agent_ids,
                 n_agents=n_agents0,
                 rank=self._rank,
                 size=self._size,
@@ -1043,8 +967,6 @@ class MpiTransport(Transport):
             order = np.argsort(gids)
             gids = gids[order]
             vals = vals[order]
-            # Owner rank is monotone in gid under contiguous sharding, so gid
-            # order is already owner-bucketed wire order.
             owners = _agent_owner_ranks(gids, n_agents_i, self._size)
             send_counts = np.bincount(owners, minlength=self._size).astype(np.int64)
             send = np.empty(gids.size, dtype=_ROUTE_VALUE_DTYPE)
@@ -1196,7 +1118,7 @@ class MpiTransport(Transport):
     def route_agent_values_batched(
         self,
         values_by_rep: Mapping[int, Mapping[int, float]] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         owners: np.ndarray,
         n_agents: int,
@@ -1207,7 +1129,7 @@ class MpiTransport(Transport):
             normalized,
         ) = self._checked_route_batch_inputs(
             values_by_rep,
-            local_ids,
+            agent_ids,
             owners=owners,
             n_agents=n_agents,
         )
@@ -1226,11 +1148,11 @@ class MpiTransport(Transport):
             reps = np.concatenate(rep_parts)
             gids = np.concatenate(gid_parts)
             vals = np.concatenate(val_parts)
-            owners = _agent_owner_ranks(gids, n_agents_i, self._size)
-            # Stable sort by owner keeps (rep asc, gid asc) order within each
-            # destination bucket, matching the per-bucket append wire order.
-            order = np.argsort(owners, kind="stable")
-            send_counts = np.bincount(owners, minlength=self._size).astype(np.int64)
+            agent_owners = _agent_owner_ranks(gids, n_agents_i, self._size)
+            order = np.argsort(agent_owners, kind="stable")
+            send_counts = np.bincount(agent_owners, minlength=self._size).astype(
+                np.int64
+            )
             send = np.empty(gids.size, dtype=_ROUTE_BATCH_VALUE_DTYPE)
             send["rep"] = reps[order]
             send["gid"] = gids[order]
@@ -1262,10 +1184,10 @@ class MpiTransport(Transport):
         gids = recv["gid"]
         rep_bad = (reps < 0) | (reps >= B)
         oob = (gids < 0) | (gids >= n_agents_i)
-        owners = _agent_owner_ranks(
+        agent_owners = _agent_owner_ranks(
             np.clip(gids, 0, n_agents_i - 1), n_agents_i, self._size
         )
-        misrouted = ~oob & (owners != self._rank)
+        misrouted = ~oob & (agent_owners != self._rank)
         bad = rep_bad | oob | misrouted
         if bad.any():
             first = int(np.flatnonzero(bad)[0])
@@ -1299,9 +1221,6 @@ class MpiTransport(Transport):
                 " need the node communicator"
             )
         mpi = self._mpi
-        # Verdict agreed across the WHOLE communicator: any node's failure must
-        # abort every node before anyone enters the window collectives. This is
-        # a publish-once path, so one small allgather is affordable.
         verdict: tuple[int, str] | None = None
         staged: dict[str, np.ndarray] = {}
         if self._node.node_rank == 0:
@@ -1313,28 +1232,20 @@ class MpiTransport(Transport):
         verdicts: list[tuple[int, str] | None] = self._comm.allgather(verdict)
         failure = next((v for v in verdicts if v is not None), None)
         if failure is not None:
-            # allgather is rank-ordered, so `next` elects the lowest failer.
             origin, message = failure
             raise ValueError(
                 f"node_shared: publishing failed on rank {origin}: {message}"
             )
-        # The publisher alone defines the layout; peers learn it in one
-        # node-local broadcast.
         self._tick("bcast")
         layout, total = node_comm.bcast(
             _window_layout(staged) if self._node.node_rank == 0 else None,
             root=0,
         )
-        # One window per call, allocated wholly on the publisher: peers request
-        # ZERO bytes and map the publisher's segment, so the node holds one
-        # physical copy.
         self._tick("win_allocate_shared")
         win: Win = mpi.Win.Allocate_shared(
             total if self._node.node_rank == 0 else 0, 1, comm=node_comm
         )
         self._windows.append(win)
-        # Lifetime-long passive epoch (shared lock, NOCHECK since no rank ever
-        # takes an exclusive lock); close() ends it before freeing.
         self._tick("win_lock_all")
         win.Lock_all(mpi.MODE_NOCHECK)
         buf, _ = win.Shared_query(0)
@@ -1345,21 +1256,13 @@ class MpiTransport(Transport):
                 dest = np.frombuffer(
                     writable, dtype=dtype, count=count, offset=offset
                 ).reshape(shape)
-                # The single publish copy: caller's array straight into the
-                # shared pages, no staging duplicate.
                 np.copyto(dest, src, casting="no")
-        # Write-once-then-read-only needs one sync episode: sync (stores reach
-        # the window), barrier (no read before every store), sync (readers see
-        # them). Sufficient on the unified shared-window model; no rank writes
-        # afterward, so no per-access synchronization.
         self._tick("win_sync")
         win.Sync()
         self._tick("barrier")
         node_comm.Barrier()
         self._tick("win_sync")
         win.Sync()
-        # Read-only views over the same physical pages on every rank; the
-        # read-only memoryview makes the arrays' write flag un-flippable.
         ro = memoryview(buf).toreadonly()
         out: dict[str, np.ndarray] = {}
         for key, dtype, shape, offset in layout:
@@ -1390,9 +1293,6 @@ class MpiTransport(Transport):
             )
         if B == 0:
             return batch.copy()
-        # One vector reduction for the whole batch. MPI_MAX over NaN is
-        # implementation-defined, so each slot carries a NaN flag lane and a
-        # value lane with NaNs made inert under MAX (matching scalar max).
         flags = np.isnan(batch).astype(np.float64)
         vals = np.where(flags > 0.0, -math.inf, batch)
         lanes = np.concatenate((flags, vals))
@@ -1502,9 +1402,6 @@ class MpiTransport(Transport):
         rows, canon = self._checked_exchange_cut_inputs(rows, owners)
         send_buf, send_counts = _pack_cuts(rows, canon, self._size)
         recv_counts = np.empty_like(send_counts)
-        # Per-destination byte counts depend on what every peer generated, so
-        # exchange is one counts Alltoall then one packed-payload Alltoallv:
-        # a constant round count regardless of how many rows are live.
         self._tick("alltoall")
         self._comm.Alltoall(send_counts, recv_counts)
         send_displs = np.concatenate(([0], np.cumsum(send_counts)[:-1]))
@@ -1524,7 +1421,6 @@ class MpiTransport(Transport):
             received.extend(_unpack_cuts(block))
         return canonical_cut_order(received)
 
-    # --- lifecycle --------------------------------------------------------
 
     def close(self) -> None:
         """Release transport-owned MPI resources; idempotent.
@@ -1537,8 +1433,6 @@ class MpiTransport(Transport):
         """
         windows, self._windows = self._windows, []
         for win in windows:
-            # End the passive epoch before the collective Free; SPMD reaches
-            # close() on every rank in the same order, so the Frees match up.
             win.Unlock_all()
             win.Free()
         node_comm, self._node_comm = self._node_comm, None

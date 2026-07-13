@@ -10,13 +10,7 @@ import pytest
 
 
 def _mpirun_path() -> str | None:
-    override = os.environ.get("COMBRUM_MPIRUN")
-    if override:
-        return override
-    found = shutil.which("mpirun")
-    if found:
-        return found
-    return None
+    return os.environ.get("COMBRUM_MPIRUN") or shutil.which("mpirun")
 
 
 def _mpi_available() -> bool:

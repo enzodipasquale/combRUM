@@ -214,11 +214,11 @@ def test_oracle_setup_defaults_to_no_op_but_pricing_is_required() -> None:
 class _TableOracle(Oracle):
     """Minimal Oracle that prices from a node-shared payoff table."""
 
-    def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
+    def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
         self._shared = transport.node_shared(
             {"weights": np.array([1.0, 2.0, 3.0])}
         )
-        self._local_ids = np.array(local_ids, copy=True)
+        self._agent_ids = np.array(agent_ids, copy=True)
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
         weights = self._shared["weights"]

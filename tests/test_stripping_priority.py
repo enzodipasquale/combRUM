@@ -55,7 +55,7 @@ STRIP_PARITY_BAND = 1e-11
 OBJECTIVE_RECOMPUTE_BAND = 1e-11
 
 # The local priority fixtures exercise the percentile leg. The
-# hard_threshold is a max-live row count, not a slack magnitude; production's
+# max_live_cuts is a max-live row count, not a slack magnitude; production's
 # 60000-row cap is far above this fixture scale, so the count cap is kept
 # inactive here. A tighter percentile strips binding cuts and breaks the fit —
 # the whole delicacy of the claim.
@@ -166,7 +166,7 @@ def _strip_vs_off(kind: str, n_obs: int, n_items: int):
         arrays,
         problem,
         cut_policy=SlackStrip(
-            percentile=STRIP_PERCENTILE, hard_threshold=STRIP_HARD_THRESHOLD
+            percentile=STRIP_PERCENTILE, max_live_cuts=STRIP_HARD_THRESHOLD
         ),
     )
     return off, strip
@@ -224,7 +224,7 @@ def _assert_estimate_preserved(
     problem: object,
     off,
     strip,
-) -> None:
+) -> bool:
     """The stripped fit publishes the same estimate as the unstripped run.
 
     Independent legs, so an over-strip that quietly changes the answer cannot
@@ -309,7 +309,7 @@ def test_slack_strip_bounds_peak_cut_count_at_equal_estimate(
     aggressive = _walk(
         arrays,
         problem,
-        cut_policy=SlackStrip(percentile=5.0, hard_threshold=STRIP_HARD_THRESHOLD),
+        cut_policy=SlackStrip(percentile=5.0, max_live_cuts=STRIP_HARD_THRESHOLD),
     )
     assert strip.peak_installed_cuts > aggressive.peak_installed_cuts, (
         f"{kind} {n_obs}x{n_items}: the loose p{STRIP_PERCENTILE:g} strip held"
@@ -385,7 +385,7 @@ def test_loose_strip_is_deterministic() -> None:
     arrays = _arrays("toy", *TOY_SIZES[1])
     problem = _problem("toy", arrays)
     policy = SlackStrip(
-        percentile=STRIP_PERCENTILE, hard_threshold=STRIP_HARD_THRESHOLD
+        percentile=STRIP_PERCENTILE, max_live_cuts=STRIP_HARD_THRESHOLD
     )
     first = _walk(arrays, problem, cut_policy=policy)
     second = _walk(arrays, problem, cut_policy=policy)
@@ -419,7 +419,8 @@ def test_slack_strip_peak_rss_within_bounded_margin(
     # cannot gate the memory claim. Gate on the master's own accounting
     # instead: after every retirement that shed rows, the live gurobi row
     # count and the reachable Constr-object count must both equal the
-    # installed-cut count. RSS is printed as a diagnostic only.
+    # installed-cut count. RSS itself is held only to the loose sanity
+    # margin at the end.
     arrays = _arrays(kind, n_obs, n_items)
     problem = _problem(kind, arrays)
 
@@ -442,7 +443,7 @@ def test_slack_strip_peak_rss_within_bounded_margin(
             problem,
             cut_policy=SlackStrip(
                 percentile=STRIP_PERCENTILE,
-                hard_threshold=STRIP_HARD_THRESHOLD,
+                max_live_cuts=STRIP_HARD_THRESHOLD,
             ),
         )
     )
@@ -538,7 +539,6 @@ def test_reachable_constr_count_catches_graveyards_at_any_depth() -> None:
             result["probe"] = _probe_graveyard_depths(self, doomed[:3])
         return removed
 
-    original = gurobi_backend.GurobiMaster.remove_cuts
     gurobi_backend.GurobiMaster.remove_cuts = _probe_remove
     try:
         arrays = _arrays("toy", *TOY_SIZES[1])
@@ -547,11 +547,11 @@ def test_reachable_constr_count_catches_graveyards_at_any_depth() -> None:
             arrays,
             problem,
             cut_policy=SlackStrip(
-                percentile=STRIP_PERCENTILE, hard_threshold=STRIP_HARD_THRESHOLD
+                percentile=STRIP_PERCENTILE, max_live_cuts=STRIP_HARD_THRESHOLD
             ),
         )
     finally:
-        gurobi_backend.GurobiMaster.remove_cuts = original
+        gurobi_backend.GurobiMaster.remove_cuts = orig_remove
 
     assert "probe" in result, "no retirement shed >=3 rows, so the probe never ran"
     p = result["probe"]

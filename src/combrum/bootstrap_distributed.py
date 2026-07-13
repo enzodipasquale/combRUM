@@ -110,7 +110,7 @@ def _coerce_max_live_reps(value: object) -> int:
         ) from exc
     if cap < 1:
         raise ValueError(f"max_live_reps must be >= 1 (got {value!r})")
-    return int(cap)
+    return cap
 
 
 def _max_live_reps_token(value: object) -> tuple[bool, int, str, str]:
@@ -217,13 +217,10 @@ def _publication_label(publication: ResultPublication) -> str:
     return "+".join(parts)
 
 
-def _restamp(rows: Sequence[CutRow], rep_id: int) -> list[CutRow]:
-    """Re-key ``rows`` onto replication ``rep_id`` for the batched exchange.
-
-    ``contribute`` builds rows under ``rep_id == 0``; the batched exchange routes
-    by ``rep_id``, so each rep's rows are restamped with its slot. ``phi`` is
-    shared read-only (frozen on the source row), so the moment vector is not
-    copied.
+def _restamp_rows(rows: Sequence[CutRow], rep_id: int) -> list[CutRow]:
+    """``contribute`` builds rows under ``rep_id == 0``; the batched exchange
+    routes by ``rep_id``, so each rep's rows are restamped with its position
+    in the batched payload, then back onto its wave slot on receipt.
     """
     return [row._replace(rep_id=rep_id) for row in rows]
 
@@ -240,14 +237,9 @@ def batched_reduce(
     (identical on every rank). Returns a length-``B`` list indexed by wave slot,
     holding the :class:`~combrum.rowgen.Reduced` for each live slot
     (``None`` otherwise).
-
-    The current distributed bootstrap is NSlack-only, so the live set must emit
-    ``MaxContribution``. One ``batched_max`` and one ``exchange_cuts`` cover the
-    current live set; retired slots are absent from both payloads.
     """
     live_slots = sorted(contributions)
     if not live_slots:
-        # Empty reduce desyncs the SPMD program (collective on some ranks only).
         raise AssertionError(
             "batched_reduce called with no live replication; the super-step"
             " loop must stop once the live set is empty rather than issuing"
@@ -262,7 +254,7 @@ def batched_reduce(
             contribution = contributions[slot]
             _require_kind(contribution, MaxContribution, slot)
             worsts[pos] = contribution.worst
-            all_rows.extend(_restamp(contribution.local_rows, pos))
+            all_rows.extend(_restamp_rows(contribution.local_rows, pos))
         reduced, _ = _reduce_live_max(transport, live_slots, owners, worsts, all_rows)
         return reduced
 
@@ -284,8 +276,6 @@ def _reduce_live_max(
     live_slots = tuple(int(slot) for slot in live_slots)
     B = int(owners.shape[0])
     live_owners = np.asarray([owners[slot] for slot in live_slots], dtype=np.int64)
-    # The row-width bookkeeping rides the batched max as one extra lane, so
-    # agreeing it costs no additional round.
     lanes = (
         worsts
         if local_row_nbytes is None
@@ -304,19 +294,13 @@ def _reduce_live_max(
     for pos, slot in enumerate(live_slots):
         reduced[slot] = MaxReduced(
             global_worst=float(global_worsts[pos]),
-            received_rows=tuple(_restamp(rows_by_pos.get(pos, ()), slot)),
+            received_rows=tuple(_restamp_rows(rows_by_pos.get(pos, ()), slot)),
         )
     return reduced, observed_nbytes
 
 
 def _store_dual(writer: DualStoreWriter, rep_id: int, dual: DualSolution | None) -> int:
-    """Re-stamp one replication's dual onto its global id and persist it.
-
-    The dual is built under ``rep_id == 0`` and re-stamped before the write,
-    else B of them would collide on the store's per-``rep_id`` key. One dual
-    is in flight at a time, so the writer's resident set is one payload,
-    never B.
-    """
+    """The dual is built under ``rep_id == 0`` and re-stamped before the write."""
     if dual is None:
         return 0
     restamped = dual.with_rep_id(rep_id)
@@ -350,8 +334,6 @@ def _observe_demands(tally: GapTally, demands: Mapping[int, Demand]) -> None:
 def _cut_exchange_block_size(
     n_live: int, *, row_nbytes: int, max_scheduled_ids: int
 ) -> int:
-    # Pure sizing: the agreed shard-size bound is wave-constant, so the wave
-    # loop agrees it once instead of re-reducing it per block.
     budget_bytes = _CUT_EXCHANGE_BLOCK_ELEMENTS * np.dtype(np.float64).itemsize
     bytes_per_rep = max(1, int(max_scheduled_ids) * int(row_nbytes))
     return min(int(n_live), max(1, budget_bytes // bytes_per_rep))
@@ -545,7 +527,6 @@ def _run_replica_wave(
             raise TypeError(
                 "distributed bootstrap currently supports NSlack replicas only"
             )
-    # The live mask is rank-identical; all collectives loop over this set.
     live = np.ones(n_reps, dtype=bool)
     converged = np.zeros(n_reps, dtype=bool)
     iterations = 0
@@ -563,7 +544,6 @@ def _run_replica_wave(
     rep_gaps = np.full(n_reps, np.nan, dtype=np.float64) if log_details else None
     cut_row_nbytes_hint: int | None = None
 
-    # Duals are streamed one at a time from rank 0.
     writer: DualStoreWriter | None = None
     stored = 0
     thetas = np.zeros((n_reps, K), dtype=np.float64)
@@ -607,8 +587,6 @@ def _run_replica_wave(
             )
             for replica in replicas
         )
-        # Shard sizes never change within a wave: agree the block-sizing
-        # bound once here rather than once per block.
         local_max_scheduled = max(
             (
                 int(np.asarray(replica.scheduled_local_ids).size)
@@ -664,7 +642,7 @@ def _run_replica_wave(
                         contribution = replica.formulation.contribute(demands)
                         _require_kind(contribution, MaxContribution, slot)
                         worsts[pos] = contribution.worst
-                        rows.extend(_restamp(contribution.local_rows, pos))
+                        rows.extend(_restamp_rows(contribution.local_rows, pos))
                         del demands
                     return worsts, rows
 
@@ -676,8 +654,6 @@ def _run_replica_wave(
                             return _price_slots(slot_ids)
                     return _price_slots(slot_ids)
 
-                # Price bounded live blocks; no dense (B, n_agents) payload and
-                # no all-live cut list.
                 price_t0 = perf_counter() if log_details else None
                 if cut_row_nbytes_hint is None:
                     block_slots: list[int] = []
@@ -689,10 +665,7 @@ def _run_replica_wave(
                         next_worsts, next_rows = _guarded_price(next_slot)
                         block_slots.extend(int(slot) for slot in next_slot)
                         worst_parts.append(next_worsts)
-                        # The single-slot probe stamped its rows at position 0;
-                        # re-key them to the slot's position in the block the
-                        # batched exchange routes by.
-                        rows.extend(_restamp(next_rows, len(block_slots) - 1))
+                        rows.extend(_restamp_rows(next_rows, len(block_slots) - 1))
                         observed_row_nbytes = _observed_cut_row_nbytes(
                             next_rows, transport=transport
                         )
@@ -855,7 +828,7 @@ def _run_replica_wave(
         iterations=iterations,
         dual_store_dir=Path(dual_store_dir) if writer is not None else None,
         n_duals_stored=stored_total,
-        u_samples=None,
+        slack_samples=None,
         duals=None,
     )
 
@@ -871,9 +844,9 @@ def _bootstrap_local_rows(
     """Observation-keyed bootstrap rows for one live wave.
 
     Each row is keyed by the global observation id. Columns are grouped by
-    replication as ``[raw_weight, c_theta_0, ..., c_theta_K]``. This keeps the
-    global reduction row-distribution invariant while still reducing the whole
-    live wave in one call.
+    replication as ``[raw_weight, c_theta_1, ..., c_theta_K]``. This keeps the
+    global reduction row-distribution invariant while letting one call reduce
+    a whole block of replications.
     """
     rep_ids = tuple(int(rep_id) for rep_id in rep_ids)
     obs_stop = prep.owned_obs.size if obs_stop is None else int(obs_stop)
@@ -912,7 +885,7 @@ def _finish_bootstrap_reduction(
             f" {reduced.shape}; expected {expected_shape}"
         )
     reduced = reduced.reshape(expected_shape)
-    normalizers = np.asarray(reduced[:, 0], dtype=np.float64)
+    normalizers = reduced[:, 0]
     if np.any(normalizers <= 0.0):
         bad = normalizers[normalizers <= 0.0]
         raise ValueError(
@@ -972,9 +945,6 @@ def _bootstrap_wave_c_theta_and_normalizers(
 def _bootstrap_slack_coef(
     *, n_observations: int, base_seed: int, rep_id: int, normalizer: float
 ) -> Callable[[int], float]:
-    # One vectorized draw over the observation axis; the closure keeps O(N)
-    # memory where a dense (N*S,) coefficient array would not, and the lazy
-    # distributed masters read only the agents that actually cut.
     scale = float(n_observations) / float(normalizer)
     raw = bootstrap_multipliers(
         base_seed, rep_id, np.arange(int(n_observations), dtype=np.int64)
@@ -1006,7 +976,6 @@ def _build_distributed_replica(
     base_seed: int,
     setup_collective: bool = True,
 ) -> _Replica:
-    """Build one weighted distributed replication without dense weights."""
     formulation = model.formulation(model.features)
     built = build_distributed_fit_context(
         prep,
@@ -1093,11 +1062,6 @@ def _node_interleaved_rank_order(transport: Transport) -> np.ndarray:
 
 
 def _owner_vector(n_bootstrap: int, transport: Transport) -> np.ndarray:
-    """Node-interleaved replication owner map.
-
-    Cycling by node rank first spreads small batches across nodes before
-    placing multiple masters on the same node.
-    """
     order = _node_interleaved_rank_order(transport)
     return order[np.arange(n_bootstrap, dtype=np.int64) % order.size]
 
@@ -1141,9 +1105,9 @@ def bootstrap_distributed(
     ``model.features`` must define
     ``observed_features_batch(observation_ids) -> float64[N_local, K]``.
     Optional ``setup_observed(transport, observation_ids)`` and
-    ``setup_pricing_agents(transport, local_ids)`` hooks run once before the
-    loop. ``model.oracle.setup(transport, local_ids)`` also runs once, and then
-    pricing is called only on this rank's local simulated-agent ids.
+    ``setup_pricing_agents(transport, agent_ids)`` hooks run once before the
+    loop. ``model.oracle.setup(transport, agent_ids)`` also runs once, and then
+    pricing is called only on the simulated-agent ids assigned to this rank.
 
     This entry point does not accept dense ``Data`` or ``observed_bundles`` and
     does not collect dense per-replication slack arrays. Public controls
@@ -1216,11 +1180,8 @@ def bootstrap_distributed(
         transport=transport,
     )
     K = prep.K
-    # Warm-start theta is a public distributed input: every rank must agree
-    # before any owner-local context validates or consumes it.
     theta_init = agree_public_optional_theta("warm_start", warm_start, transport, K=K)
 
-    # Several reps may share an owner; rep_id keeps their rows separate.
     owners = _owner_vector(n_bootstrap, transport)
     rep_ids = list(range(n_bootstrap))
     resolved_master_backend = resolve_master_backend(
@@ -1280,8 +1241,6 @@ def bootstrap_distributed(
             )
         )
 
-        # The oracle and price surface are resolved once and shared across every
-        # rep; only the weights differ per rep.
         collective_call(transport, lambda: oracle.setup(transport, prep.local_ids))
         try:
             price_resolution = resolve(
@@ -1299,8 +1258,6 @@ def bootstrap_distributed(
             run_duals_stored = 0
             run_dual_store_dir: Path | None = None
             gap_tally = GapTally()
-            # Reps are independent, so a bounded live window gives the same draws
-            # without hosting every per-rep master at once.
             wave_limit = min(live_cap, n_bootstrap)
             for start in range(0, len(rep_ids), wave_limit):
                 wave_rep_ids = rep_ids[start : start + wave_limit]
@@ -1328,8 +1285,6 @@ def bootstrap_distributed(
                                 backend=resolved_master_backend,
                                 master_params=master_params,
                                 tolerance=tolerance,
-                                # Policies carry row state and cannot be shared
-                                # across independent replicas.
                                 cut_policy=(
                                     None
                                     if cut_policy is None
@@ -1431,7 +1386,7 @@ def bootstrap_distributed(
         iterations=run_iterations,
         dual_store_dir=run_dual_store_dir,
         n_duals_stored=run_duals_stored,
-        u_samples=None,
+        slack_samples=None,
         duals=None,
         metadata={"certification": certification_metadata(certification)},
     )

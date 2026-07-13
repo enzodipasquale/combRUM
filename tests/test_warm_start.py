@@ -27,8 +27,9 @@ GUROBI_AVAILABLE = gurobi_backend.available()
 HIGHS_AVAILABLE = highs_backend.available()
 
 # Both LP backends warm-start identically (reinstall is a pure-LP rebuild),
-# so the cut-replay gates run on each available backend; only the penalty
-# composition gate is gurobi-only (HiGHS does not expose quadratic support).
+# so the cut-replay gates run on each available backend; the penalty
+# composition gate is gurobi-only (HiGHS does not expose quadratic support),
+# as is the wall-clock guard (the historical measurement convention).
 needs_gurobi = pytest.mark.skipif(
     not GUROBI_AVAILABLE, reason="gurobipy missing or no environment starts"
 )
@@ -314,7 +315,7 @@ def test_warm_start_composes_with_penalty_decay(
     # Warm-start seeds the cut set; the penalty steers within the optimal
     # face. Composed, the fit must still converge, terminate on a pure LP,
     # and reach the cold no-penalty optimum.
-    decay = 3
+    qp_iterations = 3
     arrays = _toy(n_obs, n_items)
     cold = _fit(arrays, "gurobi")
     assert cold.converged
@@ -328,7 +329,7 @@ def test_warm_start_composes_with_penalty_decay(
         arrays,
         warm_start=cold.result,
         qp_weight=1.0,
-        decay=decay,
+        qp_iterations=qp_iterations,
         penalty_ref="static",
     )
     assert warm_pen.converged
@@ -375,7 +376,7 @@ def test_warm_start_composes_with_penalty_decay(
         arrays,
         warm_start=cold.result,
         qp_weight=1.0,
-        decay=decay,
+        qp_iterations=qp_iterations,
         penalty_ref="dynamic",
     )
     assert warm_dyn.converged
@@ -388,7 +389,7 @@ def test_warm_start_composes_with_penalty_decay(
         f" seed (min|theta-seed|={dyn_min_dist:.2e}) — the static/dynamic anchor"
         f" choice is not being honored"
     )
-    # Terminating solve is a pure LP: the published weight decayed to exactly 0.
+    # Terminating solve is a pure LP: the published weight dropped to exactly 0.
     assert warm_pen.final_penalty_weight == 0.0
     assert abs(warm_pen.objective - cold.objective) <= PARITY_BAND
     print(

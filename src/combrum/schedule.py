@@ -1,7 +1,6 @@
 """Re-pricing schedules: which agents to re-price each iteration.
 
-Schedules return a boolean ndarray mask of length ``n_agents`` (not index
-lists). The built-in schedules are pure functions of ``(iteration,
+The schedules in this module are pure functions of ``(iteration,
 n_agents)``, so every rank computes the identical mask locally with zero
 communication. Schedules depending on root-resident state read the
 ``dual``/``last_resolved`` arguments; their payloads must stay O(local
@@ -71,7 +70,6 @@ class RoundRobin(RepricingSchedule):
     ) -> np.ndarray:
         n_agents = int(n_agents)
         c = int(iteration) % self._chunks
-        # First `extra` slices carry one agent more, covering [0, n_agents).
         base, extra = divmod(n_agents, self._chunks)
         start = c * base + min(c, extra)
         stop = start + base + (1 if c < extra else 0)

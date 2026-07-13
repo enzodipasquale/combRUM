@@ -1,11 +1,4 @@
-"""Runtime-settings contract shared by the engine and configurable solvers.
-
-:class:`SolverSettings` is the per-phase settings vocabulary an adaptive
-schedule applies mid-solve; :class:`SolverConfigurable` is the opt-in
-capability a solver advertises to receive them. Both are framework
-contracts with no concrete-solver dependency, so the callback layer drives
-them without naming any solver.
-"""
+"""Runtime-settings contract shared by the engine and configurable solvers."""
 
 from __future__ import annotations
 

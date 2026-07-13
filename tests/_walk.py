@@ -55,14 +55,15 @@ class WalkOutcome:
     #: support count, never ``n_agents`` (the O(support) payload claim).
     payload_supports: tuple[int, ...] = ()
     #: Penalty weight in effect for the master solve that produced the
-    #: published theta. Zero whenever no penalty ran, and — by the decay
-    #: floor — zero at every accepted convergence, so a gate can assert
-    #: the terminating solve was a pure LP from the outcome alone.
+    #: published theta. Zero whenever no penalty ran, and — by the
+    #: qp_iterations floor — zero at every accepted convergence, so a gate
+    #: can assert the terminating solve was a pure LP from the outcome alone.
     final_penalty_weight: float = 0.0
     #: Max installed-cut count the master held over the run (root reading of
-    #: ``len(master.extract_cuts())`` each iteration); zero on non-root ranks
-    #: and on a run that never reaches the loop. A stripping gate bounds it:
-    #: mid-run retirement holds a lower peak at an unchanged estimate.
+    #: ``len(master.extract_cuts())`` each iteration); zero on non-root ranks.
+    #: Seeded on root with the post-setup count, so a warm-started run counts
+    #: its replayed cuts before any iteration prices. A stripping gate bounds
+    #: it: mid-run retirement holds a lower peak at an unchanged estimate.
     peak_installed_cuts: int = 0
     #: Per-iteration snapshot of the master's installed ``CutRow`` tuple
     #: (root-only, opt-in via ``capture_installed``), taken after each
@@ -98,7 +99,7 @@ def run_walk(
     cut_policy: CutPolicy | None = None,
     schedule: RepricingSchedule | None = None,
     qp_weight: float = 0.0,
-    decay: int = 0,
+    qp_iterations: int = 0,
     penalty_ref: str = "dynamic",
     min_iterations: int = 0,
     theta_init: np.ndarray | None = None,
@@ -211,14 +212,14 @@ def run_walk(
     force_full = True
     # Quadratic-penalty schedule. qp_weight == 0 disables it entirely
     # (no set_penalty call is ever made); when active, the weight is held at
-    # qp_weight for `decay` iterations and then drops to exactly zero, so the
-    # terminating solve is a pure LP with valid LP duals. Mirrors the
-    # production driver's fixed-then-off schedule.
-    penalty_on = qp_weight > 0.0 and decay > 0
-    if qp_weight > 0.0 and decay <= 0:
+    # qp_weight for `qp_iterations` iterations and then drops to exactly
+    # zero, so the terminating solve is a pure LP with valid LP duals.
+    # Mirrors the production driver's fixed-then-off schedule.
+    penalty_on = qp_weight > 0.0 and qp_iterations > 0
+    if qp_weight > 0.0 and qp_iterations <= 0:
         raise ValueError(
-            f"qp_weight>0 needs decay>=1 so the weight reaches 0; got"
-            f" decay={decay!r}"
+            f"qp_weight>0 needs qp_iterations>=1 so the weight reaches 0; got"
+            f" qp_iterations={qp_iterations!r}"
         )
     if penalty_ref not in ("dynamic", "static"):
         raise ValueError(
@@ -233,13 +234,15 @@ def run_walk(
         if theta_init is None
         else np.asarray(theta_init, dtype=np.float64)
     )
-    # The decay floor enforces effective_min_iters >= decay+1: the
-    # walk may not accept convergence before the weight has dropped
-    # to 0. The real correctness guard, though, is the priced_weight==0
+    # The qp_iterations floor enforces effective_min_iters >=
+    # qp_iterations+1: the walk may not accept convergence before the weight
+    # has dropped to 0. The real correctness guard, though, is the priced_weight==0
     # check at the stop rule (below) — it refuses any convergence whose
     # theta did not come from a pure-LP solve, whatever the floor constant.
     convergence_floor = (
-        max(min_iterations, decay + 1) if penalty_on else min_iterations
+        max(min_iterations, qp_iterations + 1)
+        if penalty_on
+        else min_iterations
     )
     # Weight behind the theta the current iteration prices: set by the
     # previous iteration's solve, 0 for the setup solve (no penalty) and
@@ -293,7 +296,7 @@ def run_walk(
             pricing_calls += int(mask.sum())
             evaluated = formulation.evaluate(demands)
             weight_t = (
-                qp_weight if penalty_on and it < decay else 0.0
+                qp_weight if penalty_on and it < qp_iterations else 0.0
             )
             needs_penalty_solve = penalty_on and (
                 weight_t > 0.0 or last_solve_weight > 0.0
@@ -323,9 +326,9 @@ def run_walk(
             iterations += 1
             if evaluated.violation <= tolerance:
                 # A violation<=tol certificate is honest only when the priced
-                # theta came from a pure-LP solve; the decay floor and the
-                # priced_weight==0 gate refuse convergence until the weight
-                # has dropped to 0. The theta published on break equals the
+                # theta came from a pure-LP solve; the qp_iterations floor
+                # and the priced_weight==0 gate refuse convergence until the
+                # weight has dropped to 0. The theta published on break equals the
                 # validated one: a converged step ships no cut, so re-solving
                 # the unchanged cut set at weight 0 gives the same vertex.
                 if (
@@ -334,7 +337,7 @@ def run_walk(
                     and priced_weight == 0.0
                 ):
                     # last_solve_weight is already 0 here: this iteration's
-                    # solve ran at weight_t, which is 0 once it >= decay
+                    # solve ran at weight_t, which is 0 once it >= qp_iterations
                     # (guaranteed by the floor), so the published theta is
                     # a pure LP.
                     converged = True

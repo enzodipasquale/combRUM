@@ -11,8 +11,8 @@ from typing import Any, TypeVar
 
 import numpy as np
 
-from combrum.transport.base import Transport
 from combrum._version import __version__
+from combrum.transport.base import Transport
 
 _T = TypeVar("_T")
 
@@ -93,8 +93,6 @@ def agree_public_int(
     *,
     lower: int | None = None,
 ) -> int:
-    """Normalize an integer public control and require rank-uniform value."""
-
     return int(_agree_token(name, _int_token(name, value, lower=lower), transport))
 
 
@@ -105,7 +103,7 @@ def _float_token(
     lower: float | None = None,
     strict_lower: bool = False,
 ) -> tuple[bool, object, str, str]:
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         return (
             False,
             0.0,
@@ -149,8 +147,6 @@ def agree_public_float(
     lower: float | None = None,
     strict_lower: bool = False,
 ) -> float:
-    """Normalize a float public control and require rank-uniform value."""
-
     return float(
         _agree_token(
             name,
@@ -172,8 +168,6 @@ def _bool_token(name: str, value: object) -> tuple[bool, object, str, str]:
 
 
 def agree_public_bool(name: str, value: object, transport: Transport) -> bool:
-    """Normalize a boolean public control and require rank-uniform value."""
-
     return bool(_agree_token(name, _bool_token(name, value), transport))
 
 
@@ -201,8 +195,6 @@ def agree_public_choice(
     *,
     choices: tuple[Any, ...],
 ) -> object:
-    """Require every rank to pass the same value from a finite choice set."""
-
     return _agree_token(name, _choice_token(name, value, choices=choices), transport)
 
 
@@ -264,8 +256,6 @@ def agree_public_optional_theta(
     *,
     K: int,
 ) -> np.ndarray | None:
-    """Normalize optional ``theta_hat`` warm starts and require rank agreement."""
-
     payload = _agree_token(name, _optional_theta_token(name, value, K=K), transport)
     if payload is None:
         return None
@@ -299,8 +289,6 @@ def _pickle_digest_token(name: str, value: object) -> tuple[bool, object, str, s
 
 
 def require_public_object_agreement(name: str, value: _T, transport: Transport) -> _T:
-    """Require an object-valued public distributed input to match by digest."""
-
     if transport.size == 1:
         return value
     _agree_token(name, _pickle_digest_token(name, value), transport)
@@ -308,8 +296,6 @@ def require_public_object_agreement(name: str, value: _T, transport: Transport) 
 
 
 def reject_multirank_dense_transport(name: str, transport: Transport) -> None:
-    """Keep dense public entry points serial-only for the first release."""
-
     if transport.size != 1:
         raise ValueError(
             f"{name} does not support non-serial transport in combRUM {__version__};"
@@ -318,8 +304,6 @@ def reject_multirank_dense_transport(name: str, transport: Transport) -> None:
 
 
 def collective_call(transport: Transport, fn: Callable[[], _T]) -> _T:
-    """Run rank-local work under an agreed failure guard when multirank."""
-
     if transport.size == 1:
         return fn()
     with transport.collective():
@@ -341,8 +325,6 @@ def callback_convergence_floor(
     base_floor: int,
     transport: Transport,
 ) -> int:
-    """Run a public callback safely and apply rank-0's convergence floor."""
-
     if callback is None:
         return int(base_floor)
 

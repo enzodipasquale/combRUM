@@ -1,9 +1,4 @@
-"""The backend-agnostic master-problem contract.
-
-:class:`MasterBackend` decouples the row-generation engine from the
-optimizer hosting the relaxation, so the optimizer binding is swappable
-without touching estimation code.
-"""
+"""The backend-agnostic master-problem contract."""
 
 from __future__ import annotations
 
@@ -109,7 +104,8 @@ class MasterBackend(ABC):
 
     @abstractmethod
     def dual_values(self) -> dict[tuple[int, bytes], float]:
-        """Dual value per installed cut, keyed by ``(agent_id, bundle_key)``.
+        """Dual value per cut in the last solved relaxation, keyed by
+        ``(agent_id, bundle_key)``.
 
         Valid LP duals only when the last solve was a pure LP; see
         :meth:`set_penalty` for why the terminating solve must be one.
@@ -137,11 +133,11 @@ class MasterBackend(ABC):
                 "MasterBackend.cut_readings(slack=True) is not overridden;"
                 " this backend exposes no solver-native row slack"
             )
-        duals = self.dual_values() if dual else {}
-        keys = tuple(sorted(duals if dual else self.solved_cut_keys()))
-        dual_arr = (
-            np.asarray([duals[key] for key in keys], dtype=np.float64) if dual else None
-        )
+        if not dual:
+            return CutReadings(keys=tuple(sorted(self.solved_cut_keys())))
+        duals = self.dual_values()
+        keys = tuple(sorted(duals))
+        dual_arr = np.asarray([duals[key] for key in keys], dtype=np.float64)
         return CutReadings(keys=keys, dual=dual_arr)
 
     @abstractmethod

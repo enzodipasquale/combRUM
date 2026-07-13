@@ -1,10 +1,4 @@
-"""Cut admission and retirement policies.
-
-:class:`CutPolicy` decides which candidate cuts enter the master and
-which installed cuts retire. :class:`CutPolicyProfile` and
-:func:`policy_profile` declare and resolve the per-cut signals a policy
-needs from the formulation hot path.
-"""
+"""Cut admission and retirement policies."""
 
 from __future__ import annotations
 
@@ -19,11 +13,7 @@ from combrum.transport.base import CutRow
 
 @dataclass(frozen=True)
 class CutPolicyProfile:
-    """Signals a policy needs from the formulation hot path.
-
-    Defaults request all signals, so a policy without an explicit profile
-    receives the full admit and purge signal set.
-    """
+    """Signals a policy needs from the formulation hot path."""
 
     needs_admit_violations: bool = True
     retires_cuts: bool = True
@@ -44,11 +34,7 @@ def policy_profile(policy: object) -> CutPolicyProfile:
 
 
 class CutPolicy(ABC):
-    """Pluggable cut admission and retirement.
-
-    Both decisions are per-iteration: the caller hands over candidates or
-    the installed set plus per-cut signals, and acts on the returned rows.
-    """
+    """Pluggable cut admission and retirement."""
 
     profile = DEFAULT_CUT_POLICY_PROFILE
 

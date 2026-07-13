@@ -22,9 +22,9 @@ class BundleOracle(cb.Oracle):
         self.x = arrays["x"]
         self.shocks = arrays["shocks"]
 
-    def price_batch(self, theta, local_ids):
-        obs = local_ids % N
-        sim = local_ids // N
+    def price_batch(self, theta, agent_ids):
+        obs = agent_ids % N
+        sim = agent_ids // N
         scores = (
             np.einsum("bm,m->b", BUNDLES, theta[:M])
             + theta[-1] * self.x[obs, None] * BUNDLE_SIZES
@@ -32,9 +32,9 @@ class BundleOracle(cb.Oracle):
         )
         best = np.argmax(scores, axis=1)
         return cb.DemandBatch.exact(
-            local_ids,
+            agent_ids,
             BUNDLES[best],
-            scores[np.arange(local_ids.size), best],
+            scores[np.arange(agent_ids.size), best],
         )
 
 

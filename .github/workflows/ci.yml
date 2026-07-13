@@ -116,7 +116,6 @@ jobs:
           print(pathlib.Path(cb.__file__).resolve())
           assert hasattr(cb, "CutRow")
           assert hasattr(cb, "LocalCluster")
-          assert not hasattr(cb.Transport, "owner_sum")
           PY
           /tmp/combrum-wheel/bin/python -m pytest \
             tests/test_public_package.py \

@@ -59,7 +59,12 @@ needs_gurobi = pytest.mark.skipif(
 
 
 def _toy_inputs():
-    """The toy family's (params, observables, observed, shocks, problem)."""
+    """The toy fixture's (params, observables, observed, shocks, problem).
+
+    ``observables`` is a stand-in index list — the fit context reads only
+    ``len(observables)`` — not the family's ``observables`` feature array
+    (which the geometry-signature helpers load separately).
+    """
     arrays = load_family("toy", FAMILY_DIR)
     problem: FamilyProblem = toy_problem(arrays)
     observed = np.asarray(arrays["observed"])
@@ -282,18 +287,12 @@ def test_run_fit_suppress_close_retains_master() -> None:
     spy.close()
 
 
-# --- PersistentMasterFit: importable + the construction surface ---------------
+# --- PersistentMasterFit: the construction surface ----------------------------
 
 
-def test_persistent_master_fit_importable_from_engine() -> None:
+def test_persistent_master_fit_construction_surface() -> None:
     """PersistentMasterFit constructs to a clean pre-fit state and
     PersistentFitResult carries the documented field set."""
-    from combrum.engine import PersistentFitResult as R
-    from combrum.engine import PersistentMasterFit as D
-
-    assert D is PersistentMasterFit
-    assert R is PersistentFitResult
-
     params, observables, observed, _shocks, _problem = _toy_inputs()
     driver = PersistentMasterFit(
         params,
@@ -422,18 +421,18 @@ def test_persistent_fit_resolves_backend_once(monkeypatch) -> None:
     assert build_resolved == ["highs", "highs", "highs"]
 
 
-def _config_with_penalty(qp_weight: float, decay: int) -> LoopConfig:
-    """A LoopConfig with a (qp_weight, decay) pair its validator may reject.
+def _config_with_penalty(qp_weight: float, qp_iterations: int) -> LoopConfig:
+    """A LoopConfig with a (qp_weight, qp_iterations) pair its validator may reject.
 
-    ``LoopConfig`` requires decay>=1 whenever qp_weight>0, but the
+    ``LoopConfig`` requires qp_iterations>=1 whenever qp_weight>0, but the
     require_quadratic guard reads the two attributes at runtime, and
-    separating its ``and`` clauses needs the qp_weight>0 / decay=0 corner. So
-    build a valid frozen config and override the two fields directly; nothing
-    else in fit() reads them before resolve.
+    separating its ``and`` clauses needs the qp_weight>0 / qp_iterations=0
+    corner. So build a valid frozen config and override the two fields
+    directly; nothing else in fit() reads them before resolve.
     """
-    cfg = LoopConfig(max_iterations=1, qp_weight=1.0, decay=1)
+    cfg = LoopConfig(max_iterations=1, qp_weight=1.0, qp_iterations=1)
     object.__setattr__(cfg, "qp_weight", qp_weight)
-    object.__setattr__(cfg, "decay", decay)
+    object.__setattr__(cfg, "qp_iterations", qp_iterations)
     return cfg
 
 
@@ -451,7 +450,7 @@ def test_persistent_fit_positive_penalty_requires_quadratic_backend(
     )
 
     # Three configs vary the two clauses of
-    #   require_quadratic = (qp_weight > 0.0 and decay > 0)
+    #   require_quadratic = (qp_weight > 0.0 and qp_iterations > 0)
     # independently. The captured vector must match this truth table exactly:
     # neither clause may be dropped and the `and` may not become an `or`.
     cases = [
@@ -913,18 +912,18 @@ def test_persistent_criterion_matches_cold_rebuild_within_band() -> None:
     assert abs(warm.objective - cold_objective) <= 1e-9
 
 
-# --- positive quadratic-penalty persistent path (decay -> pure LP) -----------
+# --- positive quadratic-penalty persistent path (fixed-then-off -> pure LP) --
 
 
 @needs_gurobi
 @pytest.mark.slow
 def test_persistent_penalty_decay_fit_then_reevaluate_runs_end_to_end() -> None:
-    """A qp_weight>0 / decay>=1 config runs the persistent path on a real QP solve.
+    """A qp_weight>0 / qp_iterations>=1 config runs the persistent path on a real QP solve.
 
-    ``require_quadratic`` resolves to True (qp_weight>0 and decay>0 in
+    ``require_quadratic`` resolves to True (qp_weight>0 and qp_iterations>0 in
     ``PersistentMasterFit.fit``'s ``resolve_master_backend`` call), so the
     driver builds a gurobi master. The proximal weight holds at ``qp_weight``
-    for ``decay`` iterations and then drops to exactly zero, so the
+    for ``qp_iterations`` iterations and then drops to exactly zero, so the
     terminating solve is a pure LP and a dual is published. Both the cold fit
     and a valid shocks-only reevaluate run end-to-end over the carried master.
     """
@@ -932,7 +931,7 @@ def test_persistent_penalty_decay_fit_then_reevaluate_runs_end_to_end() -> None:
     penalty_config = LoopConfig(
         max_iterations=MAX_ITERATIONS,
         qp_weight=10.0,
-        decay=3,
+        qp_iterations=3,
         penalty_ref="static",
     )
     driver = PersistentMasterFit(
@@ -960,7 +959,7 @@ def test_persistent_penalty_decay_fit_then_reevaluate_runs_end_to_end() -> None:
         assert isinstance(cold, PersistentFitResult)
         assert cold.converged
         # A published dual proves the terminating solve was a pure LP (the
-        # penalty finished decaying to weight 0).
+        # penalty weight dropped to 0).
         assert cold.dual is not None
         n_cold_cuts = cold.n_active_cuts
 

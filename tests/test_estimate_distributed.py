@@ -99,7 +99,7 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
         max_iterations=7,
         tolerance=7e-3,
         qp_weight=0.5,
-        decay=3,
+        qp_iterations=3,
         penalty_ref="dynamic",
         iteration_callback=sentinel_callback,
         warm_start=warm_start,
@@ -124,7 +124,7 @@ def test_estimate_distributed_builds_split_axis_context(monkeypatch) -> None:
     assert config.max_iterations == 7
     assert config.min_iterations == 3
     assert config.qp_weight == 0.5
-    assert config.decay == 3
+    assert config.qp_iterations == 3
     assert config.penalty_ref == "dynamic"
     assert config.iteration_callback is sentinel_callback
     np.testing.assert_allclose(
@@ -320,11 +320,6 @@ def test_estimate_distributed_local_ids_use_agent_axis_shards(
         captured[1],
         np.arange(10, 20, dtype=np.int64),
     )
-    # Together the shards tile [0, N*S) exactly once.
-    np.testing.assert_array_equal(
-        np.sort(np.concatenate([captured[0], captured[1]])),
-        np.arange(20, dtype=np.int64),
-    )
 
 
 def test_estimate_distributed_requires_rank_uniform_loop_controls() -> None:
@@ -353,6 +348,30 @@ def test_estimate_distributed_requires_rank_uniform_loop_controls() -> None:
         "max_iterations must match" in message
         for message in LocalCluster(2).run(run)
     )
+
+
+@pytest.mark.parametrize("bad", [True, np.bool_(True)], ids=["bool", "np.bool_"])
+def test_estimate_distributed_rejects_bool_tolerance(bad: object) -> None:
+    # float(np.bool_(True)) is 1.0, so only the explicit bool guard in the
+    # float agreement path can reject it; builtin True must fail identically.
+    surface = _ObservedSurface()
+    with pytest.raises(
+        TypeError, match="tolerance must be a finite float, got bool"
+    ):
+        estimate_distributed(
+            Model(
+                _Oracle(),
+                Parameters({"theta": (-2.0, 2.0, 2)}),
+                features=surface,
+                observed_features=surface,
+                formulation=NSlack,
+            ),
+            n_observations=5,
+            n_simulations=4,
+            transport=SerialTransport(),
+            master_backend="highs",
+            tolerance=bad,  # type: ignore[arg-type]
+        )
 
 
 def test_estimate_distributed_requires_rank_uniform_formulation_support() -> None:

@@ -42,12 +42,9 @@ def min_cut_choice(
     edge_j: np.ndarray,
     pair: np.ndarray,
 ) -> np.ndarray:
-    n = linear.size
-
-    row_sum = np.zeros(n)
-    np.add.at(row_sum, edge_i, pair)
-    net = -linear - row_sum
-
+    upper_rowsum = np.zeros(linear.size)
+    np.add.at(upper_rowsum, edge_i, pair)
+    net = -linear - upper_rowsum
     magnitude = max(
         np.abs(net).max(initial=0.0),
         pair.max(initial=0.0),
@@ -55,44 +52,46 @@ def min_cut_choice(
     scale = 1.0 if magnitude == 0.0 else 10.0 ** (
         8 - np.floor(np.log10(magnitude))
     )
-    net_i = np.round(net * scale).astype(np.int64)
-    pair_i = np.round(pair * scale).astype(np.int64)
+    net_int = np.round(net * scale).astype(np.int64)
+    pair_int = np.round(pair * scale).astype(np.int64)
 
     source, sink = 0, 1
-    nodes = np.arange(n) + 2
-    choose = net_i < 0
-    linked = pair_i > 0
-
+    node_ids = np.arange(linear.size) + 2
+    select = net_int < 0
+    present = pair_int > 0
     rows = np.concatenate(
         [
-            np.full(choose.sum(), source),
-            nodes[~choose],
-            edge_i[linked] + 2,
+            np.full(select.sum(), source),
+            node_ids[~select],
+            edge_i[present] + 2,
         ]
     )
     cols = np.concatenate(
         [
-            nodes[choose],
-            np.full((~choose).sum(), sink),
-            edge_j[linked] + 2,
+            node_ids[select],
+            np.full((~select).sum(), sink),
+            edge_j[present] + 2,
         ]
     )
-    vals = np.concatenate([-net_i[choose], net_i[~choose], pair_i[linked]])
-
-    cap = csr_matrix((vals, (rows, cols)), shape=(n + 2, n + 2))
-    residual = (cap - maximum_flow(cap, source, sink).flow).tocsr()
+    vals = np.concatenate([-net_int[select], net_int[~select], pair_int[present]])
+    cap = csr_matrix(
+        (vals, (rows, cols)),
+        shape=(linear.size + 2, linear.size + 2),
+        dtype=np.int64,
+    )
+    flow = maximum_flow(cap, source, sink).flow
+    residual = (cap - flow).tocsr()
     residual.data[residual.data <= 0] = 0
     residual.eliminate_zeros()
-
-    _, pred = breadth_first_order(
+    _, predecessors = breadth_first_order(
         residual,
         i_start=source,
         directed=True,
         return_predecessors=True,
     )
-    selected = pred != -9999
-    selected[source] = True
-    return selected[2:]
+    reachable = predecessors != -9999
+    reachable[source] = True
+    return reachable[2:]
 
 
 def make_arrays(
@@ -239,9 +238,9 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
             return weights @ Phi, float(weights @ eps)
         return Phi, eps
 
-    def price_batch(self, theta, local_ids):
-        obs = local_ids % self.N
-        sim = local_ids // self.N
+    def price_batch(self, theta, agent_ids):
+        obs = agent_ids % self.N
+        sim = agent_ids // self.N
 
         if self.with_alpha:
             alpha = theta[0]
@@ -253,8 +252,8 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
         pair = np.full(self.edge_i.size, delta)
         base = np.einsum("tk,k->t", self.X, beta, optimize=True)
 
-        bundles = np.empty((local_ids.size, self.T), dtype=bool)
-        payoffs = np.empty(local_ids.size)
+        bundles = np.empty((agent_ids.size, self.T), dtype=bool)
+        payoffs = np.empty(agent_ids.size)
         for r, (i, s) in enumerate(zip(obs, sim)):
             linear = base + alpha * self.z[i] + self.eps[i, s]
             bundle = min_cut_choice(linear, self.edge_i, self.edge_j, pair)
@@ -264,7 +263,7 @@ class PeerGame(cb.Oracle, cb.FeatureMap):
                 + delta
                 * np.count_nonzero(bundle[self.edge_i] & bundle[self.edge_j])
             )
-        return cb.DemandBatch.exact(local_ids, bundles, payoffs)
+        return cb.DemandBatch.exact(agent_ids, bundles, payoffs)
 
 
 def fit_iid(

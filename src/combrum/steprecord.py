@@ -1,10 +1,4 @@
 """Frozen, typed per-iteration snapshots of a row-gen step's pre-filter inputs.
-
-A :class:`StepRecord` captures the quantities a formulation's filters read in
-one iteration, over their full pre-filter domain, at the read site. Each
-capture is keyed by the global ``agent_id`` (and bundle key bytes where a row
-identity is involved) so runs that shard agents differently produce comparable
-records. The trace sink is a no-op when ``None``.
 """
 
 from __future__ import annotations
@@ -24,8 +18,7 @@ class PricedReducedCost:
     """One priced agent's reduced cost before the emit threshold.
 
     ``rc = payoff - u_a``, captured for every priced agent, including those
-    with ``rc <= tolerance`` that emit no row. ``bundle_key`` is the chosen
-    bundle's canonical bytes.
+    with ``rc <= tolerance`` that emit no row.
     """
 
     agent_id: int
@@ -38,8 +31,7 @@ class AdmitViolation:
     """One received candidate's violation before ``policy.admit``.
 
     ``violation = phi . theta + eps - u_a``, the pre-admit signal handed to the
-    admit policy, captured for every received candidate. Keyed by ``agent_id``
-    + ``bundle_key``.
+    admit policy, captured for every received candidate.
     """
 
     agent_id: int
@@ -51,8 +43,10 @@ class AdmitViolation:
 class PurgeInput:
     """The dual and slack the retirement policy reads for one installed cut.
 
-    Per installed ``(agent_id, bundle_key)``. ``dual`` / ``slack`` are ``None``
-    when the last solve held no reading for that key (a just-admitted cut).
+    ``dual`` / ``slack`` are ``None``
+    when that signal was not read for the purge — the profile does not consume
+    it, or duals while a penalty objective is active — or when the last solve
+    held no reading for the key (a just-admitted cut).
     """
 
     agent_id: int
@@ -66,8 +60,9 @@ class InstallSnapshot:
     """The install-gate inputs of one iteration.
 
     ``installed_before`` is the ``(agent_id, bundle_key)`` key set the master
-    held before the add; ``admitted`` is the set passed to the master. The
-    fresh-vs-duplicate decision is ``admitted - installed_before``.
+    held entering the iteration, before this iteration's retirement and add;
+    ``admitted`` is the set passed to the master. The fresh-vs-duplicate
+    decision is ``admitted - installed_before``.
     """
 
     installed_before: frozenset[tuple[int, bytes]]
@@ -78,9 +73,9 @@ class InstallSnapshot:
 class PricedFeature:
     """One priced agent's demand stream and feature row.
 
-    ``payoff`` / ``gap`` are the priced :class:`~combrum.demand.Demand`'s
-    continuous fields, ``bundle_key`` its identity, and ``phi`` / ``eps`` the
-    resolved feature row. Captured for every priced agent in price order.
+    Captured for every agent the formulation
+    featurised, in featurisation order: all priced agents under OneSlack,
+    the violated row-emitting subset under NSlack.
     """
 
     agent_id: int
@@ -95,7 +90,6 @@ class PricedFeature:
 class StepRecord:
     """One iteration's pre-filter inputs over their full domain.
 
-    Fields a formulation does not exercise stay at their empty default.
     ``iteration`` is the 0-based loop index.
     """
 
@@ -134,18 +128,13 @@ class _Pending:
 
 
 class TraceSink(Protocol):
-    """A sink a formulation emits one sealed record to per iteration.
-
-    :class:`ListTraceSink` is the in-memory collector.
-    """
+    """A sink a formulation emits one sealed record to per iteration."""
 
     def emit(self, record: StepRecord) -> None: ...
 
 
 @dataclass
 class ListTraceSink:
-    """A trace sink that appends every emitted record to ``records`` in order."""
-
     records: list[StepRecord] = field(default_factory=list)
 
     def emit(self, record: StepRecord) -> None:
@@ -159,9 +148,7 @@ def priced_features_from(
 ) -> tuple[PricedFeature, ...]:
     """Assemble the priced-feature stream from a demand map and feature rows.
 
-    ``ids`` are the global agent ids in featurisation order, ``rows`` the
-    matching ``(phi, eps)`` pairs, and ``demands`` the id-keyed priced
-    outcomes. phi is copied read-only so the record cannot alias a buffer a
+    phi is copied read-only so the record cannot alias a buffer a
     later phase mutates.
     """
     out: list[PricedFeature] = []

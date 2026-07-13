@@ -14,9 +14,6 @@ that convention agent ``a``'s priced optimum ``d*`` violates its epigraph by
     rc_a = payoff_a(d*) - u_a = phi_a(d*) . theta + eps_a(d*) - u_a
 
 the reduced cost this module measures, ships cuts by, and stops on.
-
-The feature map ``(agent_id, bundle) -> (phi, eps)`` is injected at
-construction so model-specific code stays on the caller's side.
 """
 
 from __future__ import annotations
@@ -70,12 +67,6 @@ _CONTRIBUTE_FEATURE_BLOCK_ELEMENTS = 1_000_000
 
 @dataclass(frozen=True)
 class _MasterState:
-    """Owner's post-solve master view, mirrored to every rank.
-
-    Broadcasts only scalar/global state; the owner scatters shard-local ``u``
-    separately so workers never receive every agent's epigraph value.
-    """
-
     theta: np.ndarray
     objective: float
     n_installed: int
@@ -103,15 +94,11 @@ def _dual_solution(
     agent_ids: list[int] = []
     bundle_row_ids: list[int] = []
     pis: list[float] = []
-    # rows arrive in canonical (agent_id, bundle_key) order: the table
-    # (first-appearance) and parallel arrays are deterministic.
     for row in rows:
         slot = table_slots.get(row.bundle_key)
         if slot is None:
             slot = len(bundles)
             table_slots[row.bundle_key] = slot
-            # row.bundle memoizes the decode, so repeated dual publications
-            # over a persistent master pay it once per row, not per sweep.
             bundles.append(row.bundle)
         agent_ids.append(row.agent_id)
         bundle_row_ids.append(slot)
@@ -119,7 +106,6 @@ def _dual_solution(
     table = (
         np.stack(bundles, axis=0)
         if bundles
-        # Empty rows carry no bundle to infer width from; use the fit's K.
         else np.empty((0, K), dtype=np.float64)
     )
     return DualSolution(
@@ -187,18 +173,6 @@ def _dual_from_packet(packet: _DualPacket | None) -> DualSolution | None:
 
 
 class _DenseU(Mapping):
-    """Per-agent epigraph values, dense-indexed with mapping parity.
-
-    ``dense`` is the read-only ``(n_agents,)`` value vector (zero where
-    absent); ``ids`` the sorted agent ids actually present. The mapping
-    views match the dict this stands in for — ascending-id iteration,
-    membership only at ``ids`` — so capture hooks and tests that treat
-    ``_u`` as a mapping keep working, while the hot paths index ``dense``
-    directly. Dense-weight-mode fits hold their u this way; distributed
-    bootstrap keeps plain dicts, whose sparsity bounds per-replication
-    memory.
-    """
-
     __slots__ = ("dense", "ids")
 
     def __init__(self, dense: np.ndarray, ids: np.ndarray) -> None:
@@ -238,37 +212,19 @@ class NSlack(Formulation):
     aggregate column. ``NSlack`` is also the only formulation supported by the
     distributed entry points.
 
-    The master lives only on the owner rank (``ctx.owner_rank``, default 0;
-    ``None`` elsewhere); every touch is owner-guarded inside a transport
-    collective, followed by one broadcast of the decision state.
     Admission and retirement ride ``ctx.cut_policy`` when present; an unset
     policy admits everything and retires nothing.
     """
 
     def __init__(self, features: FeatureMap | Callable[..., Any]) -> None:
-        # Validation runs at setup (needs the transport for rank agreement);
-        # the arg is held until then.
         self._features_arg = features
-        # Every capture block guards on the sink, so None costs no compute.
         self._trace_sink: TraceSink | None = None
         self._pending: _Pending | None = None
 
     def prepare_penalty_solve(self, ref: np.ndarray, weight: float) -> None:
-        """Stage the next proximal objective change for ``apply_step``.
-
-        The owner applies the objective after admitting cuts and before the
-        single master solve, so a penalty iteration does not solve the old
-        relaxation and then immediately solve the cut-augmented one again.
-        """
         self._pending_penalty = _staged_penalty(ref, weight, self._ctx.K)
 
     def set_trace_sink(self, sink: TraceSink | None) -> None:
-        """Attach (or detach) the capture sink.
-
-        With no sink no record is built. The sink receives one sealed
-        :class:`StepRecord` per iteration, emitted at the end of
-        ``apply_step``.
-        """
         self._trace_sink = sink
 
     def _prepare_setup(self, ctx: FitContext) -> None:
@@ -286,8 +242,6 @@ class NSlack(Formulation):
         self._iteration = 0
         self._pending_penalty: tuple[np.ndarray, float] | None = None
         self._last_penalty_weight = 0.0
-        # Resolve the features path once, identically on every rank, before
-        # any data-dependent branch; agreement token rides the setup bcast.
         self._features_res: Resolution = resolve_features(self._features_arg)
 
     def prepare_warm_cuts(self, rows: Sequence[CutRow]) -> tuple[CutRow, ...]:
@@ -318,20 +272,13 @@ class NSlack(Formulation):
     def _distributed_setup_owner_local(
         self, ctx: FitContext
     ) -> tuple[_MasterState | None, dict[int, float] | None]:
-        """Initialise this rank; only the owner touches the master."""
-
         self._prepare_setup(ctx)
         return self._owner_initial_state()
 
     def setup(self, ctx: FitContext) -> None:
         self._prepare_setup(ctx)
-        # Master check and features rank-agreement share one guard so a
-        # missing master or divergent build fails as an agreed verdict on
-        # every rank rather than stranding peers in the broadcast.
         with self._transport.collective():
             packet, full_u = self._owner_initial_state()
-            # One broadcast carries both the owner's master state and its
-            # features token; each rank checks its token against the owner's.
             owner_packet, owner_token = self._transport.bcast(
                 (packet, self._features_res.token) if self._is_owner else None,
                 root=self._owner_rank,
@@ -344,15 +291,9 @@ class NSlack(Formulation):
         return self._theta.copy()
 
     def contribute(self, demands: Mapping[int, Demand]) -> MaxContribution:
-        # Rank-local half of evaluate, minus the allreduce_max: the running
-        # max reduced cost and the locally violated rows to exchange.
         worst = 0.0
-        # Featurise the post-filter violated subset only: filter on
-        # rc > tolerance first, then featurise survivors in iteration order.
         violated_ids: list[int] = []
         violated_bundles: list[np.ndarray] = []
-        # Capture (sink-gated) records the full pre-filter rc per priced
-        # agent: agents with rc <= tol emit no row but must still be recorded.
         capturing = self._trace_sink is not None
         pending = _Pending(iteration=self._iteration) if capturing else None
         if isinstance(demands, DemandBatch):
@@ -363,15 +304,12 @@ class NSlack(Formulation):
             if rc.size:
                 worst = max(0.0, float(rc.max()))
             if pending is not None:
-                # Pack every priced bundle key in one vectorized call rather
-                # than one per agent (bundles is 2-D, so this hits the batched
-                # codec path); keys[i] is byte-identical to _pack_bundle(bundle).
                 keys = _pack_bundles(bundles)
-                for i, (agent_id, value) in enumerate(zip(ids, rc)):
+                for agent_id, value, key in zip(ids, rc, keys):
                     pending.priced_reduced_costs.append(
                         PricedReducedCost(
                             agent_id=int(agent_id),
-                            bundle_key=keys[i],
+                            bundle_key=key,
                             rc=float(value),
                         )
                     )
@@ -444,15 +382,11 @@ class NSlack(Formulation):
                         rc=rc,
                     )
                 )
-            # Rows ship at the same threshold that stops the walk, so a
-            # converged step ships nothing.
             if rc > self._ctx.tolerance:
                 violated_ids.append(agent)
                 violated_bundles.append(demand.bundle)
         featured = feature_rows(self._features_res, violated_ids, violated_bundles)
         if pending is not None:
-            # Read the same `featured` rows the cut build below consumes, so
-            # the capture is the value, not a recomputation.
             pending.priced_features = list(
                 priced_features_from(demands, violated_ids, featured)
             )
@@ -469,12 +403,9 @@ class NSlack(Formulation):
                 violated_ids, violated_bundles, featured
             )
         ]
-        # worst floors at 0.0: a tiny negative residual from float
-        # cancellation must not reach the stop rule; an empty shard gives 0.0.
         return MaxContribution(worst=worst, local_rows=tuple(rows))
 
     def finalise(self, reduced: MaxReduced) -> StepOutcome:
-        # Every rank holds the identical reduction; no further agreement round.
         return StepOutcome(
             violation=reduced.global_worst,
             install_payload=reduced.received_rows,
@@ -483,8 +414,6 @@ class NSlack(Formulation):
     def _owner_install_step(
         self, received: tuple[CutRow, ...]
     ) -> tuple[_MasterState | None, dict[int, float] | None]:
-        # Pending record opened in contribute (None with no sink or no prior
-        # contribute). Root fills admit/purge/install fields below.
         pending = self._pending
         pending_penalty = self._pending_penalty
         self._pending_penalty = None
@@ -546,8 +475,6 @@ class NSlack(Formulation):
     def _distributed_apply_owner_step(
         self, install_payload: object
     ) -> tuple[_MasterState | None, dict[int, float] | None]:
-        """Apply routed rows on the owner without transport calls."""
-
         received: tuple[CutRow, ...] = install_payload  # type: ignore[assignment]
         return self._owner_install_step(received)
 
@@ -577,7 +504,6 @@ class NSlack(Formulation):
         return self._adopt_owner_state(state, local_u=local_u, full_u=full_u)
 
     def _u_gather(self, agent_ids: np.ndarray) -> np.ndarray:
-        """Per-agent u values for ``agent_ids``, zero where absent."""
         u = self._u
         if isinstance(u, _DenseU):
             return u.dense[agent_ids]
@@ -617,14 +543,11 @@ class NSlack(Formulation):
             sink.emit(pending.seal())
 
     def evaluate(self, demands: Mapping[int, Demand]) -> Evaluation:
-        # Bundled path: contribute, then this method's own max-reduce; the
-        # exchange stays in update.
         c = self.contribute(demands)
         violation = self._transport.allreduce_max(c.worst)
         return Evaluation(violation=violation, payload=c.local_rows)
 
     def update(self, step: Evaluation) -> int:
-        # Bundled path: the exchange this method owns, then the shared install.
         rows: tuple[CutRow, ...] = step.payload  # type: ignore[assignment]
         received = self._transport.exchange_cuts(rows, self._owners)
         return self.apply_step(received)
@@ -656,15 +579,11 @@ class NSlack(Formulation):
                 slack=read_slacks,
             )
             duals = readings.dual_map() if read_duals else None
-            # Row slack over the last solved relaxation. Newly admitted rows are
-            # installed after purge, so rows without last-solve readings stay absent.
             slack = readings.slack_map() if read_slacks else None
         else:
             duals = None
             slack = None
         if pending is not None:
-            # Pre-retirement dual/slack the policy.purge reads next; None
-            # where the last solve held no reading.
             pending.purge_inputs = [
                 PurgeInput(
                     agent_id=row.agent_id,
@@ -685,10 +604,6 @@ class NSlack(Formulation):
         retired = policy.purge(installed, duals, slack, self._iteration)
         retired_keys = {(row.agent_id, row.bundle_key) for row in retired}
         if retired_keys:
-            # Retire in place (drop only retired rows, keep u-columns and warm
-            # basis): the warm re-solve lands the same vertex as a rebuild from
-            # the kept rows, but O(retired) not O(rows); no per-iteration cold
-            # rebuild of a large master.
             self._master.remove_cuts(retired_keys)
         return retired_keys
 
@@ -719,8 +634,6 @@ class NSlack(Formulation):
     def _local_u(
         self, full_u: Mapping[int, float] | None
     ) -> Mapping[int, float] | None:
-        # Single rank: this rank is the owner and _adopt takes full_u directly,
-        # so routing u through the transport would round-trip dead work.
         if self._transport.size == 1:
             return None
         if self._ctx.weight_mode == "distributed":
@@ -753,8 +666,6 @@ class NSlack(Formulation):
         full_u: Mapping[int, float] | None = None,
     ) -> None:
         self._theta = np.asarray(state.theta, dtype=np.float64)
-        # Dense weight mode holds u dense-indexed; distributed mode keeps the
-        # sparse dicts whose size bounds per-replication memory.
         dense_mode = self._ctx.weight_mode == "dense"
         n_agents = self._ctx.n_agents
         if full_u is not None and self._is_owner:
@@ -792,7 +703,6 @@ class NSlack(Formulation):
                         dual_packet,
                         self._master.u_values(),
                     )
-            # FULL mode: every rank receives every optional artifact.
             active, dual_packet, u_values = self._transport.bcast(
                 packet, root=self._owner_rank
             )

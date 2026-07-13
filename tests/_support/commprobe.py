@@ -165,11 +165,11 @@ class CountingTransport(Transport):
     def scatter_by_agent(
         self,
         arrays: dict[str, np.ndarray] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         root: int = 0,
     ) -> dict[str, np.ndarray]:
-        result = self._inner.scatter_by_agent(arrays, local_ids, root=root)
+        result = self._inner.scatter_by_agent(arrays, agent_ids, root=root)
         # Count received (shard-sized) bytes, not root's full arrays.
         self._record(
             "scatter_by_agent",
@@ -195,14 +195,14 @@ class CountingTransport(Transport):
     def route_agent_values(
         self,
         values: Mapping[int, float] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         source: int,
         n_agents: int,
     ) -> dict[int, float]:
         result = self._inner.route_agent_values(
             values,
-            local_ids,
+            agent_ids,
             source=source,
             n_agents=n_agents,
         )
@@ -212,14 +212,14 @@ class CountingTransport(Transport):
     def route_agent_values_batched(
         self,
         values_by_rep: Mapping[int, Mapping[int, float]] | None,
-        local_ids: np.ndarray,
+        agent_ids: np.ndarray,
         *,
         owners: np.ndarray,
         n_agents: int,
     ) -> dict[int, dict[int, float]]:
         result = self._inner.route_agent_values_batched(
             values_by_rep,
-            local_ids,
+            agent_ids,
             owners=owners,
             n_agents=n_agents,
         )

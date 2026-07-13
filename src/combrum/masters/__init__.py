@@ -165,8 +165,6 @@ def resolve_master_backend(
     Serial calls keep the original exception types by resolving locally.
     """
     _validate_backend_name(requested)
-    # highs cannot host quadratic penalties regardless of availability, so
-    # reject up front — identically on every rank, before any collective.
     if requested == "highs" and require_quadratic:
         raise RuntimeError(
             "master backend 'highs' does not support quadratic penalties"

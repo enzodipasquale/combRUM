@@ -4,11 +4,6 @@ The serialization is a frozen contract: the round-trip ``load(write(x))``
 must be content-bitwise equal to ``x`` (see :func:`equal`). Parsed content
 is frozen, not file bytes; npz is a zip and zip members carry timestamps,
 so identical payloads may differ on disk yet parse identically.
-
-Each npz holds ``agent_ids``, ``bundle_row_ids``, ``pis``,
-``bundle_table``, the ``bound_duals`` mapping flattened into parallel
-``bound_coords`` (int64) / ``bound_values`` (float64), and ``rep_id`` as a
-0-d int64 array; npz preserves dtypes natively. Readers sort numerically.
 """
 
 from __future__ import annotations
@@ -31,8 +26,6 @@ def _rep_filename(rep_id: int) -> str:
 
 
 def _same_array_bits(x: np.ndarray, y: np.ndarray) -> bool:
-    # tobytes() compares raw IEEE bits: value equality would collapse
-    # signed zeros and NaN payloads that a format change can introduce.
     return x.dtype == y.dtype and x.shape == y.shape and x.tobytes() == y.tobytes()
 
 
@@ -63,8 +56,8 @@ def equal(a: DualSolution, b: DualSolution) -> bool:
 class DualStoreWriter:
     """Appends whole replications to a store directory, one file each."""
 
-    def __init__(self, dir: Path) -> None:
-        self._dir = Path(dir)
+    def __init__(self, directory: Path) -> None:
+        self._dir = Path(directory)
 
     def write(self, dual: DualSolution) -> Path:
         """Persist one replication and return its final path.
@@ -82,16 +75,12 @@ class DualStoreWriter:
                 f" {self._dir}; the store is append-only evidence and"
                 " never overwrites"
             )
-        # Sort coordinates so one payload has one encoding regardless of
-        # dict order.
         coords = np.array(sorted(dual.bound_duals), dtype=np.int64)
         values = np.array(
             [dual.bound_duals[c] for c in coords.tolist()], dtype=np.float64
         )
         tmp = path.with_name(path.name + ".tmp")
         try:
-            # Pass a file object so np.savez does not append ".npz" to the
-            # tmp name, which would break the rename-into-place.
             with open(tmp, "wb") as fh:
                 np.savez(
                     fh,
@@ -105,7 +94,6 @@ class DualStoreWriter:
                 )
             os.replace(tmp, path)
         finally:
-            # Clears the torn file on mid-write failure; no-op after replace.
             tmp.unlink(missing_ok=True)
         return path
 
@@ -113,13 +101,12 @@ class DualStoreWriter:
 class DualStoreReader:
     """Streaming reads over a store directory, one replication in memory."""
 
-    def __init__(self, dir: Path) -> None:
-        self._dir = Path(dir)
+    def __init__(self, directory: Path) -> None:
+        self._dir = Path(directory)
 
     def rep_ids(self) -> tuple[int, ...]:
         """All replication ids present, ascending."""
         if not self._dir.is_dir():
-            # Raise rather than treat a missing/mistyped path as empty.
             raise FileNotFoundError(f"dual store directory {self._dir} does not exist")
         return tuple(
             sorted(
@@ -150,8 +137,6 @@ class DualStoreReader:
                 )
             coords = npz["bound_coords"]
             values = npz["bound_values"]
-            # Validate shapes before zip(): zip() would silently truncate
-            # mismatched parallel arrays into a plausible-but-corrupt payload.
             if coords.ndim != 1 or values.ndim != 1:
                 raise ValueError(
                     f"dual store file {path} is corrupt: expected 1-D"
@@ -190,6 +175,5 @@ class DualStoreReader:
             )
 
     def __iter__(self) -> Iterator[DualSolution]:
-        """Yield replications in ascending rep order, loading one at a time."""
         for rep_id in self.rep_ids():
             yield self.load(rep_id)

@@ -88,9 +88,7 @@ def observed_phi_rows(
     ``observed_features`` is an explicit phi-only surface. When it is omitted,
     observed rows are inferred from the priced feature map by evaluating
     ``features`` / ``features_batch`` at ``observed_bundles[a % N]`` and
-    discarding the priced-error term. Resolution is comm-free and uses the
-    active batched member directly when available; the priced row-generation
-    surface remains the conformance backstop when both feature paths are present.
+    discarding the priced-error term.
     """
     ids = np.asarray(local_ids, dtype=np.int64)
     n_rows = int(ids.size)
@@ -214,7 +212,6 @@ def observed_objective(
     observed_features: object | None,
     cache: ObservedObjectiveCache | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reduced observed objective vector and empirical moment."""
     local_ids = np.asarray(local_ids, dtype=np.int64)
     theta_coef = np.asarray(theta_coef, dtype=np.float64)
     if cache is not None:

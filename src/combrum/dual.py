@@ -1,14 +1,4 @@
-"""Self-contained dual payload of one replication's solve.
-
-:class:`DualSolution` holds the active-cut duals, the bundle rows they
-price, and the multipliers of the theta-box bounds tight at the solution.
-Every accessor computes from stored fields alone, so the payload can be
-re-checked or aggregated after the producing master problem is gone.
-
-The parallel-array layout stores one bundle snapshot per payload
-(``bundle_table``) with each dual row holding an index into it, keeping
-the payload O(rows + table) rather than O(rows x M).
-"""
+"""Self-contained dual payload of one replication's solve."""
 
 from __future__ import annotations
 
@@ -28,8 +18,6 @@ def _frozen(arr: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class CutDualRow:
-    """One cut-dual diagnostic row."""
-
     agent_id: int
     observation_id: int
     simulation_id: int
@@ -47,10 +35,6 @@ class DualSolution:
     has shape ``(n_bundles, M)``. ``bound_duals`` maps theta coordinate
     index -> bound reduced cost for exactly the coordinates at a box
     bound (empty when none is tight).
-
-    All arrays are copied at construction and frozen read-only so the
-    payload cannot alias caller memory. Point-estimate fits use ``rep_id == 0``;
-    bootstrap payloads use it as replication provenance.
     """
 
     rep_id: int
@@ -66,8 +50,6 @@ class DualSolution:
             raise ValueError(f"rep_id must be >= 0; got {rep_id}")
         object.__setattr__(self, "rep_id", rep_id)
 
-        # np.array (not asarray) copies unconditionally. Integer dtype is
-        # required, never coerced: a float->int truncation would corrupt ids.
         agent_ids = np.array(self.agent_ids)
         bundle_row_ids = np.array(self.bundle_row_ids)
         for name, arr in (
@@ -99,8 +81,6 @@ class DualSolution:
                 f"pis must be finite, got {pis[~np.isfinite(pis)].tolist()}"
             )
 
-        # dtype preserved (bool/int8/... tables are legal); re-encoding
-        # would corrupt the snapshot.
         bundle_table = np.array(self.bundle_table)
         if bundle_table.ndim != 2:
             raise ValueError(
@@ -115,8 +95,6 @@ class DualSolution:
                 f" [0, {n_bundles}), got {bundle_row_ids[out_of_range].tolist()}"
             )
 
-        # Normalized copy (keys to int, values to float) so the caller's
-        # dict cannot reach the payload.
         bound_duals: dict[int, float] = {}
         for key, value in self.bound_duals.items():
             coord = operator.index(key)
@@ -134,20 +112,15 @@ class DualSolution:
         object.__setattr__(self, "bundle_row_ids", _frozen(bundle_row_ids))
         object.__setattr__(self, "pis", _frozen(pis))
         object.__setattr__(self, "bundle_table", _frozen(bundle_table))
-        # A plain dict on a frozen dataclass is still mutable in place;
-        # the proxy makes it read-only.
         object.__setattr__(self, "bound_duals", MappingProxyType(bound_duals))
 
     def __getstate__(self) -> dict[str, object]:
-        # mappingproxy has no pickle/deepcopy support; ship a plain dict.
         state = dict(self.__dict__)
         state["bound_duals"] = dict(self.bound_duals)
         return state
 
     def __setstate__(self, state: dict[str, object]) -> None:
         self.__dict__.update(state)
-        # Restore what the round trip drops: the read-only proxy and
-        # numpy's WRITEABLE=False flags.
         object.__setattr__(self, "bound_duals", MappingProxyType(self.bound_duals))
         for name in ("agent_ids", "bundle_row_ids", "pis", "bundle_table"):
             _frozen(self.__dict__[name])
@@ -172,8 +145,6 @@ class DualSolution:
         ``sum_r pis[r] * bundle_table[bundle_row_ids[r]]``. An empty
         payload yields ``zeros(M)``, with M read off the stored table.
         """
-        # Fancy indexing copies, so the float64 view never aliases the
-        # frozen snapshot; n == 0 falls out as zeros(M).
         rows = self.bundle_table[self.bundle_row_ids].astype(np.float64, copy=False)
         return self.pis @ rows
 

@@ -1,10 +1,12 @@
 """Conformance for the row-generation formulations on the toy family.
 
-Everything runs through the test-local walk driver: convergence and the
-published-result contract on both real master backends, bitwise
+The end-to-end checks run through the test-local walk driver: convergence
+and the published-result contract on both real master backends, bitwise
 rank-invariance between the serial transport and interleaved cluster
 shards, the cut-policy admission/retirement path, and comm discipline
-measured through the counting transport wrapper.
+measured through the counting transport wrapper. The rest pins contribute,
+row dedup, penalty-solve ordering, and result publication in isolation on
+hand-wired formulations and in-file master doubles.
 """
 
 from __future__ import annotations
@@ -191,16 +193,14 @@ def test_nslack_batch_contribute_avoids_demandbatch_getitem(
 
     boundary_contribution = boundary.contribute(boundary_batch)
     assert boundary_contribution.worst == expected_worst
-    assert len(boundary_contribution.local_rows) == len(expected_rows)
     got_rows = [
         (row.agent_id, row.phi, row.epsilon)
         for row in boundary_contribution.local_rows
     ]
     assert [aid for aid, _, _ in got_rows] == [aid for aid, _, _ in expected_rows]
-    for (got_id, got_phi, got_eps), (exp_id, exp_bundle, exp_eps) in zip(
+    for (_, got_phi, got_eps), (_, exp_bundle, exp_eps) in zip(
         got_rows, expected_rows
     ):
-        assert got_id == exp_id
         assert got_eps == exp_eps
         np.testing.assert_array_equal(got_phi, exp_bundle)
     # Agents 3 and 7 sit exactly at tolerance and stay out; only 5 ships.
@@ -536,6 +536,10 @@ def test_oneslack_converges_with_optionals_none(backend: str) -> None:
     assert AGGREGATE_AGENT_ID == 0
 
 
+def _zero_features(agent_id: int, bundle: np.ndarray) -> tuple[np.ndarray, float]:
+    return np.zeros(2, dtype=np.float64), 0.0
+
+
 class _OneSlackUMaster(MasterBackend):
     """Master double that exposes u only through the solver-state accessor."""
 
@@ -580,7 +584,7 @@ class _OneSlackUMaster(MasterBackend):
 
 def test_oneslack_state_reads_master_epigraph_variable() -> None:
     master = _OneSlackUMaster()
-    formulation = OneSlack(_publication_features)
+    formulation = OneSlack(_zero_features)
     formulation._master = master
 
     state = formulation._state(progressed=7)
@@ -664,7 +668,7 @@ def _penalty_order_ctx(master: MasterBackend, K: int = 1) -> FitContext:
 
 def test_nslack_penalty_shares_the_post_install_solve() -> None:
     master = _PenaltyOrderMaster(K=1)
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(_penalty_order_ctx(master))
     master.log.clear()
 
@@ -684,7 +688,7 @@ def test_nslack_penalty_shares_the_post_install_solve() -> None:
 
 def test_nslack_penalty_revert_solves_without_new_cuts() -> None:
     master = _PenaltyOrderMaster(K=1)
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(_penalty_order_ctx(master))
     master.log.clear()
 
@@ -738,7 +742,7 @@ def test_nslack_dual_purge_skips_qp_duals() -> None:
     policy = _RecordingDualPurge()
     ctx = _penalty_order_ctx(master)
     object.__setattr__(ctx, "cut_policy", policy)
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(ctx)
 
     row = CutRow(
@@ -761,7 +765,7 @@ def test_nslack_dual_purge_skips_qp_duals() -> None:
 
 def test_oneslack_penalty_shares_the_post_install_solve() -> None:
     master = _PenaltyOrderMaster(K=1)
-    formulation = OneSlack(_publication_features)
+    formulation = OneSlack(_zero_features)
     formulation.setup(_penalty_order_ctx(master))
     master.log.clear()
 
@@ -830,10 +834,6 @@ class _ResultPublicationMaster(MasterBackend):
         return {}
 
 
-def _publication_features(agent_id: int, bundle: np.ndarray) -> tuple[np.ndarray, float]:
-    return np.zeros(2, dtype=np.float64), 0.0
-
-
 def _publication_ctx(master: MasterBackend, publication) -> FitContext:
     return FitContext(
         K=2,
@@ -856,7 +856,7 @@ def _publication_ctx(master: MasterBackend, publication) -> FitContext:
 def test_nslack_summary_result_publishes_no_large_artifacts() -> None:
     master = _ResultPublicationMaster()
     ctx = _publication_ctx(master, ResultPublication.SUMMARY)
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(ctx)
 
     master.reset_calls()
@@ -892,7 +892,7 @@ def test_publication_full_is_broadcast_mode() -> None:
 def test_nslack_dual_only_result_publishes_no_active_set() -> None:
     master = _ResultPublicationMaster()
     ctx = _publication_ctx(master, ResultPublication.DUAL)
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(ctx)
 
     master.reset_calls()
@@ -916,7 +916,7 @@ def test_nslack_active_set_and_dual_share_one_extract_pass() -> None:
     ctx = _publication_ctx(
         master, ResultPublication.ACTIVE_SET | ResultPublication.DUAL
     )
-    formulation = NSlack(_publication_features)
+    formulation = NSlack(_zero_features)
     formulation.setup(ctx)
 
     master.reset_calls()

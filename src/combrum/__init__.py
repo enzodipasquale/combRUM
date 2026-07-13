@@ -2,11 +2,11 @@
 
 from combrum._version import __version__ as __version__
 from combrum.activity import ActivityConfig
-from combrum.bootstrap import NativeDraws, WeightSource, bootstrap
+from combrum.bootstrap import ExponentialDraws, WeightSource, bootstrap
 from combrum.bootstrap_distributed import bootstrap_distributed
 from combrum.callbacks import (
     Phase,
-    Schedule,
+    TimeoutSchedule,
     bootstrap_timeout_callback,
     point_timeout_callback,
 )
@@ -43,6 +43,7 @@ __all__ = [
     "Demand",
     "DemandBatch",
     "DualInformed",
+    "ExponentialDraws",
     "FeatureMap",
     "FitResult",
     "LoopConfig",
@@ -50,7 +51,6 @@ __all__ = [
     "Model",
     "MpiTransport",
     "NSlack",
-    "NativeDraws",
     "OneSlack",
     "Oracle",
     "Parameters",
@@ -62,10 +62,10 @@ __all__ = [
     "ResolveAll",
     "RoundRobin",
     "RunInfoLevel",
-    "Schedule",
     "SerialTransport",
     "SlackStrip",
     "SolverSettings",
+    "TimeoutSchedule",
     "Transport",
     "WeightSource",
     "bootstrap",

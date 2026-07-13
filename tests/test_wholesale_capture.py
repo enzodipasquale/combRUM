@@ -35,14 +35,14 @@ from _family_oracles import (
     toy_eps_perturbation,
     toy_feature_map_batch_only,
     toy_install_gate_perturbation,
+    toy_perturbation_price_oracle,
     toy_phi_support_perturbation,
     toy_phi_value_perturbation,
-    toy_perturbation_price_oracle,
     toy_problem,
     toy_schedule_perturbation,
 )
 from _walk import WalkOutcome, run_walk
-from combrum.cut_policies import Compose, PurgeInactive, SlackStrip, SlackThreshold
+from combrum.cut_policies import Compose, PurgeInactive, SlackStrip, ViolationThreshold
 from combrum.demand import Demand
 from combrum.formulations import NSlack, OneSlack
 from combrum.formulations import nslack as _nslack_module
@@ -84,7 +84,7 @@ pytestmark = [
 def _nslack_policy() -> Compose:
     """A non-trivial policy that fires admit, purge and install.
 
-    ``SlackThreshold(epsilon=0.0)`` admits only strictly-violated candidates
+    ``ViolationThreshold(epsilon=0.0)`` admits only strictly-violated candidates
     (the admit branch the admit-violation capture feeds), and
     ``PurgeInactive(max_age=1)`` retires a cut whose dual reads ~0 on the very
     next signalled solve (the purge branch the purge-input capture feeds). A
@@ -92,7 +92,7 @@ def _nslack_policy() -> Compose:
     it must never be shared across the threads of a ``LocalCluster`` run.
     """
     return Compose(
-        admit_chain=[SlackThreshold(epsilon=0.0)],
+        admit_chain=[ViolationThreshold(epsilon=0.0)],
         purge_chain=[PurgeInactive(max_age=1)],
     )
 
@@ -114,7 +114,7 @@ def _nslack_admit_subset_policy() -> Compose:
     state).
     """
     return Compose(
-        admit_chain=[SlackThreshold(epsilon=_ADMIT_SUBSET_EPSILON)],
+        admit_chain=[ViolationThreshold(epsilon=_ADMIT_SUBSET_EPSILON)],
         purge_chain=[PurgeInactive(max_age=1)],
     )
 
@@ -130,7 +130,7 @@ def _nslack_slack_policy() -> Compose:
     instance per call (no cross-thread state).
     """
     return Compose(
-        admit_chain=[SlackThreshold(epsilon=0.0)],
+        admit_chain=[ViolationThreshold(epsilon=0.0)],
         purge_chain=[SlackStrip(percentile=50.0)],
     )
 
@@ -337,7 +337,7 @@ def _family_nu(arrays: dict[str, np.ndarray]) -> np.ndarray:
     return np.asarray(arrays["shocks"], dtype=np.float64)[:, 0, :]
 
 
-def arrays_K(arrays: dict[str, np.ndarray]) -> int:
+def _arrays_K(arrays: dict[str, np.ndarray]) -> int:
     # The parameter width phi rides in, derived from the raw arrays: toy phi is
     # per-item (b * r_a), qkp phi is [alpha, delta_1..M, lambda] = M + 2.
     if "observables" in arrays:  # toy
@@ -485,7 +485,7 @@ def _assert_admitted_field_witness(
 ) -> None:
     """Captured ``InstallSnapshot.admitted`` matches the admit rule exactly.
 
-    Reconstruct the whole admitted set from ``SlackThreshold(epsilon)``: a
+    Reconstruct the whole admitted set from ``ViolationThreshold(epsilon)``: a
     received candidate is admitted iff its pre-admit violation
     ``phi . theta + eps - u_a`` exceeds ``epsilon``, evaluated from the
     received row's own ``(phi, eps)`` and the theta/u snapshot — never read
@@ -801,7 +801,6 @@ def _nslack_serial_with_snapshots(
         return original_contribute(self, demands)
 
     def _snapshotting_apply(self, install_payload):
-        rows = install_payload
         received.setdefault(
             self._iteration,
             {
@@ -809,7 +808,7 @@ def _nslack_serial_with_snapshots(
                     np.asarray(row.phi, dtype=np.float64).copy(),
                     float(row.epsilon),
                 )
-                for row in rows
+                for row in install_payload
             },
         )
         return original_apply(self, install_payload)
@@ -1097,7 +1096,7 @@ def test_nslack_wholesale_capture_qkp() -> None:
 # Under the default epsilon=0.0 admit policy every received candidate is
 # admitted (each already cleared the emit threshold), so admitted == received
 # and the reconstruction has no threshold to check. This gate drives
-# SlackThreshold(1.0) so the admit filter genuinely rejects the
+# ViolationThreshold(1.0) so the admit filter genuinely rejects the
 # weakly-violated received rows and the admitted set is a strict subset.
 
 
@@ -1393,7 +1392,7 @@ def _assert_aggregate_field_witness(
     test-side over the reconstructed row — never read back from the record.
     At least one non-zero raw is required.
     """
-    K = arrays_K(arrays)
+    K = _arrays_K(arrays)
     checked = 0
     for r in records:
         assert r.aggregate_raw is not None and r.aggregate_bytes is not None, (
@@ -1511,8 +1510,8 @@ class _InexactGapOracle(Oracle):
     def __init__(self, base: Oracle) -> None:
         self._base = base
 
-    def setup(self, transport, local_ids) -> None:
-        self._base.setup(transport, local_ids)
+    def setup(self, transport, agent_ids) -> None:
+        self._base.setup(transport, agent_ids)
 
     def teardown(self) -> None:
         self._base.teardown()
@@ -1525,10 +1524,10 @@ class _InexactGapOracle(Oracle):
             gap=_injected_gap(agent_id),
         )
 
-    def price_batch(self, theta: np.ndarray, local_ids):
-        base = self._base.price_batch(theta, local_ids)
+    def price_batch(self, theta: np.ndarray, agent_ids):
+        base = self._base.price_batch(theta, agent_ids)
         out: dict[int, Demand] = {}
-        for agent_id in np.asarray(local_ids, dtype=np.int64):
+        for agent_id in np.asarray(agent_ids, dtype=np.int64):
             a = int(agent_id)
             demand = base[a]
             out[a] = Demand.inexact(
@@ -1780,7 +1779,7 @@ def _nslack_schedule_walk(
         backend=backend,
         # A dual-informed schedule so the driver builds + reads the
         # DualConcentration payload every iteration (the Schedule field).
-        schedule=DualInformed(concentration_threshold=0.9, min_revisit_period=2),
+        schedule=DualInformed(concentration_threshold=0.9, max_staleness=2),
         capture_steprecords=True,
     )
 

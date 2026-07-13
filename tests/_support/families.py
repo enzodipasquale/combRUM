@@ -287,14 +287,12 @@ def test_toy_fixture_matches_generator_at_defaults() -> None:
     live = toy_family(TOY_DEFAULT_N_OBS, TOY_DEFAULT_N_ITEMS, DEFAULT_SEED)
     disk = load_family("toy", FAMILY_DIR)
     _assert_arrays_bitwise_equal(disk, live)
-    assert family_digest(disk) == family_digest(live)
 
 
 def test_qkp_fixture_matches_generator_at_defaults() -> None:
     live = qkp_family(QKP_DEFAULT_N_OBS, QKP_DEFAULT_N_ITEMS, DEFAULT_SEED)
     disk = load_family("qkp", FAMILY_DIR)
     _assert_arrays_bitwise_equal(disk, live)
-    assert family_digest(disk) == family_digest(live)
 
 
 def test_persist_load_round_trips_bitwise_exact(tmp_path: Path) -> None:
@@ -303,7 +301,6 @@ def test_persist_load_round_trips_bitwise_exact(tmp_path: Path) -> None:
     assert path == tmp_path / "toy.npz"
     reloaded = load_family("toy", tmp_path)
     _assert_arrays_bitwise_equal(reloaded, live)
-    assert family_digest(reloaded) == family_digest(live)
 
 
 def test_persist_load_honor_the_name_argument(tmp_path: Path) -> None:
@@ -325,7 +322,6 @@ def test_persist_load_honor_the_name_argument(tmp_path: Path) -> None:
     # Each name reloads its own payload on the read side too.
     _assert_arrays_bitwise_equal(load_family("toy", tmp_path), toy)
     _assert_arrays_bitwise_equal(load_family("qkp_probe", tmp_path), qkp)
-    assert family_digest(load_family("qkp_probe", tmp_path)) == family_digest(qkp)
 
 
 def _assert_all_read_only(arrays: Mapping[str, np.ndarray]) -> None:

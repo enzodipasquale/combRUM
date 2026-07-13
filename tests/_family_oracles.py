@@ -48,7 +48,7 @@ class ToyOracle(Oracle):
         self._r = np.asarray(arrays["observables"], dtype=np.float64)
         self._nu = np.asarray(arrays["shocks"], dtype=np.float64)[:, 0, :]
 
-    def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
+    def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
         pass
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
@@ -59,13 +59,13 @@ class ToyOracle(Oracle):
         )
 
     def price_batch(
-        self, theta: np.ndarray, local_ids: np.ndarray
+        self, theta: np.ndarray, agent_ids: np.ndarray
     ) -> Mapping[int, Demand]:
         # The batched twin: scores each id with the same elementwise
         # expression and the same float64 reduction order, making
         # price_batch(theta, ids) bitwise equal to [price(theta, i) for i in
         # ids] — the conformance gate.
-        ids = np.asarray(local_ids, dtype=np.int64)
+        ids = np.asarray(agent_ids, dtype=np.int64)
         out: dict[int, Demand] = {}
         for agent_id in ids:
             a = int(agent_id)
@@ -107,7 +107,7 @@ class QKPOracle(Oracle):
             "bj,jk,bk->b", self._bundles, q, self._bundles
         )
 
-    def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
+    def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
         pass
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
@@ -125,14 +125,14 @@ class QKPOracle(Oracle):
         )
 
     def price_batch(
-        self, theta: np.ndarray, local_ids: np.ndarray
+        self, theta: np.ndarray, agent_ids: np.ndarray
     ) -> Mapping[int, Demand]:
         # The batched twin: the same per-agent enumeration, one id at a
         # time. The arithmetic per id is byte-identical to price (same
         # precomputed quad term, same capacity mask, same argmax), so the
         # batch result is bitwise equal to the per-agent result (the
         # conformance gate), while the shape is the batch-call contract.
-        ids = np.asarray(local_ids, dtype=np.int64)
+        ids = np.asarray(agent_ids, dtype=np.int64)
         out: dict[int, Demand] = {}
         for agent_id in ids:
             out[int(agent_id)] = self.price(theta, int(agent_id))
@@ -268,8 +268,8 @@ class _BatchOnlyFeatureMap(_BatchedFeatureMap):
     mode.
     """
 
-    # Restore the base ABC raising default (the parent overrides features), so
-    # this is the optimized-only either-one form.
+    # Restore the base class's raising default (the parent overrides features),
+    # so this is the optimized-only either-one form.
     features = FeatureMap.features
 
 
@@ -366,9 +366,9 @@ class _PhiSupportPerturbationMap(_BatchOnlyFeatureMap):
     """Turns the first exact-zero phi entry of the first row into ``1e-12``.
 
     A discrete identity flip, however tiny the magnitude: it changes the
-    zero mask that ``highs.py``'s ``np.flatnonzero(row.phi)`` keys the
-    installed column set on, and on the gurobi master it also drifts the
-    priced reduced costs.
+    zero mask (``phi != 0.0``) that ``highs.py`` keys the installed sparse
+    pattern on, and on the gurobi master it also drifts the priced reduced
+    costs.
     """
 
     def features_batch(
@@ -431,7 +431,7 @@ class _InstallGatePerturbationMap(_BatchOnlyFeatureMap):
     A single-row lift cannot be absorbed into theta (a uniform all-rows lift
     could), so the aggregate slack never settles to ``<= ctx.tolerance`` at
     the clean path's convergence iteration: the install gate
-    ``violation > ctx.tolerance`` (``oneslack.py:260``) keeps firing and the
+    ``violation > ctx.tolerance`` (``oneslack.py``) keeps firing and the
     convergence shapes diverge, which the stream-length check fails.
     """
 

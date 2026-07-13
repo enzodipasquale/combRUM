@@ -47,32 +47,33 @@ class WeightSource(Protocol):
 
 
 @dataclass(frozen=True)
-class NativeDraws:
+class ExponentialDraws:
     """Fresh multiplier-bootstrap weights.
 
     Each replication's weights are exponential(1) multipliers normalised so the
-    row sums to ``n_obs``. ``base_seed`` makes the stream reproducible.
+    row sums to ``n_observations``. ``base_seed`` makes the stream reproducible.
     """
 
-    n_obs: int
+    n_observations: int
     base_seed: int
 
     def __post_init__(self) -> None:
-        n_obs = operator.index(self.n_obs)
-        if n_obs < 1:
-            raise ValueError(f"n_obs must be a positive int (got {self.n_obs!r})")
+        n_observations = operator.index(self.n_observations)
+        if n_observations < 1:
+            raise ValueError(
+                f"n_observations must be a positive int (got {self.n_observations!r})"
+            )
         base = operator.index(self.base_seed)
         if base < 0:
             raise ValueError(f"base_seed must be a nonnegative int (got {self.base_seed!r})")
-        object.__setattr__(self, "n_obs", n_obs)
+        object.__setattr__(self, "n_observations", n_observations)
         object.__setattr__(self, "base_seed", base)
 
     def weights_for(self, rep_id: int) -> np.ndarray:
-        return multiplier_weights(self.n_obs, self.base_seed, rep_id)
+        return multiplier_weights(self.n_observations, self.base_seed, rep_id)
 
 
-def _restamp(dual: DualSolution, rep_id: int) -> DualSolution:
-    """Re-key an already validated dual payload without copying arrays."""
+def _restamp_dual(dual: DualSolution, rep_id: int) -> DualSolution:
     return dual.with_rep_id(rep_id)
 
 
@@ -85,7 +86,7 @@ def _validate_n_bootstrap(value: object) -> int:
     if isinstance(value, (bool, np.bool_)):
         raise TypeError("n_bootstrap must be a positive int, not bool")
     try:
-        out = int(operator.index(value))
+        out = operator.index(value)
     except TypeError as exc:
         raise TypeError(
             f"n_bootstrap must be a positive int, not {type(value).__name__}"
@@ -100,7 +101,7 @@ def bootstrap(
     data: Data,
     *,
     n_bootstrap: int,
-    weights: WeightSource,
+    weight_source: WeightSource,
     transport: Transport | None = None,
     master_backend: str = "auto",
     master_params: dict[str, object] | None = None,
@@ -114,8 +115,8 @@ def bootstrap(
 ) -> BootstrapResult:
     """Run the serial multiplier bootstrap over a ``Model``/``Data`` pair.
 
-    ``weights`` is any object with ``weights_for(rep_id) -> (N,)``:
-    :class:`NativeDraws` for fresh multiplier weights, or
+    ``weight_source`` is any object with ``weights_for(rep_id) -> (N,)``:
+    :class:`ExponentialDraws` for fresh multiplier weights, or
     :class:`~combrum.randomness.ReplayedWeights` to replay a stored matrix.
     ``transport`` defaults to the serial reference. Each replication reweights
     the criterion and runs one fit; by default that fit is cold.
@@ -128,14 +129,15 @@ def bootstrap(
     usually converge in far fewer iterations but walk a different cut path
     than cold ones.
 
-    :class:`NativeDraws` and the distributed
+    :class:`ExponentialDraws` and the distributed
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed` use different
     RNG streams, so the same ``base_seed`` does not reproduce identical draws
     across the serial and distributed paths.
 
-    When ``dual_store_dir`` is given, duals stream to that directory one at a
-    time and ``BootstrapResult.duals`` stays ``None``. ``activity`` surfaces
-    root-only progress; omitting it builds no sinks.
+    Duals are never held in memory here (``BootstrapResult.duals`` is always
+    ``None``); ``dual_store_dir`` streams them to disk one replication at a
+    time instead of discarding them. ``activity`` surfaces root-only progress;
+    omitting it builds no sinks.
 
     Returns a :class:`~combrum.result.BootstrapResult` with ``thetas`` of shape
     ``(n_bootstrap, K)`` and a convergence mask.
@@ -150,7 +152,7 @@ def bootstrap(
         )
         data  = Data(observed_bundles=Y, shocks=draws, observables=X)
         boot  = bootstrap(model, data, n_bootstrap=500,
-                          weights=NativeDraws(n_obs=N, base_seed=7))
+                          weight_source=ExponentialDraws(n_observations=N, base_seed=7))
     """
     oracle = model.oracle
     parameters = model.parameters
@@ -212,8 +214,8 @@ def bootstrap(
                 run_id=log.config.run_id,
                 label=log.config.label,
                 n_bootstrap=n_bootstrap,
-                base_seed=_weight_source_seed(weights),
-                resampling=type(weights).__name__,
+                base_seed=_weight_source_seed(weight_source),
+                resampling=type(weight_source).__name__,
                 tolerance=tolerance,
                 max_iterations=max_iterations,
                 min_iterations=min_iterations,
@@ -237,12 +239,10 @@ def bootstrap(
         total_iterations = 0
         thetas = np.zeros((n_bootstrap, K), dtype=np.float64)
         converged = np.zeros(n_bootstrap, dtype=bool)
-        # One shared solver environment for the whole run: each replication's
-        # master is still built fresh, but the license checkout happens once.
         with master_environment(resolved_master_backend) as master_env:
             for b in range(n_bootstrap):
                 rep_t0 = perf_counter() if log_details else None
-                weights_b = np.asarray(weights.weights_for(b), dtype=np.float64)
+                weights_b = np.asarray(weight_source.weights_for(b), dtype=np.float64)
                 formulation = model.formulation(model.features)
                 built = build_fit_context(
                     parameters,
@@ -272,7 +272,7 @@ def bootstrap(
                 if writer is not None:
                     dual = outcome.result.dual
                     if dual is not None:
-                        restamped = _restamp(dual, b)
+                        restamped = _restamp_dual(dual, b)
                         writer.write(restamped)
                         stored += 1
                         del restamped

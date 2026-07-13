@@ -112,8 +112,8 @@ def _convergence_floor(callback, *, base_floor, iteration=3, oracle=None):
 
 
 def test_callback_convergence_floor_takes_max_of_base_and_callback() -> None:
-    # The callback can raise the floor above the base (decay/min-derived)
-    # value but never lower it.
+    # The callback can raise the floor above the base
+    # (qp_iterations/min-derived) value but never lower it.
     assert _convergence_floor(lambda it, oracle: 2, base_floor=5) == 5
     assert _convergence_floor(lambda it, oracle: 9, base_floor=5) == 9
     assert _convergence_floor(lambda it, oracle: 6, base_floor=6) == 6
@@ -155,7 +155,10 @@ def test_callback_convergence_floor_rejects_non_integer_return() -> None:
     [
         ({"max_iterations": 0}, "expected max_iterations >= 1"),
         ({"min_iterations": -1}, "expected min_iterations >= 0"),
-        ({"qp_weight": 1.0, "decay": 0}, "qp_weight>0 needs decay>=1"),
+        (
+            {"qp_weight": 1.0, "qp_iterations": 0},
+            "qp_weight>0 needs qp_iterations>=1",
+        ),
         ({"penalty_ref": "moving"}, "penalty_ref must be"),
     ],
 )
@@ -195,7 +198,7 @@ def test_estimate_rejects_multirank_dense_transport(model, data) -> None:
 
 def test_run_fit_propagates_rank_local_oracle_setup_failure() -> None:
     class _SetupFailingOracle(Oracle):
-        def setup(self, transport, local_ids):  # type: ignore[no-untyped-def]
+        def setup(self, transport, agent_ids):  # type: ignore[no-untyped-def]
             if transport.rank == 1:
                 raise RuntimeError("setup boom")
 
@@ -236,9 +239,9 @@ def test_run_fit_propagates_rank_local_oracle_setup_failure() -> None:
     )
 
 
-# (qp_weight, decay) pairs accepted by _validate_loop_controls. (0.0, 1) is
-# the legal config -- penalty weight off, decay set -- where the two factors
-# of the AND disagree.
+# (qp_weight, qp_iterations) pairs accepted by _validate_loop_controls.
+# (0.0, 1) is the legal config -- penalty weight off, qp_iterations set --
+# where the two factors of the AND disagree.
 _REQUIRE_QUADRATIC_CASES = [
     (0.0, 0),
     (0.0, 1),
@@ -247,7 +250,7 @@ _REQUIRE_QUADRATIC_CASES = [
 ]
 
 
-def _expected_require_quadratic(qp_weight: float, decay: int) -> bool:
+def _expected_require_quadratic(qp_weight: float, qp_iterations: int) -> bool:
     # A quadratic-capable backend is needed exactly when the proximal penalty
     # is live: a positive weight held for at least one iteration.
     penalty_live = {
@@ -256,12 +259,12 @@ def _expected_require_quadratic(qp_weight: float, decay: int) -> bool:
         (1.0, 1): True,
         (0.5, 2): True,
     }
-    return penalty_live[(qp_weight, decay)]
+    return penalty_live[(qp_weight, qp_iterations)]
 
 
-@pytest.mark.parametrize(("qp_weight", "decay"), _REQUIRE_QUADRATIC_CASES)
+@pytest.mark.parametrize(("qp_weight", "qp_iterations"), _REQUIRE_QUADRATIC_CASES)
 def test_estimate_require_quadratic_tracks_penalty_regime(
-    monkeypatch, model, data, qp_weight, decay
+    monkeypatch, model, data, qp_weight, qp_iterations
 ) -> None:
     estimate_mod = importlib.import_module("combrum.engine.estimate")
     captured_require_quadratic: list[bool] = []
@@ -290,16 +293,20 @@ def test_estimate_require_quadratic_tracks_penalty_regime(
             transport=SerialTransport(),
             master_backend="highs",
             qp_weight=qp_weight,
-            decay=decay,
+            qp_iterations=qp_iterations,
         )
 
     assert captured_require_quadratic == [
-        _expected_require_quadratic(qp_weight, decay)
+        _expected_require_quadratic(qp_weight, qp_iterations)
     ]
 
 
 def test_estimate_require_quadratic_truth_table_matches_and_semantics() -> None:
-    # The penalty_live table must encode exactly `qp_weight > 0 and decay > 0`.
-    for qp_weight, decay in _REQUIRE_QUADRATIC_CASES:
-        both_factors_hold = qp_weight > 0.0 and decay > 0
-        assert _expected_require_quadratic(qp_weight, decay) is both_factors_hold
+    # The penalty_live table must encode exactly
+    # `qp_weight > 0 and qp_iterations > 0`.
+    for qp_weight, qp_iterations in _REQUIRE_QUADRATIC_CASES:
+        both_factors_hold = qp_weight > 0.0 and qp_iterations > 0
+        assert (
+            _expected_require_quadratic(qp_weight, qp_iterations)
+            is both_factors_hold
+        )

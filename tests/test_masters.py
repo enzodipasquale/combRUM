@@ -25,8 +25,7 @@ from combrum.masters import highs as highs_backend
 from combrum.masters import make_master, master_environment, resolve_master_backend
 from combrum.masters.gurobi import GurobiMaster
 from combrum.masters.highs import HighsMaster
-from combrum.transport import LocalCluster
-from combrum.transport import CutRow
+from combrum.transport import CutRow, LocalCluster
 
 try:
     import tomllib
@@ -849,10 +848,18 @@ def test_extracted_cuts_warm_start_across_backends() -> None:
         assert consumer.objective() == pytest.approx(objective_g, abs=1e-9)
 
 
-@needs_gurobi
-def test_factory_explicit_gurobi() -> None:
-    with lp_master("gurobi") as master:
-        assert isinstance(master, GurobiMaster)
+@pytest.mark.parametrize(
+    ("backend", "expected_cls"),
+    (
+        pytest.param("gurobi", GurobiMaster, marks=needs_gurobi, id="gurobi"),
+        pytest.param("highs", HighsMaster, marks=needs_highs, id="highs"),
+    ),
+)
+def test_factory_explicit_backend(
+    backend: str, expected_cls: type[MasterBackend]
+) -> None:
+    with lp_master(backend) as master:
+        assert isinstance(master, expected_cls)
 
 
 @needs_gurobi
@@ -927,12 +934,6 @@ def test_make_master_rejects_env_for_highs() -> None:
             backend="highs",
             env=object(),
         )
-
-
-@needs_highs
-def test_factory_explicit_highs() -> None:
-    with lp_master("highs") as master:
-        assert isinstance(master, HighsMaster)
 
 
 @needs_highs

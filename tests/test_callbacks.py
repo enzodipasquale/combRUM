@@ -21,7 +21,7 @@ import pytest
 
 from combrum.callbacks import (
     Phase,
-    Schedule,
+    TimeoutSchedule,
     bootstrap_timeout_callback,
     point_timeout_callback,
 )
@@ -38,9 +38,9 @@ def _load_replay_fixture() -> dict:
     )
 
 
-def _schedule_from_fixture(spec: list[dict]) -> Schedule:
-    """Rebuild the typed Schedule from the fixture's plain-dict shape."""
-    return Schedule(
+def _schedule_from_fixture(spec: list[dict]) -> TimeoutSchedule:
+    """Rebuild the typed TimeoutSchedule from the fixture's plain-dict shape."""
+    return TimeoutSchedule(
         [
             Phase(
                 timeout=phase["timeout"],
@@ -71,7 +71,7 @@ class _Plain:
 
 
 @pytest.fixture
-def schedule() -> Schedule:
+def schedule() -> TimeoutSchedule:
     return _schedule_from_fixture(_load_replay_fixture()["schedule"])
 
 
@@ -116,12 +116,19 @@ def test_phase_validates_at_construction() -> None:
     assert Phase(timeout=1.0, iters=2, retire=False).retire is False
 
 
+def test_phase_rejects_none_timeout() -> None:
+    # SolverSettings(time_limit_seconds=None) means leave-default, so the
+    # shared budget validation alone would let a budget-less Phase through.
+    with pytest.raises(ValueError, match="Phase.timeout"):
+        Phase(timeout=None)  # type: ignore[arg-type]
+
+
 def test_smallest_bounded_span_floors_at_one() -> None:
     # a lone iters=1 bounded phase owns exactly iteration 0, so the non-retiring
     # floor is its cumulative boundary 1. The span is built from np.int64 so the
     # returned floor exercises normalisation to builtin int (hook contract is
     # int | None).
-    sched = Schedule([Phase(timeout=1.0, iters=np.int64(1)), Phase(timeout=5.0)])
+    sched = TimeoutSchedule([Phase(timeout=1.0, iters=np.int64(1)), Phase(timeout=5.0)])
     for helper, terminal_floor in (
         (point_timeout_callback, None),
         (bootstrap_timeout_callback, 10**9),
@@ -144,7 +151,7 @@ def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
     #   phase0 iters {0,1}   @1.0s  non-retire -> boundary 2
     #   phase1 iters {2,3,4} @5.0s  retire     -> 0
     #   terminal iters {5,6} @600s  retire     -> 0  (both helpers)
-    sched = Schedule(
+    sched = TimeoutSchedule(
         [
             Phase(timeout=1.0, iters=2),
             Phase(timeout=5.0, iters=3, retire=True),
@@ -172,7 +179,7 @@ def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
         assert callback(6, _Recorder()) == 0, helper.__name__
 
     # with a non-retiring terminal each helper keeps its own terminal policy
-    sched_nonretire = Schedule(
+    sched_nonretire = TimeoutSchedule(
         [
             Phase(timeout=1.0, iters=2),
             Phase(timeout=5.0, iters=3, retire=True),
@@ -185,15 +192,15 @@ def test_retiring_terminal_phase_floors_at_zero_for_both_helpers() -> None:
 
 def test_schedule_requires_one_terminal_phase_last() -> None:
     # A lone terminal phase is a valid schedule.
-    Schedule([Phase(timeout=5.0)])
-    Schedule([Phase(timeout=1.0, iters=2), Phase(timeout=5.0)])
+    TimeoutSchedule([Phase(timeout=5.0)])
+    TimeoutSchedule([Phase(timeout=1.0, iters=2), Phase(timeout=5.0)])
     with pytest.raises(ValueError):
-        Schedule([])  # empty
+        TimeoutSchedule([])  # empty
     with pytest.raises(ValueError):
-        Schedule([Phase(timeout=1.0, iters=2)])  # last not terminal
+        TimeoutSchedule([Phase(timeout=1.0, iters=2)])  # last not terminal
     with pytest.raises(ValueError):
         # A terminal phase before the end leaves a bounded phase no boundary.
-        Schedule([Phase(timeout=1.0), Phase(timeout=5.0)])
+        TimeoutSchedule([Phase(timeout=1.0), Phase(timeout=5.0)])
 
 
 # ---- schedule replay ---------------------------------------------------------

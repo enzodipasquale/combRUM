@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import importlib
+import inspect
 import threading
 from types import SimpleNamespace
 
@@ -13,10 +13,10 @@ from combrum.activity import ActivityConfig, ActivityRun, BootstrapStart
 from combrum.bootstrap_distributed import (
     _Replica,
     _bootstrap_local_rows,
-    _bootstrap_wave_c_theta_and_normalizers,
-    _finish_bootstrap_reduction,
     _bootstrap_slack_coef,
+    _bootstrap_wave_c_theta_and_normalizers,
     _cut_exchange_block_size,
+    _finish_bootstrap_reduction,
     _observed_cut_row_nbytes,
     _owner_vector,
     _pack_master_state,
@@ -27,6 +27,7 @@ from combrum.bootstrap_distributed import (
     bootstrap_distributed,
 )
 from combrum.context import ResultPublication
+from combrum.cut_policies import AddAll, PurgeInactive
 from combrum.demand import Demand
 from combrum.dual import DualSolution
 from combrum.dualstore import DualStoreReader, DualStoreWriter
@@ -34,7 +35,6 @@ from combrum.engine.distributed_context import prepare_distributed_observed
 from combrum.formulation import FormulationResult
 from combrum.formulations import NSlack, OneSlack
 from combrum.interface_resolution import resolve
-from combrum.cut_policies import AddAll, PurgeInactive
 from combrum.model import Model
 from combrum.oracle import Oracle
 from combrum.parameters import Parameters
@@ -97,8 +97,8 @@ class _RecordingOracle(Oracle):
     def __init__(self) -> None:
         self.setup_ids: tuple[int, ...] = ()
 
-    def setup(self, transport: Transport, local_ids: np.ndarray) -> None:
-        self.setup_ids = tuple(map(int, local_ids))
+    def setup(self, transport: Transport, agent_ids: np.ndarray) -> None:
+        self.setup_ids = tuple(map(int, agent_ids))
 
     def price(self, theta: np.ndarray, agent_id: int) -> Demand:
         return Demand.exact(
@@ -106,8 +106,8 @@ class _RecordingOracle(Oracle):
             payoff=float(theta[0]),
         )
 
-    def price_batch(self, theta: np.ndarray, local_ids: np.ndarray):
-        return {int(agent_id): self.price(theta, int(agent_id)) for agent_id in local_ids}
+    def price_batch(self, theta: np.ndarray, agent_ids: np.ndarray):
+        return {int(agent_id): self.price(theta, int(agent_id)) for agent_id in agent_ids}
 
 
 def _model(
@@ -751,6 +751,7 @@ def test_bootstrap_distributed_requires_rank_uniform_max_live_reps() -> None:
         ("max_iterations", 1, 2, "max_iterations must match"),
         ("min_iterations", 0, 1, "min_iterations must match"),
         ("tolerance", 1e-6, 1e-5, "tolerance must match"),
+        ("master_backend", "highs", "bad", "master_backend must match"),
     ],
 )
 def test_bootstrap_distributed_requires_rank_uniform_public_controls(
@@ -907,28 +908,6 @@ def test_bootstrap_distributed_requires_rank_uniform_formulation_support() -> No
 
     assert all(
         "model.formulation is NSlack must match" in message
-        for message in LocalCluster(2).run(run)
-    )
-
-
-def test_bootstrap_distributed_requires_rank_uniform_master_backend() -> None:
-    def run(transport):
-        try:
-            bootstrap_distributed(
-                _model(),
-                n_observations=3,
-                n_simulations=2,
-                n_bootstrap=1,
-                base_seed=1,
-                transport=transport,
-                master_backend="highs" if transport.rank == 0 else "bad",
-            )
-        except TransportError as exc:
-            return exc.message
-        return "no error"
-
-    assert all(
-        "master_backend must match" in message
         for message in LocalCluster(2).run(run)
     )
 

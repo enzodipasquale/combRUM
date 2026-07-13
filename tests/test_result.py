@@ -170,14 +170,9 @@ def test_slack_summary_from_slack() -> None:
     tiny = np.array([0.0, 0.0, 0.0, 1e-12, 1.0, 3.0])
     tiny_summary = make_fit(slack=tiny).slack_summary()
     vals = tiny.tolist()
-    exp_total = 0.0
-    for v in vals:
-        exp_total += v
+    exp_total = sum(vals)
     exp_binding = sum(1 for v in vals if v == 0.0)
-    exp_max = vals[0]
-    for v in vals[1:]:
-        if v > exp_max:
-            exp_max = v
+    exp_max = max(vals)
     assert tiny_summary["total_slack"] == pytest.approx(exp_total)
     assert tiny_summary["mean_slack"] == pytest.approx(exp_total / len(vals))
     assert tiny_summary["max_slack"] == exp_max
@@ -194,9 +189,9 @@ def test_fit_result_arrays_read_only() -> None:
 
 
 def test_bootstrap_result_arrays_read_only() -> None:
-    boot = make_boot(u_samples=np.zeros((4, 5)))
-    assert boot.u_samples is not None
-    for arr in (boot.thetas, boot.converged, boot.u_samples):
+    boot = make_boot(slack_samples=np.zeros((4, 5)))
+    assert boot.slack_samples is not None
+    for arr in (boot.thetas, boot.converged, boot.slack_samples):
         assert not arr.flags.writeable
         with pytest.raises(ValueError):
             arr.flat[0] = 99.0
@@ -262,7 +257,7 @@ def test_bootstrap_validation() -> None:
     with pytest.raises(ValueError, match="one payload per replication"):
         make_boot(duals=("d0", "d1"))
     with pytest.raises(ValueError, match="leading dimension B"):
-        make_boot(u_samples=np.zeros((3, 5)))
+        make_boot(slack_samples=np.zeros((3, 5)))
     with pytest.raises(ValueError, match="thetas must be finite"):
         make_boot(
             thetas=np.array([[np.nan, 2, 3], [1, 2, 3], [1, 2, 3], [1, 2, 3]])
@@ -407,14 +402,14 @@ def test_concat_merges_replications() -> None:
         thetas=np.ones((2, 3)),
         converged=np.array([True, False]),
         point_estimate=first_point,
-        u_samples=np.zeros((2, 5)),
+        slack_samples=np.zeros((2, 5)),
         duals=("d0", "d1"),
     )
     second = make_boot(
         thetas=2.0 * np.ones((3, 3)),
         converged=np.array([True, True, True]),
         point_estimate=second_point,
-        u_samples=np.ones((3, 5)),
+        slack_samples=np.ones((3, 5)),
         duals=("d2", "d3", "d4"),
     )
     merged = BootstrapResult.concat([first, second])
@@ -430,12 +425,12 @@ def test_concat_merges_replications() -> None:
         merged.point_estimate.slack, first_point.slack
     )
     assert merged.point_estimate.metadata == {"shard": "first"}
-    assert merged.u_samples is not None
-    assert merged.u_samples.shape == (5, 5)
-    # u_samples stays row-aligned with thetas/converged/duals: first shard's
+    assert merged.slack_samples is not None
+    assert merged.slack_samples.shape == (5, 5)
+    # slack_samples stays row-aligned with thetas/converged/duals: first shard's
     # all-zero rows lead, second shard's all-one rows follow.
-    np.testing.assert_array_equal(merged.u_samples[:2], first.u_samples)
-    np.testing.assert_array_equal(merged.u_samples[2:], second.u_samples)
+    np.testing.assert_array_equal(merged.slack_samples[:2], first.slack_samples)
+    np.testing.assert_array_equal(merged.slack_samples[2:], second.slack_samples)
     assert merged.duals == ("d0", "d1", "d2", "d3", "d4")
 
 
@@ -468,24 +463,17 @@ def test_concat_aggregates_certification_metadata() -> None:
         "worst_gap": 7.0,
         "worst_gap_unknown": False,
     }
-    # Expected full metadata for each shard order.
-    expected_by_order = {
-        (id(low_gap), id(high_gap)): {
-            "seed": 1,
-            "note": "x",
-            "tag": "high",
-            "certification": merged_cert,
-        },
-        (id(high_gap), id(low_gap)): {
-            "seed": 1,
-            "note": "x",
-            "tag": "low",
-            "certification": merged_cert,
-        },
-    }
-    for shards in ([low_gap, high_gap], [high_gap, low_gap]):
+    for shards, tag in (
+        ([low_gap, high_gap], "high"),
+        ([high_gap, low_gap], "low"),
+    ):
         merged = BootstrapResult.concat(shards)
-        assert merged.metadata == expected_by_order[(id(shards[0]), id(shards[1]))]
+        assert merged.metadata == {
+            "seed": 1,
+            "note": "x",
+            "tag": tag,
+            "certification": merged_cert,
+        }
 
 
 def test_concat_aggregates_unknown_certification_gap() -> None:
@@ -522,9 +510,9 @@ def test_concat_aggregates_unknown_certification_gap() -> None:
 
 def test_concat_rejects_inconsistent_provenance_and_payloads() -> None:
     # Payloads are all-or-none across shards; a partial set is rejected.
-    with_payload = make_boot(u_samples=np.zeros((4, 5)), duals=tuple("abcd"))
+    with_payload = make_boot(slack_samples=np.zeros((4, 5)), duals=tuple("abcd"))
     bare = make_boot()
-    with pytest.raises(ValueError, match="u_samples on all shards or on none"):
+    with pytest.raises(ValueError, match="slack_samples on all shards or on none"):
         BootstrapResult.concat([with_payload, bare])
     with pytest.raises(ValueError, match="duals on all shards or on none"):
         BootstrapResult.concat([make_boot(duals=tuple("abcd")), bare])
@@ -545,11 +533,11 @@ def test_concat_rejects_inconsistent_provenance_and_payloads() -> None:
             ]
         )
     # Ragged payload shapes across shards must be rejected, not force-aligned.
-    with pytest.raises(ValueError, match="matching u_samples payload shapes"):
+    with pytest.raises(ValueError, match="matching slack_samples payload shapes"):
         BootstrapResult.concat(
             [
-                make_boot(u_samples=np.zeros((4, 5))),
-                make_boot(u_samples=np.zeros((4, 7))),
+                make_boot(slack_samples=np.zeros((4, 5))),
+                make_boot(slack_samples=np.zeros((4, 7))),
             ]
         )
     # Point-estimate provenance: all-or-none, and identical when present.

@@ -1,11 +1,4 @@
-"""Built-in cut policies for candidate admission and cut retirement.
-
-The top-level package exposes :class:`AddAll`, :class:`PurgeInactive`, and
-:class:`SlackStrip`: the identity policy, dual-staleness retirement, and
-slack-based retirement. The other policies in this module are lower-level
-composition/admission tools for callers that import from ``combrum.cut_policies``
-directly.
-"""
+"""Built-in cut policies for candidate admission and cut retirement."""
 
 from __future__ import annotations
 
@@ -17,14 +10,10 @@ import numpy as np
 from combrum.policies import CutPolicy, CutPolicyProfile, policy_profile
 from combrum.transport.base import CutRow
 
-# dual mass at or below this is solver noise, not support; must match the
-# dual-payload support cutoff so "inactive" here and "outside the support"
-# elsewhere name one set of cuts
 _DUAL_ATOL = 1e-10
 
 
 def _key(row: CutRow) -> tuple[int, bytes]:
-    # Per-master cut identity used as the dedup key for all purge signal maps.
     return (row.agent_id, row.bundle_key)
 
 
@@ -45,11 +34,7 @@ def _parallel_violations(
 
 
 class AddAll(CutPolicy):
-    """Admit every candidate, retire nothing: the identity policy.
-
-    Equivalent to running with no policy; fills a policy slot explicitly
-    without changing behaviour.
-    """
+    """Admit every candidate, retire nothing: the identity policy."""
 
     profile = CutPolicyProfile(
         needs_admit_violations=False,
@@ -142,8 +127,6 @@ class Compose(CutPolicy):
             if self._profile.needs_admit_violations
             else None
         )
-        # Violations are re-mapped by object identity, but only after a stage
-        # has actually thinned the rows; until then ``viol`` stays parallel.
         viol_by_id: dict[int, float] | None = None
         aligned = True
         empty = np.empty(0, dtype=np.float64)
@@ -214,12 +197,12 @@ class PurgeInactive(CutPolicy):
     """Retire cuts whose dual has stayed (near-)zero for ``max_age`` calls.
 
     One counter per installed cut counts CONSECUTIVE signalled purge calls
-    whose dual reading was within :data:`_DUAL_ATOL` of zero. A nonzero
-    reading resets the counter; a cut with no reading holds its counter
-    unchanged. ``dual=None`` retires nothing and moves no counter, so a
-    signal-free call cannot create a zero streak. Counters of cuts
-    absent from ``installed`` are pruned each call, so a re-entering cut
-    starts a fresh streak.
+    whose dual reading was within :data:`_DUAL_ATOL` of zero. A reading
+    beyond that tolerance resets the counter; a cut with no reading holds
+    its counter unchanged. ``dual=None`` retires nothing and moves no
+    counter, so a signal-free call cannot create a zero streak. Counters
+    of cuts absent from ``installed`` are pruned each call, so a
+    re-entering cut starts a fresh streak.
     """
 
     def __init__(self, max_age: int) -> None:
@@ -281,9 +264,8 @@ class SlackStrip(CutPolicy):
     + eps) >= 0``). A cut is stripped iff its looseness is strictly above
     the ``percentile``-th percentile; ties at the cutoff are kept.
 
-    ``hard_threshold`` is not a slack magnitude: it is a max-live-constraint
-    cap. If the percentile leg would keep more than ``hard_threshold`` rows,
-    keep only the ``hard_threshold`` most-binding rows (smallest looseness).
+    If the percentile leg would keep more than ``max_live_cuts`` rows,
+    keep only the ``max_live_cuts`` most-binding rows (smallest looseness).
 
     The cutoff uses :func:`numpy.percentile` in its default
     (linear-interpolation) form.
@@ -296,28 +278,27 @@ class SlackStrip(CutPolicy):
     def __init__(
         self,
         percentile: float = 100.0,
-        hard_threshold: float = math.inf,
+        max_live_cuts: float = math.inf,
     ) -> None:
         percentile = float(percentile)
         if not 0.0 < percentile <= 100.0:
             raise ValueError(f"percentile must lie in (0, 100] (got {percentile!r})")
-        hard_threshold = float(hard_threshold)
-        if math.isinf(hard_threshold):
-            max_live_cuts = math.inf
+        max_live_cuts = float(max_live_cuts)
+        if math.isinf(max_live_cuts):
+            cap = math.inf
         else:
-            if not hard_threshold.is_integer():
+            if not max_live_cuts.is_integer():
                 raise ValueError(
-                    "hard_threshold is a max-live constraint count and"
-                    f" must be integer-valued or inf; got {hard_threshold!r}"
+                    "max_live_cuts must be integer-valued or inf;"
+                    f" got {max_live_cuts!r}"
                 )
-            max_live_cuts = int(hard_threshold)
-            if max_live_cuts < 1:
+            cap = int(max_live_cuts)
+            if cap < 1:
                 raise ValueError(
-                    "hard_threshold is a max-live constraint count and"
-                    f" must be >= 1 or inf; got {hard_threshold!r}"
+                    f"max_live_cuts must be >= 1 or inf; got {max_live_cuts!r}"
                 )
         self._percentile = percentile
-        self._hard_threshold = max_live_cuts
+        self._max_live_cuts = cap
 
     profile = CutPolicyProfile(
         needs_admit_violations=False,
@@ -352,27 +333,24 @@ class SlackStrip(CutPolicy):
             return ()
         slacks = np.asarray([value for _, value in signalled])
         keep = slacks <= float(np.percentile(slacks, self._percentile))
-        if not math.isinf(self._hard_threshold) and int(keep.sum()) > int(
-            self._hard_threshold
+        if not math.isinf(self._max_live_cuts) and int(keep.sum()) > int(
+            self._max_live_cuts
         ):
             keep = np.zeros(slacks.size, dtype=bool)
-            # Most-binding rows are the smallest looseness values; stable sort
-            # makes equal-looseness ties deterministic in installed-row order.
             order = np.argsort(slacks, kind="stable")
-            keep[order[: int(self._hard_threshold)]] = True
+            keep[order[: int(self._max_live_cuts)]] = True
         return tuple(
             row for (row, _value), keep_row in zip(signalled, keep) if not keep_row
         )
 
     def validate_master_size(self, *, n_parameters: int, n_agents: int) -> None:
         minimum = int(n_parameters) + int(n_agents)
-        cap = self._hard_threshold
+        cap = self._max_live_cuts
         if math.isinf(cap) or int(cap) >= minimum:
             return
         raise ValueError(
-            "SlackStrip hard_threshold is a max-live constraint count"
-            " and must be at least the NSlack master variable count"
-            " K + n_agents; got hard_threshold="
+            "SlackStrip max_live_cuts must be at least the NSlack master"
+            " variable count K + n_agents; got max_live_cuts="
             f"{int(cap)}, K={int(n_parameters)},"
             f" n_agents={int(n_agents)}, K + n_agents={minimum}"
         )
@@ -381,13 +359,13 @@ class SlackStrip(CutPolicy):
         self, *, n_parameters: int, installed_agents: int
     ) -> None:
         minimum = int(n_parameters) + int(installed_agents)
-        cap = self._hard_threshold
+        cap = self._max_live_cuts
         if math.isinf(cap) or int(cap) >= minimum:
             return
         raise ValueError(
-            "SlackStrip hard_threshold is a max-live constraint count"
-            " and must be at least the current lazy NSlack master variable"
-            " count K + installed_agents; got hard_threshold="
+            "SlackStrip max_live_cuts must be at least the current lazy"
+            " NSlack master variable count K + installed_agents;"
+            " got max_live_cuts="
             f"{int(cap)}, K={int(n_parameters)},"
             f" installed_agents={int(installed_agents)},"
             f" K + installed_agents={minimum}"
@@ -396,7 +374,7 @@ class SlackStrip(CutPolicy):
     def __repr__(self) -> str:
         return (
             f"SlackStrip(percentile={self._percentile},"
-            f" hard_threshold={self._hard_threshold})"
+            f" max_live_cuts={self._max_live_cuts})"
         )
 
 
@@ -448,7 +426,6 @@ class MostViolated(CutPolicy):
             else max(1, int(self._fraction * int(positive.size)))
         )
         if n >= positive.size:
-            # Nothing to thin; positive is already in input order.
             return tuple(rows[i] for i in positive)
         ranked = positive[np.argsort(-viol[positive], kind="stable")]
         keep = np.zeros(len(rows), dtype=bool)
@@ -470,11 +447,10 @@ class MostViolated(CutPolicy):
         return f"MostViolated(fraction={self._fraction})"
 
 
-class SlackThreshold(CutPolicy):
+class ViolationThreshold(CutPolicy):
     """Admit only candidates whose violation exceeds ``epsilon``.
 
-    ``epsilon`` is a violation magnitude (the quantity ``violations``
-    carries), so the policy needs no theta or u. Retires nothing.
+    Retires nothing.
     """
 
     def __init__(self, epsilon: float) -> None:
@@ -510,4 +486,4 @@ class SlackThreshold(CutPolicy):
         return ()
 
     def __repr__(self) -> str:
-        return f"SlackThreshold(epsilon={self._epsilon!r})"
+        return f"ViolationThreshold(epsilon={self._epsilon!r})"
