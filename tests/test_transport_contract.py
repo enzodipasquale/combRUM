@@ -10,6 +10,7 @@ import pytest
 
 import combrum.transport.reference as reference
 from _support.commprobe import CountingTransport, spread_values
+from combrum._bundle_key import canonical_bundle_key
 from combrum.reductions import canonical_sum
 from combrum.transport import (
     CutRow,
@@ -259,6 +260,38 @@ def test_bundle_key_round_trip_preserves_shape_and_dtype() -> None:
     np.testing.assert_array_equal(recovered, shaped)
     assert not recovered.flags.writeable
     assert _pack_bundle(recovered) == shaped_key
+
+
+def test_opaque_bundle_key_is_rejected_not_raised_through() -> None:
+    """A key that encodes no bundle must fail as ValueError, whatever it holds.
+
+    ``unpack_bundle`` reads a key containing ``b":"`` as ``dtype:payload`` and
+    hands the prefix to NumPy, which raises ``TypeError``, ``ValueError`` or
+    ``SyntaxError`` depending on how the bytes are malformed. A formulation whose
+    keys are opaque digests hits every one of those by chance, so the contract is
+    the exception type, not the prefix.
+    """
+
+    opaque = [
+        b"\x9a,\x00:payload",
+        b",:payload",
+        b"[('a',:x",
+        b"\xff\xfe:\x01\x02",
+        b"no separator at all",
+    ]
+
+    for key in opaque:
+        with pytest.raises(ValueError, match="does not encode an explicit bundle"):
+            _unpack_bundle(key)
+        assert canonical_bundle_key(key) == key
+
+
+def test_truncated_packed_key_reports_an_invalid_dtype_tag() -> None:
+    packed = _pack_bundle(np.array([[1, 2]], dtype=np.int64))
+    corrupt = packed[:3] + b"\x00\x02\x01" + b",," + packed[8:]
+
+    with pytest.raises(ValueError):
+        _unpack_bundle(corrupt)
 
 
 def test_cutrow_preserves_bundle_key_bytes() -> None:

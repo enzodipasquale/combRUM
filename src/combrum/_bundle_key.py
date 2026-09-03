@@ -58,14 +58,31 @@ _DTYPES_BY_TAG: dict[bytes, np.dtype] = {}
 _SHAPE_STRUCTS: dict[int, struct.Struct] = {}
 
 
-def _dtype_from_tag(tag: bytes) -> np.dtype:
+def _dtype_tag(tag: bytes) -> np.dtype | None:
+    """The dtype ``tag`` names, or ``None`` when it names none.
+
+    Both callers probe bytes that may not be a dtype at all, and NumPy signals
+    that several ways: ``TypeError`` for a malformed spec, ``ValueError`` for an
+    unknown one, and ``SyntaxError`` out of ``ast.literal_eval`` for the
+    comma-separated form. Enumerating them couples this module to NumPy's
+    internals, so anything that fails to parse is simply not a dtype.
+    """
+
     dtype = _DTYPES_BY_TAG.get(tag)
+    if dtype is not None:
+        return dtype
+    try:
+        dtype = np.dtype(tag.decode("ascii"))
+    except Exception:
+        return None
+    _DTYPES_BY_TAG[tag] = dtype
+    return dtype
+
+
+def _dtype_from_tag(tag: bytes) -> np.dtype:
+    dtype = _dtype_tag(tag)
     if dtype is None:
-        try:
-            dtype = np.dtype(tag.decode("ascii"))
-        except (UnicodeDecodeError, TypeError) as exc:
-            raise ValueError("bundle_key dtype tag is invalid") from exc
-        _DTYPES_BY_TAG[tag] = dtype
+        raise ValueError("bundle_key dtype tag is invalid")
     return dtype
 
 
@@ -107,10 +124,7 @@ def unpack_bundle(key: bytes) -> np.ndarray:
 
     tag, sep, raw = key.partition(b":")
     if sep:
-        try:
-            dtype = np.dtype(tag.decode("ascii"))
-        except (UnicodeDecodeError, TypeError):
-            dtype = None
+        dtype = _dtype_tag(tag)
         if dtype is not None and (
             dtype.itemsize == 0 or len(raw) % dtype.itemsize == 0
         ):
