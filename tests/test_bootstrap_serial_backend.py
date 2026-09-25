@@ -107,11 +107,22 @@ def test_serial_bootstrap_passes_warm_start_to_every_replication(
     monkeypatch,
 ) -> None:
     bootstrap_mod = importlib.import_module("combrum.bootstrap")
-    captured: list[tuple[object, object]] = []
+    captured: list[tuple[object, object, object, bool]] = []
+    basis = object()
+    master = SimpleNamespace(
+        solve=lambda: None, basis=lambda: basis, close=lambda: None
+    )
 
     def fake_build_fit_context(*args, **kwargs):  # type: ignore[no-untyped-def]
-        captured.append((kwargs["warm_start"], kwargs["warm_cuts"]))
-        return SimpleNamespace(ctx=SimpleNamespace())
+        captured.append(
+            (
+                kwargs["warm_start"],
+                kwargs["warm_cuts"],
+                kwargs.get("warm_basis"),
+                kwargs["weights"] is None,
+            )
+        )
+        return SimpleNamespace(ctx=SimpleNamespace(master_backend=master))
 
     def fake_run_fit(*args, **kwargs):  # type: ignore[no-untyped-def]
         return SimpleNamespace(
@@ -145,7 +156,11 @@ def test_serial_bootstrap_passes_warm_start_to_every_replication(
         warm_start=point,
         warm_cuts=rows,
     )
-    assert captured == [(point, rows)] * 3
+    # An unweighted reference build yields the basis every replication
+    # starts from.
+    assert captured == [(point, rows, None, True)] + [
+        (point, rows, basis, False)
+    ] * 3
 
 
 def test_serial_bootstrap_resolves_backend_once(monkeypatch) -> None:

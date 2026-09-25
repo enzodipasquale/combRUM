@@ -110,6 +110,58 @@ def test_no_schedule_fit_allocates_no_last_resolved(monkeypatch) -> None:
     assert floored.diagnostics.iterations == 2
 
 
+@pytest.mark.parametrize(
+    ("theta_init", "warm_relaxation", "priced"),
+    (
+        # A cold master prices the warm start first; that round cannot
+        # certify even at zero violation, so the fit accepts one round later.
+        (0.25, False, [0.25, 0.0]),
+        # A warm start outside the theta box is priced at its projection.
+        (5.0, False, [1.0, 0.0]),
+        # Warm cuts already encode the region, so the master's point leads.
+        (0.25, True, [0.0]),
+    ),
+)
+def test_driver_prices_warm_start_first_on_cold_master(
+    monkeypatch, theta_init: float, warm_relaxation: bool, priced: list[float]
+) -> None:
+    driver_mod = importlib.import_module("combrum.engine.driver")
+    thetas: list[float] = []
+
+    def fake_fit_step(*args, **kwargs):  # type: ignore[no-untyped-def]
+        thetas.append(float(kwargs["theta"][0]))
+        return _zero_step()
+
+    monkeypatch.setattr(driver_mod, "_resolve_price", lambda *a, **k: object())
+    monkeypatch.setattr(driver_mod, "fit_step", fake_fit_step)
+
+    class _CountingFormulation(_Formulation):
+        def __init__(self) -> None:
+            self.solves = 0
+
+        def solve(self) -> np.ndarray:
+            self.solves += 1
+            return super().solve()
+
+    formulation = _CountingFormulation()
+    outcome = run_fit(
+        replace(
+            _ctx(),
+            theta_init=np.array([theta_init]),
+            warm_relaxation=warm_relaxation,
+        ),
+        _Oracle(),
+        formulation,
+        LoopConfig(max_iterations=5),
+    )
+
+    assert thetas == priced
+    # solve() still runs every round, so formulation state keeps pace.
+    assert formulation.solves == len(priced)
+    assert outcome.diagnostics.converged
+    assert outcome.diagnostics.iterations == len(priced)
+
+
 def test_loop_config_rejects_non_integer_and_contradictory_bounds() -> None:
     for kwargs, exc_type, message in (
         ({"max_iterations": True}, TypeError, "max_iterations"),
@@ -272,12 +324,14 @@ def test_driver_master_calls_only_on_owner_rank(monkeypatch) -> None:
     )
     final_weight = expected_weights[-1]
 
-    # The driver anchors the penalty at the LP-solved theta when penalty_ref
-    # is "dynamic" and at theta_init when "static". Hand-build both expected
-    # anchor schedules from the fixture scalars: the static run must install
-    # (THETA_INIT,)*2, the dynamic run (THETA_SOLVE,)*2, the non-owner nothing.
+    # The driver anchors the penalty at the priced theta when penalty_ref is
+    # "dynamic" and at theta_init when "static". The first round prices the
+    # warm start itself, later rounds the LP-solved theta. Hand-build both
+    # expected anchor schedules from the fixture scalars: the static run must
+    # install (THETA_INIT,)*2, the dynamic run THETA_INIT then THETA_SOLVE,
+    # the non-owner nothing.
     static_ref_owner = tuple((THETA_INIT,) for _ in range(2))
-    dynamic_ref_owner = tuple((THETA_SOLVE,) for _ in range(2))
+    dynamic_ref_owner = ((THETA_INIT,), (THETA_SOLVE,))
 
     # Violation stays 1.0, so all three iterations run. Rank 0 (non-owner):
     # no master calls, objective None on every row, active_cuts is the running

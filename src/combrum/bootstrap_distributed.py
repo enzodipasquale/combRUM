@@ -44,6 +44,7 @@ from combrum.engine.distributed_context import (
     DistributedObservedPrep,
     build_distributed_fit_context,
     prepare_distributed_observed,
+    warm_relaxation_basis,
 )
 from combrum.formulations import NSlack
 from combrum.interface_resolution import (
@@ -515,6 +516,7 @@ def _run_replica_wave(
     tolerance: float,
     max_iterations: int,
     min_iterations: int = 0,
+    seed: np.ndarray | None = None,
     iteration_callback: Callable[[int, Oracle], int | None] | None = None,
     gap_tally: GapTally | None = None,
     dual_store_dir: Path | str | None = None,
@@ -613,6 +615,9 @@ def _run_replica_wave(
             )
             iterations += 1
             round_t0 = perf_counter() if log_details else None
+            # As in the serial driver, a seeded first round cannot certify
+            # convergence.
+            seeded = it == 0 and seed is not None
 
             live_slot_ids = tuple(int(slot) for slot in live_slots)
 
@@ -632,6 +637,8 @@ def _run_replica_wave(
                     for pos, slot in enumerate(slot_ids):
                         replica = replicas[slot]
                         theta = replica.formulation.solve()
+                        if seeded:
+                            theta = np.clip(seed, *parameters.bounds())
                         demands: Mapping[int, Demand] = price_demands(
                             replica.price_resolution,
                             theta,
@@ -747,7 +754,11 @@ def _run_replica_wave(
                 block_retired_slots: list[int] = []
                 for slot in block_slot_ids:
                     violation = float(block_outcomes[slot].violation)
-                    if violation <= tolerance and iterations >= convergence_floor:
+                    if (
+                        violation <= tolerance
+                        and iterations >= convergence_floor
+                        and not seeded
+                    ):
                         converged[slot] = True
                         live[slot] = False
                         retired_slots.append(slot)
@@ -974,6 +985,7 @@ def _build_distributed_replica(
     theta_init: np.ndarray | None,
     warm_cuts: Sequence[CutRow] | None,
     base_seed: int,
+    warm_basis: object | None = None,
     setup_collective: bool = True,
 ) -> _Replica:
     formulation = model.formulation(model.features)
@@ -995,6 +1007,7 @@ def _build_distributed_replica(
         tolerance=tolerance,
         theta_init=theta_init,
         warm_cuts=warm_cuts,
+        warm_basis=warm_basis,
         cut_policy=cut_policy,
         result_publication=result_publication,
         guard_master=setup_collective,
@@ -1113,8 +1126,11 @@ def bootstrap_distributed(
     does not collect dense per-replication slack arrays. Public controls
     (including ``max_live_reps``, ``master_params``, ``cut_policy``, and
     warm-start inputs) must be rank-uniform. ``warm_start`` may be any object
-    with a finite ``theta_hat`` vector; ``warm_cuts`` must be a rank-identical
-    sequence of :class:`combrum.CutRow`. When ``dual_store_dir`` is provided,
+    with a finite ``theta_hat`` vector, which each replication prices first
+    when no ``warm_cuts`` are given; ``warm_cuts`` must be a rank-identical
+    sequence of :class:`combrum.CutRow`, reinstalled onto every replication's
+    master, which then starts from the unweighted warm relaxation's optimal
+    basis. When ``dual_store_dir`` is provided,
     rank 0 writes one dual file per replication and ``BootstrapResult.duals``
     remains ``None``.
 
@@ -1258,6 +1274,20 @@ def bootstrap_distributed(
             run_duals_stored = 0
             run_dual_store_dir: Path | None = None
             gap_tally = GapTally()
+            warm_basis = (
+                None
+                if warm_cuts is None
+                else warm_relaxation_basis(
+                    prep,
+                    model=model,
+                    warm_cuts=warm_cuts,
+                    transport=transport,
+                    owners=owners,
+                    master_backend=resolved_master_backend,
+                    master_params=master_params,
+                    tolerance=tolerance,
+                )
+            )
             wave_limit = min(live_cap, n_bootstrap)
             for start in range(0, len(rep_ids), wave_limit):
                 wave_rep_ids = rep_ids[start : start + wave_limit]
@@ -1294,6 +1324,7 @@ def bootstrap_distributed(
                                 theta_init=theta_init,
                                 warm_cuts=warm_cuts,
                                 base_seed=base_seed,
+                                warm_basis=warm_basis,
                                 setup_collective=False,
                             )
                             replicas.append(replica)
@@ -1342,6 +1373,7 @@ def bootstrap_distributed(
                         tolerance=tolerance,
                         max_iterations=max_iterations,
                         min_iterations=min_iterations,
+                        seed=theta_init if warm_cuts is None else None,
                         iteration_callback=iteration_callback,
                         gap_tally=gap_tally,
                         dual_store_dir=root_dual_store_dir,

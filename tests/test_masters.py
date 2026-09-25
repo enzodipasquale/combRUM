@@ -593,6 +593,26 @@ def test_set_rhs_invalidates_solution_until_resolve(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
+@pytest.mark.parametrize("u_lower_bound", (0.0, None))
+def test_set_rhs_accepts_an_empty_update(
+    backend: str, u_lower_bound: float | None
+) -> None:
+    with make_master(
+        K,
+        LP_BOUNDS,
+        LP_C_THETA,
+        LP_U_COEF.__getitem__,
+        backend=backend,
+        params={"u_lower_bound": u_lower_bound},
+    ) as master:
+        master.add_cuts(LP_ROWS)
+        master.solve()
+        master.set_rhs({})
+        master.solve()
+        np.testing.assert_allclose(master.theta(), LP_THETA, rtol=0, atol=1e-9)
+
+
+@pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_rhs_unknown_key_raises_key_error(backend: str) -> None:
     with lp_master(backend) as master:
         master.add_cuts(LP_ROWS)
@@ -944,6 +964,8 @@ def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
         status, value = master._h.getOptionValue("solver")
         assert status == master._highspy.HighsStatus.kOk
         assert value == "simplex"
+        # "choose": primal simplex from a reused basis, dual after new cuts.
+        assert master._h.getOptionValue("simplex_strategy")[1] == 0
 
     with make_master(
         K,
@@ -958,6 +980,41 @@ def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
         status, value = master._h.getOptionValue("solver")
         assert status == master._highspy.HighsStatus.kOk
         assert value == "choose"
+
+
+def _simplex_iterations(master: MasterBackend) -> int:
+    if isinstance(master, HighsMaster):
+        return int(master._h.getInfo().simplex_iteration_count)
+    return int(master._model.IterCount)
+
+
+@pytest.mark.parametrize("backend", REAL_BACKENDS)
+def test_basis_warm_starts_a_reweighted_reinstall(backend: str) -> None:
+    reweighted = {1: 0.5, 2: 3.0}
+    with lp_master(backend) as source:
+        source.add_cuts(LP_ROWS)
+        source.solve()
+        snapshot = source.basis()
+    assert snapshot is not None
+
+    # Restarted from its own optimal basis, the same relaxation needs no pivot.
+    with lp_master(backend) as restart:
+        restart.reinstall(LP_ROWS)
+        restart.set_basis(snapshot)
+        restart.solve()
+        assert _simplex_iterations(restart) == 0
+
+    results = []
+    for basis in (None, snapshot):
+        with make_master(
+            K, LP_BOUNDS, LP_C_THETA, reweighted.__getitem__, backend=backend
+        ) as master:
+            master.reinstall(LP_ROWS)
+            if basis is not None:
+                master.set_basis(basis)
+            master.solve()
+            results.append(master.objective())
+    assert results[1] == pytest.approx(results[0], abs=1e-9)
 
 
 @pytest.mark.skipif(

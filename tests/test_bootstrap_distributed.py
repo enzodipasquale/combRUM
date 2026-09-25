@@ -1070,6 +1070,7 @@ def test_bootstrap_replicas_receive_warm_start_and_isolated_policy(monkeypatch) 
     warm_cuts = ()
     warm_start = SimpleNamespace(theta_hat=np.array([0.25], dtype=np.float64))
     policy = _Policy()
+    basis = object()
 
     def fake_build(rep_id, **kwargs):
         records.append(
@@ -1078,12 +1079,14 @@ def test_bootstrap_replicas_receive_warm_start_and_isolated_policy(monkeypatch) 
                 "theta_writeable": kwargs["theta_init"].flags.writeable,
                 "theta_init": np.asarray(kwargs["theta_init"]).copy(),
                 "warm_cuts": kwargs["warm_cuts"],
+                "warm_basis": kwargs["warm_basis"],
                 "policy": kwargs["cut_policy"],
             }
         )
         return _fake_replica(rep_id, kwargs["prep"])
 
     bd = importlib.import_module("combrum.bootstrap_distributed")
+    monkeypatch.setattr(bd, "warm_relaxation_basis", lambda *a, **k: basis)
     monkeypatch.setattr(bd, "_build_distributed_replica", fake_build)
     monkeypatch.setattr(bd, "_nslack", lambda replica: replica.formulation)
     monkeypatch.setattr(bd, "_run_replica_wave", _replica_wave_result)
@@ -1102,6 +1105,8 @@ def test_bootstrap_replicas_receive_warm_start_and_isolated_policy(monkeypatch) 
     )
 
     assert [r["rep_id"] for r in records] == [0, 1]
+    # Every replica starts from the one unweighted warm-relaxation basis.
+    assert [r["warm_basis"] for r in records] == [basis, basis]
     for record in records:
         np.testing.assert_array_equal(record["theta_init"], warm_start.theta_hat)
         assert record["theta_writeable"] is False
@@ -1466,6 +1471,46 @@ def test_replica_wave_iteration_callback_is_once_per_wave_iteration() -> None:
     )
 
     assert calls == [0, 1]
+    assert result.converged.tolist() == [True, True]
+    assert result.iterations == 2
+
+
+def test_replica_wave_prices_seed_first_and_never_retires_on_it() -> None:
+    priced: list[float] = []
+
+    class _ThetaOracle(_CallbackOracle):
+        def price(self, theta, agent_id):  # type: ignore[no-untyped-def]
+            priced.append(float(theta[0]))
+            return super().price(theta, agent_id)
+
+    oracle = _ThetaOracle()
+    resolution = _price_resolution(oracle, SerialTransport())
+    replicas = [
+        _Replica(
+            rep_id=rep_id,
+            formulation=_ConvergingNslackFormulation((0.0,)),
+            price_resolution=resolution,
+            scheduled_local_ids=np.array([0], dtype=np.int64),
+        )
+        for rep_id in range(2)
+    ]
+
+    result = _run_replica_wave(
+        replicas,
+        oracle=oracle,
+        transport=SerialTransport(),
+        owners=np.array([0, 0], dtype=np.int64),
+        K=1,
+        parameters=Parameters({"theta": (-1.0, 1.0, 1)}),
+        tolerance=1e-9,
+        max_iterations=5,
+        seed=np.array([1.5]),
+    )
+
+    # Zero violation at the seed (clipped into the [-1, 1] box) certifies
+    # nothing, so every replica prices it, survives that round, and retires
+    # on its own point next.
+    assert priced == [1.0, 1.0, 0.0, 0.0]
     assert result.converged.tolist() == [True, True]
     assert result.iterations == 2
 

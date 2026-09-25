@@ -99,6 +99,7 @@ class FitContext:
     tolerance: float
     slack_coef: Callable[[int], float] | None = None
     theta_init: np.ndarray | None = None
+    warm_relaxation: bool = False
     master_backend: MasterBackend | None = None
     cut_policy: CutPolicy | None = None
     schedule: RepricingSchedule | None = None
