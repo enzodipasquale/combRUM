@@ -190,12 +190,14 @@ class MasterBackend(ABC):
         return len(rows) - len(kept)
 
     def basis(self) -> object | None:
-        """Opaque snapshot of the last solve's basis, or ``None`` without one.
+        """Opaque snapshot of the last solve's basis.
 
-        The snapshot fits any master holding the same rows and columns, such
-        as a :meth:`reinstall` of the same cuts. Constraints alone decide
-        primal feasibility, so the basis stays feasible under any objective:
-        replications that reweight one warm relaxation can all start from it.
+        Like the other accessors, it reports the last solve; ``None`` means
+        the backend exposes no basis for it. The snapshot fits any master
+        holding the same rows and columns, such as a :meth:`reinstall` of the
+        same cuts. Constraints alone decide primal feasibility, so the basis
+        stays feasible under any objective: replications that reweight one
+        warm relaxation can all start from it.
         """
         return None
 

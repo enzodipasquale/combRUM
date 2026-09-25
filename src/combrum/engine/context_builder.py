@@ -111,8 +111,8 @@ def build_fit_context(
             (``theta_coef[a] = agent_weights[a] = weights[a % N]``) and applied
             to both ``c_theta`` and the per-agent epigraph/aggregate coefficients.
         warm_start: ``FitResult`` whose ``theta_hat`` becomes the proximal
-            anchor ``theta_init`` and, on a master without warm cuts, the
-            first pricing point; ``None`` for a cold start.
+            anchor ``theta_init`` and, on a fresh master without warm cuts,
+            the first pricing point; ``None`` for a cold start.
         warm_cuts: Cut rows reinstalled onto the fresh master via
             :meth:`MasterBackend.reinstall` before the formulation's setup solve,
             or ``None`` for a fresh master. ``reinstall`` replaces the installed

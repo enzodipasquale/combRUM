@@ -447,6 +447,17 @@ def test_set_rhs_default_raises_for_non_overriding_subclass() -> None:
         master.set_rhs({(1, b"a"): 2.0})
 
 
+def test_basis_defaults_to_none_and_set_basis_raises() -> None:
+    # A backend without a basis reports None, so callers never hand one back;
+    # installing a basis on it fails loudly instead of silently cold-starting.
+    master = FakeMaster(K, [-10.0] * K, [10.0] * K)
+    master.add_cuts([make_row(1, b"a", [1.0, 0.0], epsilon=1.0)])
+    master.solve()
+    assert master.basis() is None
+    with pytest.raises(NotImplementedError, match="set_basis"):
+        master.set_basis(object())
+
+
 def test_bound_duals_empty_when_interior(build: Builder) -> None:
     master = build(c_theta=INTERIOR_C, u_coef=_interior_u)
     master.add_cuts(list(INTERIOR_ROWS))

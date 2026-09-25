@@ -129,7 +129,10 @@ class Formulation(ABC):
     The published estimate comes from :meth:`result`, never the last
     :meth:`solve` output. Convergence is
     ``Evaluation.violation <= tolerance``. ``theta_init`` on
-    :class:`~combrum.context.FitContext` is the only seed affordance.
+    :class:`~combrum.context.FitContext` is the only seed affordance: on a
+    master without warm cuts, the driver prices it (clipped to the box) in
+    place of the first :meth:`solve` output, and that round never counts as
+    converged.
     """
 
     @abstractmethod

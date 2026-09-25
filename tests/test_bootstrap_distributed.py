@@ -1504,12 +1504,13 @@ def test_replica_wave_prices_seed_first_and_never_retires_on_it() -> None:
         parameters=Parameters({"theta": (-1.0, 1.0, 1)}),
         tolerance=1e-9,
         max_iterations=5,
-        seed=np.array([0.5]),
+        seed=np.array([1.5]),
     )
 
-    # Zero violation at the seed certifies nothing, so every replica prices
-    # the seed, survives that round, and retires on its own point next.
-    assert priced == [0.5, 0.5, 0.0, 0.0]
+    # Zero violation at the seed (clipped into the [-1, 1] box) certifies
+    # nothing, so every replica prices it, survives that round, and retires
+    # on its own point next.
+    assert priced == [1.0, 1.0, 0.0, 0.0]
     assert result.converged.tolist() == [True, True]
     assert result.iterations == 2
 

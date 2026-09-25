@@ -593,6 +593,26 @@ def test_set_rhs_invalidates_solution_until_resolve(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
+@pytest.mark.parametrize("u_lower_bound", (0.0, None))
+def test_set_rhs_accepts_an_empty_update(
+    backend: str, u_lower_bound: float | None
+) -> None:
+    with make_master(
+        K,
+        LP_BOUNDS,
+        LP_C_THETA,
+        LP_U_COEF.__getitem__,
+        backend=backend,
+        params={"u_lower_bound": u_lower_bound},
+    ) as master:
+        master.add_cuts(LP_ROWS)
+        master.solve()
+        master.set_rhs({})
+        master.solve()
+        np.testing.assert_allclose(master.theta(), LP_THETA, rtol=0, atol=1e-9)
+
+
+@pytest.mark.parametrize("backend", REAL_BACKENDS)
 def test_set_rhs_unknown_key_raises_key_error(backend: str) -> None:
     with lp_master(backend) as master:
         master.add_cuts(LP_ROWS)
@@ -944,6 +964,8 @@ def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
         status, value = master._h.getOptionValue("solver")
         assert status == master._highspy.HighsStatus.kOk
         assert value == "simplex"
+        # "choose": primal simplex from a reused basis, dual after new cuts.
+        assert master._h.getOptionValue("simplex_strategy")[1] == 0
 
     with make_master(
         K,
@@ -960,44 +982,10 @@ def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
         assert value == "choose"
 
 
-def _spread_rows(n: int) -> list[CutRow]:
-    rng = np.random.default_rng(3)
-    return [
-        make_row(agent_id, b"k", tuple(rng.normal(size=K)), float(rng.normal()))
-        for agent_id in range(n)
-    ]
-
-
-def _highs_master(**params: object) -> HighsMaster:
-    master = make_master(
-        K,
-        LP_BOUNDS,
-        LP_C_THETA,
-        lambda _agent_id: 1.0,
-        backend="highs",
-        params=params or None,
-    )
-    assert isinstance(master, HighsMaster)
-    return master
-
-
-@needs_highs
-def test_highs_solves_large_cut_batches_by_interior_point() -> None:
-    batch = highs_backend._IPM_NEW_CUTS_PER_NONZERO * (K + 1)
-    rows = _spread_rows(batch + 1)
-    with _highs_master() as master, _highs_master(solver="simplex") as pinned:
-        for each in (master, pinned):
-            each.add_cuts(rows[:batch])
-            each.solve()
-        assert master._h.getOptionValue("solver")[1] == "ipm"
-        assert pinned._h.getOptionValue("solver")[1] == "simplex"
-        assert master.objective() == pytest.approx(pinned.objective(), abs=1e-9)
-        # Crossover leaves a basis for the next, small batch to re-solve warm.
-        assert master.basis().valid
-
-        master.add_cuts(rows[batch:])
-        master.solve()
-        assert master._h.getOptionValue("solver")[1] == "simplex"
+def _simplex_iterations(master: MasterBackend) -> int:
+    if isinstance(master, HighsMaster):
+        return int(master._h.getInfo().simplex_iteration_count)
+    return int(master._model.IterCount)
 
 
 @pytest.mark.parametrize("backend", REAL_BACKENDS)
@@ -1008,6 +996,13 @@ def test_basis_warm_starts_a_reweighted_reinstall(backend: str) -> None:
         source.solve()
         snapshot = source.basis()
     assert snapshot is not None
+
+    # Restarted from its own optimal basis, the same relaxation needs no pivot.
+    with lp_master(backend) as restart:
+        restart.reinstall(LP_ROWS)
+        restart.set_basis(snapshot)
+        restart.solve()
+        assert _simplex_iterations(restart) == 0
 
     results = []
     for basis in (None, snapshot):

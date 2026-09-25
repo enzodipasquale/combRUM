@@ -329,30 +329,34 @@ def warm_relaxation_basis(
     model: Model,
     warm_cuts: Sequence[CutRow],
     transport: Transport,
+    owners: np.ndarray,
     master_backend: str,
     master_params: dict[str, object] | None,
     tolerance: float,
 ) -> object | None:
-    """Optimal basis of the unweighted warm relaxation, solved on every rank.
+    """Optimal basis of the unweighted warm relaxation on each owner rank.
 
-    Every rank derives the same basis, so replications started from it keep
-    solve paths that do not depend on their placement.
+    Every rank in ``owners`` derives the same basis, so replications started
+    from it keep solve paths that do not depend on their placement. Other
+    ranks host no master and get ``None``.
     """
     c_theta = distributed_c_theta(prep, transport=transport)
+    basis = None
     with transport.collective():
-        built = build_distributed_fit_context(
-            prep,
-            model=model,
-            c_theta=c_theta,
-            slack_coef=lambda agent_id: 1.0,
-            transport=transport,
-            owner_rank=transport.rank,
-            master_backend=master_backend,
-            master_params=master_params,
-            tolerance=tolerance,
-            warm_cuts=warm_cuts,
-            result_publication=ResultPublication.SUMMARY,
-            guard_master=False,
-        )
-        basis = optimal_basis(built.ctx.master_backend)
+        if transport.rank in owners.tolist():
+            built = build_distributed_fit_context(
+                prep,
+                model=model,
+                c_theta=c_theta,
+                slack_coef=lambda agent_id: 1.0,
+                transport=transport,
+                owner_rank=transport.rank,
+                master_backend=master_backend,
+                master_params=master_params,
+                tolerance=tolerance,
+                warm_cuts=warm_cuts,
+                result_publication=ResultPublication.SUMMARY,
+                guard_master=False,
+            )
+            basis = optimal_basis(built.ctx.master_backend)
     return basis

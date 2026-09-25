@@ -20,12 +20,6 @@ from combrum.transport.base import CutRow
 #: simplex when a reused basis meets a new objective.
 _DEFAULT_OPTIONS = {"solver": "simplex", "simplex_strategy": 0}
 
-#: A warm simplex re-solve costs about (new cuts) x (model rows); interior
-#: point with crossover costs about the model's nonzeros, (model rows) x
-#: (K + 1). Interior point wins past this many new cuts per row nonzero,
-#: measured on NSlack masters with K from 4 to 21.
-_IPM_NEW_CUTS_PER_NONZERO = 150
-
 
 def available() -> bool:
     try:
@@ -55,10 +49,10 @@ class _Solution:
 class HighsMaster(MasterBackend):
     """One replication's relaxation hosted on a per-instance HiGHS model.
 
-    Unless ``params`` pins ``solver``, each solve chooses its algorithm:
-    simplex warm-started from the last basis, or interior point with
-    crossover once so many cuts arrived since that basis that repairing it
-    would cost more than solving afresh.
+    Solves run simplex warm-started from the last basis. Large cold NSlack
+    fits, whose early rounds each add many thousands of cuts, can run several
+    times faster with ``params={"solver": "ipm"}`` (interior point with
+    crossover); warm re-solves that move the optimum little favor simplex.
     """
 
     def __init__(
@@ -80,7 +74,6 @@ class HighsMaster(MasterBackend):
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
-        self._choose_solver = "solver" not in self._params
         import highspy
 
         self._highspy = highspy
@@ -124,7 +117,6 @@ class HighsMaster(MasterBackend):
         self._u_upper: dict[int, float] = {}
         self._u_read: tuple[list[int], np.ndarray] | None = None
         self._solution: _Solution | None = None
-        self._unsolved_cuts = 0
         if self._n_agents is not None:
             self._add_u_columns(np.arange(self._n_agents, dtype=np.int64))
 
@@ -186,7 +178,6 @@ class HighsMaster(MasterBackend):
         self._row_keys.extend(keys)
         self._row_index.update(zip(keys, range(first, first + n)))
         self._installed.update(zip(keys, rows))
-        self._unsolved_cuts += n
         self._raise_u_uppers(agent_ids, phi, lower)
 
     def _validated_rows(
@@ -338,6 +329,8 @@ class HighsMaster(MasterBackend):
         for key in updates:
             if key not in self._row_index:
                 raise KeyError(key)
+        if not updates:
+            return
         self._invalidate_solution()
         keys = list(updates)
         indices = np.fromiter(
@@ -365,9 +358,6 @@ class HighsMaster(MasterBackend):
 
 
     def solve(self) -> None:
-        if self._choose_solver:
-            ipm = self._unsolved_cuts >= _IPM_NEW_CUTS_PER_NONZERO * (self._K + 1)
-            self._h.setOptionValue("solver", "ipm" if ipm else "simplex")
         run_status = self._h.run()
         model_status = self._h.getModelStatus()
         optimal = self._highspy.HighsModelStatus.kOptimal
@@ -377,7 +367,6 @@ class HighsMaster(MasterBackend):
                 f" {self._h.modelStatusToString(model_status)}"
                 f" (run status {run_status.name}); expected Optimal"
             )
-        self._unsolved_cuts = 0
         col_values = np.asarray(self._h.allVariableValues(), dtype=np.float64)
         theta = np.array(col_values[: self._K], dtype=np.float64)
         theta.setflags(write=False)
@@ -395,7 +384,6 @@ class HighsMaster(MasterBackend):
     def set_basis(self, basis: object) -> None:
         self._check_status(self._h.setBasis(basis), "setBasis")
         self._invalidate_solution()
-        self._unsolved_cuts = 0
 
     def _u_values_now(self, col_values: np.ndarray) -> dict[int, float]:
         if self._u_read is None:

@@ -636,9 +636,9 @@ def _run_replica_wave(
                     rows: list[CutRow] = []
                     for pos, slot in enumerate(slot_ids):
                         replica = replicas[slot]
-                        theta = (
-                            np.array(seed) if seeded else replica.formulation.solve()
-                        )
+                        theta = replica.formulation.solve()
+                        if seeded:
+                            theta = np.clip(seed, *parameters.bounds())
                         demands: Mapping[int, Demand] = price_demands(
                             replica.price_resolution,
                             theta,
@@ -1282,6 +1282,7 @@ def bootstrap_distributed(
                     model=model,
                     warm_cuts=warm_cuts,
                     transport=transport,
+                    owners=owners,
                     master_backend=resolved_master_backend,
                     master_params=master_params,
                     tolerance=tolerance,
