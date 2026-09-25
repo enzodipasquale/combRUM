@@ -396,6 +396,67 @@ def test_bootstrap_distributed_matches_serial_with_observation_weights() -> None
 
 
 @needs_highs
+def test_warm_bootstraps_share_one_basis_and_ignore_placement(monkeypatch) -> None:
+    installed: list[object] = []
+    set_basis = highs_backend.HighsMaster.set_basis
+
+    def spy(self, basis):  # type: ignore[no-untyped-def]
+        installed.append(basis)
+        set_basis(self, basis)
+
+    monkeypatch.setattr(highs_backend.HighsMaster, "set_basis", spy)
+    arrays = _arrays()
+    fit = cb.estimate_distributed(
+        _model(arrays),
+        n_observations=_N,
+        n_simulations=_S,
+        transport=cb.SerialTransport(),
+        master_backend="highs",
+        tolerance=TOLERANCE,
+        max_iterations=MAX_ITERATIONS,
+        return_cuts=True,
+    )
+
+    def run(transport):  # type: ignore[no-untyped-def]
+        return cb.bootstrap_distributed(
+            _model(arrays),
+            n_observations=_N,
+            n_simulations=_S,
+            n_bootstrap=_B,
+            base_seed=_BOOT_SEED,
+            transport=transport,
+            master_backend="highs",
+            tolerance=TOLERANCE,
+            max_iterations=MAX_ITERATIONS,
+            warm_start=fit,
+            warm_cuts=fit.cuts,
+        ).thetas
+
+    # Every replication starts from the same warm basis on whichever rank
+    # owns it, so its solve path, and its estimate, ignore the layout.
+    serial = run(cb.SerialTransport())
+    assert len(installed) == _B
+    for size in (2, 3):
+        for thetas in LocalCluster(size).run(run):
+            assert thetas.tobytes() == serial.tobytes()
+
+    installed.clear()
+    dense = cb.bootstrap(
+        _model(arrays),
+        _data(arrays),
+        n_bootstrap=_B,
+        weight_source=_ObservationWeightDraws(_N, _BOOT_SEED),
+        master_backend="highs",
+        tolerance=TOLERANCE,
+        max_iterations=MAX_ITERATIONS,
+        warm_start=fit,
+        warm_cuts=fit.cuts,
+    )
+    assert dense.converged.all()
+    assert len(installed) == _B
+
+
+@needs_highs
 def test_split_axis_fit_routes_agent_values_without_dense_scatter() -> None:
     arrays = _arrays()
     serial = cb.estimate(

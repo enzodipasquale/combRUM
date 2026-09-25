@@ -17,6 +17,7 @@ from combrum.engine.agreement import agree_public_int, require_public_object_agr
 from combrum.engine.context_builder import (
     BuiltContext,
     _master_params_for_backend,
+    optimal_basis,
     prepare_warm_cuts,
 )
 from combrum.formulations import NSlack
@@ -243,6 +244,7 @@ def build_distributed_fit_context(
     tolerance: float,
     theta_init: np.ndarray | None = None,
     warm_cuts: Sequence[CutRow] | None = None,
+    warm_basis: object | None = None,
     cut_policy: Any | None = None,
     result_publication: ResultPublication | str | Iterable[str],
     guard_master: bool = True,
@@ -279,6 +281,8 @@ def build_distributed_fit_context(
         try:
             if warm_cuts is not None:
                 master_obj.reinstall(prepare_warm_cuts(formulation, warm_cuts))
+                if warm_basis is not None:
+                    master_obj.set_basis(warm_basis)
             return master_obj
         except Exception:
             master_obj.close()
@@ -304,6 +308,7 @@ def build_distributed_fit_context(
             transport=transport,
             tolerance=tolerance,
             theta_init=theta_init,
+            warm_relaxation=warm_cuts is not None,
             master_backend=master_obj,
             cut_policy=cut_policy,
             master_params=master_params or {},
@@ -316,3 +321,42 @@ def build_distributed_fit_context(
             master_obj.close()
         raise
     return BuiltContext(ctx=ctx, c_theta=c, empirical_moment=prep.empirical_moment)
+
+
+def warm_relaxation_basis(
+    prep: DistributedObservedPrep,
+    *,
+    model: Model,
+    warm_cuts: Sequence[CutRow],
+    transport: Transport,
+    owners: np.ndarray,
+    master_backend: str,
+    master_params: dict[str, object] | None,
+    tolerance: float,
+) -> object | None:
+    """Optimal basis of the unweighted warm relaxation on each owner rank.
+
+    Every rank in ``owners`` derives the same basis, so replications started
+    from it keep solve paths that do not depend on their placement. Other
+    ranks host no master and get ``None``.
+    """
+    c_theta = distributed_c_theta(prep, transport=transport)
+    basis = None
+    with transport.collective():
+        if transport.rank in owners.tolist():
+            built = build_distributed_fit_context(
+                prep,
+                model=model,
+                c_theta=c_theta,
+                slack_coef=lambda agent_id: 1.0,
+                transport=transport,
+                owner_rank=transport.rank,
+                master_backend=master_backend,
+                master_params=master_params,
+                tolerance=tolerance,
+                warm_cuts=warm_cuts,
+                result_publication=ResultPublication.SUMMARY,
+                guard_master=False,
+            )
+            basis = optimal_basis(built.ctx.master_backend)
+    return basis

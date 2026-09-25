@@ -11,7 +11,12 @@ import numpy as np
 from combrum.context import FitContext, ResultPublication
 from combrum.engine.observed import ObservedObjectiveCache, observed_objective
 from combrum.formulations import OneSlack
-from combrum.masters import make_master, master_environment, resolve_master_backend
+from combrum.masters import (
+    MasterBackend,
+    make_master,
+    master_environment,
+    resolve_master_backend,
+)
 from combrum.parameters import Parameters
 from combrum.policies import CutPolicy
 from combrum.result import FitResult
@@ -21,6 +26,7 @@ __all__ = [
     "BuiltContext",
     "build_fit_context",
     "master_environment",
+    "optimal_basis",
     "prepare_warm_cuts",
     "resolve_master_backend",
 ]
@@ -43,6 +49,20 @@ def prepare_warm_cuts(formulation: Any, rows: Sequence[CutRow]) -> tuple[CutRow,
     if not callable(prepare):
         return cut_rows
     return tuple(prepare(cut_rows))
+
+
+def optimal_basis(master: MasterBackend) -> object | None:
+    """Solve a throwaway master once, close it, and return its optimal basis.
+
+    Bootstrap replications reweight only the objective over the same warm
+    cuts, so the unweighted warm relaxation's optimal basis is primal
+    feasible for every one of them.
+    """
+    try:
+        master.solve()
+        return master.basis()
+    finally:
+        master.close()
 
 
 def _master_params_for_backend(
@@ -74,6 +94,7 @@ def build_fit_context(
     weights: np.ndarray | None = None,
     warm_start: FitResult | None = None,
     warm_cuts: Sequence[CutRow] | None = None,
+    warm_basis: object | None = None,
     cut_policy: CutPolicy | None = None,
     master: Any = None,
     master_env: object | None = None,
@@ -90,11 +111,14 @@ def build_fit_context(
             (``theta_coef[a] = agent_weights[a] = weights[a % N]``) and applied
             to both ``c_theta`` and the per-agent epigraph/aggregate coefficients.
         warm_start: ``FitResult`` whose ``theta_hat`` becomes the proximal
-            anchor ``theta_init``, or ``None`` for a cold start.
+            anchor ``theta_init`` and, on a fresh master without warm cuts,
+            the first pricing point; ``None`` for a cold start.
         warm_cuts: Cut rows reinstalled onto the fresh master via
             :meth:`MasterBackend.reinstall` before the formulation's setup solve,
             or ``None`` for a fresh master. ``reinstall`` replaces the installed
             set, so setup rebuilds bookkeeping from the warm relaxation.
+        warm_basis: :meth:`MasterBackend.basis` snapshot of another master
+            holding the same ``warm_cuts``; the setup solve starts from it.
         master: Live ``MasterBackend`` to reuse on rank 0 (skips ``make_master``
             and ``reinstall``), or ``None`` to build fresh. ``c_theta`` /
             ``empirical_moment`` are recomputed either way.
@@ -179,6 +203,8 @@ def build_fit_context(
         )
         if warm_cuts is not None:
             master_obj.reinstall(prepare_warm_cuts(formulation, warm_cuts))
+            if warm_basis is not None:
+                master_obj.set_basis(warm_basis)
         return master_obj
 
     master_obj = None
@@ -199,6 +225,7 @@ def build_fit_context(
         transport=transport,
         tolerance=tolerance,
         theta_init=theta_init,
+        warm_relaxation=master is not None or warm_cuts is not None,
         master_backend=master_obj,
         schedule=schedule,
         cut_policy=cut_policy,
