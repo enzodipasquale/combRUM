@@ -86,7 +86,11 @@ def _coerce_agent_vector(ctx: FitContext, name: str) -> None:
 
 @dataclass(frozen=True)
 class FitContext:
-    """Geometry and interfaces handed from the driver to a formulation for one fit."""
+    """Geometry and interfaces handed from the driver to a formulation for one fit.
+
+    ``master_scale`` is the unit of the master's objective: the master solves
+    the caller's criterion divided by it.
+    """
 
     K: int
     N: int
@@ -100,6 +104,7 @@ class FitContext:
     slack_coef: Callable[[int], float] | None = None
     theta_init: np.ndarray | None = None
     warm_relaxation: bool = False
+    master_scale: float = 1.0
     master_backend: MasterBackend | None = None
     cut_policy: CutPolicy | None = None
     schedule: RepricingSchedule | None = None
@@ -127,6 +132,10 @@ class FitContext:
             raise ValueError(f"S (simulations) must be >= 1, got {self.S}")
         if not self.tolerance > 0:
             raise ValueError(f"tolerance must be positive, got {self.tolerance}")
+        if not (np.isfinite(self.master_scale) and self.master_scale > 0):
+            raise ValueError(
+                f"master_scale must be finite and positive, got {self.master_scale}"
+            )
 
         bounds = self.theta_bounds
         if not (isinstance(bounds, tuple) and len(bounds) == 2):

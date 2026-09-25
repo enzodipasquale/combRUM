@@ -522,12 +522,12 @@ def test_oneslack_converges_with_optionals_none(backend: str) -> None:
         _oneslack_criterion_at(toy, res.theta_hat), abs=1e-7
     )
     # OneSlack never retires an aggregate row, so the master's n_active_cuts
-    # must equal the driver-side admitted total (summed in _walk). The
-    # converging iteration ships no cut on this monotone family, so admitted
-    # == iterations - 1. The backends disagree on the raw count but both
-    # relations hold on each.
+    # must equal the driver-side admitted total (summed in _walk). Neither
+    # the converging round nor a stabilized round whose cut misses the
+    # master's solution ships a cut. The backends disagree on the raw count
+    # but both relations hold on each.
     assert res.n_active_cuts == outcome.cuts_admitted
-    assert outcome.cuts_admitted == outcome.iterations - 1
+    assert outcome.cuts_admitted <= outcome.iterations - 1
     assert res.n_active_cuts >= 1
     # No per-agent slack, cut set, or dual exists to publish.
     assert res.slack is None
@@ -586,11 +586,13 @@ def test_oneslack_state_reads_master_epigraph_variable() -> None:
     master = _OneSlackUMaster()
     formulation = OneSlack(_zero_features)
     formulation._master = master
+    formulation._scale = 2.0
 
     state = formulation._state(progressed=7)
 
-    assert state.u == 3.25
-    assert state.objective == 12.5
+    # The master works per unit of total weight; the state is in the caller's.
+    assert state.u == 6.5
+    assert state.objective == 25.0
     assert state.n_installed == 1
     assert state.progressed == 7
     assert master.u_reads == 1

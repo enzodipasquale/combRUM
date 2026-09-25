@@ -127,6 +127,11 @@ def build_fit_context(
             masters (one license checkout per run, not per build), or ``None``
             for a master-owned environment.
     """
+    if warm_cuts is not None and isinstance(formulation, OneSlack):
+        raise ValueError(
+            "warm_cuts are not supported for OneSlack: its aggregate cuts are"
+            " weighted sums that hold only under the weights that built them"
+        )
     backend_for_master = resolved_master_backend or master_backend
     K = parameters.K
     observed_bundles = np.asarray(observed_bundles)
@@ -181,24 +186,28 @@ def build_fit_context(
         observed_features=observed_features,
         cache=observed_cache,
     )
+    one_slack = isinstance(formulation, OneSlack)
+    # A fresh OneSlack master works per unit of total weight; the
+    # formulation reads the unit back off the context.
+    master_scale = (
+        OneSlack.master_scale(agent_weights) if one_slack and master is None else 1.0
+    )
 
     def _rank0_master() -> Any:
         if master is not None:
             return master
-        u_coef = (
-            (lambda agent_id: 1.0)
-            if isinstance(formulation, OneSlack)
-            else agent_weights
-        )
         params = _master_params_for_backend(backend_for_master, master_params)
+        u_lower = params.get("u_lower_bound") if params else None
+        if u_lower:
+            params = {**params, "u_lower_bound": u_lower / master_scale}
         master_obj = make_master(
             K,
             parameters.bounds(),
-            c_theta,
-            u_coef,
+            c_theta / master_scale,
+            (lambda agent_id: 1.0) if one_slack else agent_weights,
             backend=backend_for_master,
             params=params,
-            n_agents=None if isinstance(formulation, OneSlack) else n_agents,
+            n_agents=None if one_slack else n_agents,
             env=master_env,
         )
         if warm_cuts is not None:
@@ -226,6 +235,7 @@ def build_fit_context(
         tolerance=tolerance,
         theta_init=theta_init,
         warm_relaxation=master is not None or warm_cuts is not None,
+        master_scale=master_scale,
         master_backend=master_obj,
         schedule=schedule,
         cut_policy=cut_policy,
