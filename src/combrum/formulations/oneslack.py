@@ -88,7 +88,32 @@ class OneSlack(Formulation):
     per-agent duals or slack. Choose :class:`~combrum.formulations.NSlack`
     instead when you need per-agent slack, cut admission/retirement, or cut
     duals.
+
+    Rounds are priced by in-out stabilization: the query is pulled from the
+    master's solution toward the lowest-criterion point priced so far, which
+    damps the cutting-plane zigzag (a third to a half of the pricing rounds
+    of Kelley's method on smooth designs). ``stabilization`` is that pull, in
+    ``[0, 1)``; a subclass setting it to 0 prices the master's solution every
+    round. Only a round priced at the master's solution certifies
+    convergence. A round whose cut misses that solution halves the pull and
+    reprices the solution next, so polyhedral designs where the zigzag is
+    short fall back toward Kelley's method.
     """
+
+    stabilization: float = 0.8
+
+    @staticmethod
+    def master_scale(agent_weights: np.ndarray) -> float:
+        """Total agent weight, the unit the master should work in.
+
+        The observed objective and every aggregate row sum over all agents,
+        so their coefficients grow with the agent count and the weights while
+        solver tolerances stay absolute. A builder that divides the master's
+        objective by this sets ``FitContext.master_scale`` to it; the
+        formulation then reports everything in the caller's units.
+        """
+        total = float(np.sum(agent_weights))
+        return total if total > 0.0 else 1.0
 
     def __init__(self, features: FeatureMap | Callable[..., Any]) -> None:
         self._features_arg = features
@@ -111,6 +136,16 @@ class OneSlack(Formulation):
         self._iteration = 0
         self._pending_penalty: tuple[np.ndarray, float] | None = None
         self._last_penalty_weight = 0.0
+        if not 0.0 <= self.stabilization < 1.0:
+            raise ValueError(
+                f"stabilization must lie in [0, 1), got {self.stabilization!r}"
+            )
+        self._alpha = float(self.stabilization)
+        self._scale = ctx.master_scale
+        self._center: tuple[np.ndarray, float, float] | None = None
+        self._c_query: float | None = None
+        self._stabilized = False
+        self._reprice_master = False
         self._features_res: Resolution = resolve_features(self._features_arg)
         self._aggregate_wants_k = (
             _aggregate_wants_k(self._features_res.active)
@@ -131,7 +166,28 @@ class OneSlack(Formulation):
         self._adopt(owner_packet)
 
     def solve(self) -> np.ndarray:
-        return self._theta.copy()
+        # Without a penalty term the master's objective is c_theta . theta + u,
+        # so c_theta . theta is objective - u at its solution, and linear
+        # along the path to the center.
+        c_master = (
+            self._objective - self._u if self._last_penalty_weight <= 0.0 else None
+        )
+        self._stabilized = (
+            self._alpha > 0.0
+            and self._center is not None
+            and c_master is not None
+            and not self._reprice_master
+            and not np.array_equal(self._center[0], self._theta)
+        )
+        self._reprice_master = False
+        if self._stabilized:
+            center, c_center, _ = self._center
+            self._query = self._alpha * center + (1.0 - self._alpha) * self._theta
+            self._c_query = self._alpha * c_center + (1.0 - self._alpha) * c_master
+        else:
+            self._query = self._theta.copy()
+            self._c_query = c_master
+        return self._query.copy()
 
     def contribute(self, demands: Mapping[int, Demand]) -> SumContribution:
         K = self._ctx.K
@@ -233,15 +289,29 @@ class OneSlack(Formulation):
         if self._pending is not None:
             self._pending.aggregate_raw = raw
             self._pending.aggregate_bytes = _aggregate_key(phi_agg, eps_agg)
-        if self._needs_initial_free_u_cut():
-            violation = (
-                raw
-                if raw > self._ctx.tolerance
-                else np.nextafter(self._ctx.tolerance, np.inf)
-            )
+        self._update_center(phi_agg, eps_agg)
+        uncertified = np.nextafter(self._ctx.tolerance, np.inf)
+        if self._stabilized:
+            # A query off the master's solution certifies nothing; a cut that
+            # misses that solution halves the pull and reprices it next.
+            self._reprice_master = raw <= self._ctx.tolerance
+            if self._reprice_master:
+                self._alpha *= 0.5
+            violation = max(raw, uncertified)
+        elif self._needs_initial_free_u_cut():
+            violation = raw if raw > self._ctx.tolerance else uncertified
         else:
             violation = raw if raw > 0.0 else 0.0
         return StepOutcome(violation=violation, install_payload=(phi_agg, eps_agg))
+
+    def _update_center(self, phi_agg: np.ndarray, eps_agg: float) -> None:
+        # The driver may price a warm start in place of the first query, so
+        # the first round never becomes the center.
+        if self._iteration == 0 or self._c_query is None:
+            return
+        criterion = self._c_query + float(phi_agg @ self._query) + eps_agg
+        if self._center is None or criterion < self._center[2]:
+            self._center = (self._query, self._c_query, criterion)
 
     def _violation_raw(self, phi_agg: np.ndarray, eps_agg: float) -> float:
         theta_term = np.multiply(phi_agg, self._theta).sum(dtype=np.float64)
@@ -262,8 +332,8 @@ class OneSlack(Formulation):
                     row = CutRow(
                         rep_id=0,
                         agent_id=AGGREGATE_AGENT_ID,
-                        phi=phi_agg,
-                        epsilon=eps_agg,
+                        phi=phi_agg / self._scale,
+                        epsilon=eps_agg / self._scale,
                         bundle_key=_aggregate_key(phi_agg, eps_agg),
                     )
                     progressed = self._master.add_cuts((row,))
@@ -271,7 +341,7 @@ class OneSlack(Formulation):
                 if pending_penalty is not None:
                     ref, weight = pending_penalty
                     penalty_changed = weight > 0.0 or self._last_penalty_weight > 0.0
-                    self._master.set_penalty(ref, weight)
+                    self._master.set_penalty(ref, weight / self._scale)
                     self._last_penalty_weight = weight
                     must_solve = must_solve or penalty_changed
                 if must_solve:
@@ -301,11 +371,11 @@ class OneSlack(Formulation):
 
     def _state(self, progressed: int) -> _MasterState:
         theta = self._master.theta()
-        u = self._aggregate_u()
+        u = self._aggregate_u() * self._scale
         return _MasterState(
             theta=theta,
             u=u,
-            objective=self._master.objective(),
+            objective=self._master.objective() * self._scale,
             n_installed=self._master.n_active_cuts,
             progressed=int(progressed),
         )

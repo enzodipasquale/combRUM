@@ -204,7 +204,8 @@ def estimate(
         warm_start: A prior fit whose ``theta_hat`` anchors the static
             proximal penalty and, without ``warm_cuts``, is priced first.
         warm_cuts: Cut rows reinstalled onto the fresh master before its
-            first solve, typically a prior fit's ``cuts``.
+            first solve, typically a prior fit's ``cuts``. Not accepted by
+            OneSlack, whose aggregate rows hold only under their weights.
         cut_policy: Bounds an NSlack master by retiring non-binding cuts;
             ``None`` keeps every admitted cut.
         return_cut_duals: NSlack formulations only.
