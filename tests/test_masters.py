@@ -469,6 +469,52 @@ def test_u_values_publish_cut_bearing_agents_with_predeclared_columns(
         assert master.u_values()[2] == pytest.approx(1.0, abs=1e-9)
 
 
+@pytest.mark.parametrize("backend", REAL_BACKENDS)
+@pytest.mark.parametrize("n_agents", (None, 3))
+def test_u_values_follow_agents_through_cut_removal(
+    backend: str, n_agents: int | None
+) -> None:
+    # Without agent 2's rows the optimum is the box corner t = (-5, 5) with
+    # only row b binding (u1 = t1 + 1 = 6): with y_b = 1, t0's reduced cost
+    # is 0.25 > 0 at its lower bound and t1's is -1.25 + 1 < 0 at its upper.
+    coefs = np.array([0.0, LP_U_COEF[1], LP_U_COEF[2]])
+    agent_two = [(r.agent_id, r.bundle_key) for r in LP_ROWS if r.agent_id == 2]
+    with make_master(
+        K, LP_BOUNDS, LP_C_THETA, coefs, backend=backend, n_agents=n_agents
+    ) as master:
+        master.add_cuts(LP_ROWS)
+        master.solve()
+        assert master.u_values() == pytest.approx({1: 3.0, 2: 2.0}, abs=1e-9)
+
+        assert master.remove_cuts(agent_two) == len(agent_two)
+        master.solve()
+        assert master.u_values() == pytest.approx({1: 6.0}, abs=1e-9)
+
+        master.add_cuts(LP_ROWS)
+        master.solve()
+        assert master.u_values() == pytest.approx({1: 3.0, 2: 2.0}, abs=1e-9)
+
+
+@needs_gurobi
+def test_gurobi_reads_callable_u_coef_once_per_agent() -> None:
+    calls: list[int] = []
+
+    def u_coef(agent_id: int) -> float:
+        calls.append(agent_id)
+        return LP_U_COEF[agent_id]
+
+    with make_master(K, LP_BOUNDS, LP_C_THETA, u_coef, backend="gurobi") as master:
+        master.add_cuts(LP_ROWS[:3])
+        master.add_cuts(LP_ROWS[3:])
+        master.set_penalty(LP_THETA, 1.0)
+        master.solve()
+        master.set_penalty(LP_THETA, 0.0)
+        master.reinstall(LP_ROWS)
+        master.solve()
+        assert master.objective() == pytest.approx(LP_OBJECTIVE, abs=1e-9)
+    assert sorted(calls) == [1, 2]
+
+
 def _rows_with_epsilon(
     key: tuple[int, bytes], new_eps: float
 ) -> tuple[CutRow, ...]:

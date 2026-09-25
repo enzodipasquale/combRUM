@@ -70,7 +70,15 @@ def _master_params_for_backend(
 ) -> dict[str, object] | None:
     if backend != "gurobi":
         return master_params
-    params: dict[str, object] = {"Method": 0, "LPWarmStart": 2}
+    # Primal simplex from the last basis. On NSlack fits (S=5, N in {2000,
+    # 5000}, M in {3, 8, 20}) dual simplex took 0.9-1.3x its time cold and 2x
+    # on warm-cut bootstraps, whose replications start from a basis that is
+    # primal but not dual feasible. Barrier (Method=2) cut cold fits 3-15x on
+    # one thread (N=5000, M=20: 666 s to 46 s) but re-solved a few new cuts
+    # 3-5x slower. LPWarmStart=2 is left off: presolving every re-solve and
+    # crushing the basis into start vectors slowed bootstraps 10% and dual
+    # simplex up to 5.6x, and made Method=2 run crossover instead of barrier.
+    params: dict[str, object] = {"Method": 0}
     if master_params is not None:
         params.update(master_params)
     return params

@@ -9,6 +9,7 @@ lifetime, and each ``Env.start()`` it saves is one license checkout.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -72,7 +73,14 @@ class _Solution:
 
 
 class GurobiMaster(MasterBackend):
-    """Master relaxation hosted on a per-instance Gurobi model."""
+    """Master relaxation hosted on a per-instance Gurobi model.
+
+    Fits solve it by primal simplex warm-started from the last basis. Large
+    cold NSlack fits, whose early rounds each add many thousands of cuts, can
+    run several times faster with ``params={"Method": 2}`` (barrier; keep
+    crossover on, since :meth:`basis` and :meth:`bound_duals` read
+    ``VBasis``); warm re-solves that add few cuts favor simplex.
+    """
 
     def __init__(
         self,
@@ -125,6 +133,8 @@ class GurobiMaster(MasterBackend):
         self._model = model
         self._installed: dict[tuple[int, bytes], CutRow] = {}
         self._constrs: dict[tuple[int, bytes], object] = {}
+        self._agent_cuts: Counter[int] = Counter()
+        self._u_read: tuple[list[int], object] | None = None
         self._u_vars: dict[int, object] = {}
         self._u_mvar = None
         self._penalty: tuple[np.ndarray, float] | None = None
@@ -148,9 +158,12 @@ class GurobiMaster(MasterBackend):
     def _slack_coef(self, agent_id: int) -> float:
         if self._u_coefs is not None:
             return float(self._u_coefs[agent_id])
-        coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
-        if not np.isfinite(coef):
-            raise ValueError(f"u_coef({agent_id}) must be finite, got {coef!r}")
+        coef = self._u_obj.get(agent_id)
+        if coef is None:
+            coef = float(self._u_coef(agent_id))
+            if not np.isfinite(coef):
+                raise ValueError(f"u_coef({agent_id}) must be finite, got {coef!r}")
+            self._u_obj[agent_id] = coef
         return coef
 
     def _slack_coef_vector(self, n: int) -> np.ndarray:
@@ -195,6 +208,7 @@ class GurobiMaster(MasterBackend):
                 ).tolist()
                 self._u_vars.update(zip(missing, new_vars))
                 self._invalidate_objective_cache()
+        cut_agents = len(self._agent_cuts)
         for start in range(0, len(rows), _CUT_BATCH_SIZE):
             chunk = rows[start : start + _CUT_BATCH_SIZE]
             agent_ids = np.fromiter(
@@ -208,20 +222,23 @@ class GurobiMaster(MasterBackend):
                 dtype=np.float64,
                 count=len(chunk),
             )
-            u_block = (
-                self._u_mvar[agent_ids]
-                if self._u_mvar is not None
-                else self._gp.MVar.fromlist(
-                    [self._u_vars[int(agent_id)] for agent_id in agent_ids]
-                )
-            )
             constrs = self._model.addConstr(
-                u_block >= phi @ self._theta_mvar + epsilon
+                self._u_block(agent_ids) >= phi @ self._theta_mvar + epsilon
             ).tolist()
             for row, constr in zip(chunk, constrs):
                 key = (row.agent_id, row.bundle_key)
                 self._constrs[key] = constr
                 self._installed[key] = row
+            self._agent_cuts.update(agent_ids.tolist())
+        if len(self._agent_cuts) != cut_agents:
+            self._u_read = None
+
+    def _u_block(self, agent_ids: np.ndarray) -> object:
+        if self._u_mvar is not None:
+            return self._u_mvar[agent_ids]
+        return self._gp.MVar.fromlist(
+            [self._u_vars[int(agent_id)] for agent_id in agent_ids]
+        )
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
@@ -248,6 +265,10 @@ class GurobiMaster(MasterBackend):
                 continue
             self._model.remove(constr)
             del self._installed[key]
+            self._agent_cuts[key[0]] -= 1
+            if not self._agent_cuts[key[0]]:
+                del self._agent_cuts[key[0]]
+                self._u_read = None
             removed += 1
         if removed:
             self._constrs_version += 1
@@ -337,13 +358,16 @@ class GurobiMaster(MasterBackend):
 
     def u_values(self) -> dict[int, float]:
         self._last()
-        agent_ids = sorted({agent_id for agent_id, _key in self._installed})
-        if not agent_ids:
+        if not self._agent_cuts:
             return {}
-        vals = self._model.getAttr(
-            "X", [self._u_vars[agent_id] for agent_id in agent_ids]
-        )
-        return {int(agent_id): float(value) for agent_id, value in zip(agent_ids, vals)}
+        if self._u_read is None:
+            agent_ids = sorted(self._agent_cuts)
+            self._u_read = (
+                agent_ids,
+                self._u_block(np.asarray(agent_ids, dtype=np.int64)),
+            )
+        agent_ids, block = self._u_read
+        return dict(zip(agent_ids, block.X.tolist()))
 
     def dual_values(self) -> dict[tuple[int, bytes], float]:
         self._last()
