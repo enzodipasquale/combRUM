@@ -281,7 +281,13 @@ def run_fit(
                 transport=transport,
             )
             iter_t0 = time.perf_counter() if activity_details else 0.0
-            theta = formulation.solve()
+            # Without warm cuts, a warm start is priced first so its cuts shape
+            # the relaxation near the expected estimate; off the master's
+            # point, that round cannot certify convergence.
+            seeded = (
+                it == 0 and ctx.theta_init is not None and not ctx.warm_relaxation
+            )
+            theta = np.array(ctx.theta_init) if seeded else formulation.solve()
             if schedule is None:
                 this_full = True
                 scheduled_local_ids = local_ids
@@ -362,6 +368,7 @@ def run_fit(
                 and this_full
                 and iterations >= convergence_floor
                 and priced_weight == 0.0
+                and not seeded
             )
 
             if activity_details:

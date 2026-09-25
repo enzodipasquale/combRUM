@@ -5,6 +5,7 @@ from __future__ import annotations
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from typing import Protocol
@@ -25,6 +26,7 @@ from combrum.dualstore import DualStoreWriter
 from combrum.engine import (
     build_fit_context,
     master_environment,
+    optimal_basis,
     resolve_master_backend,
     run_fit,
 )
@@ -123,11 +125,12 @@ def bootstrap(
 
     ``warm_start`` and ``warm_cuts`` mirror
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed`: an object
-    whose ``theta_hat`` seeds each replication's proximal anchor, and cut rows
-    reinstalled onto each replication's fresh master before its first solve
-    (typically the point estimate and its active set). Warm replications
-    usually converge in far fewer iterations but walk a different cut path
-    than cold ones.
+    whose ``theta_hat`` each replication prices first when no ``warm_cuts``
+    are given, and cut rows reinstalled onto each replication's fresh master
+    before its first solve (typically the point estimate and its active
+    set). Every replication then starts from the unweighted warm
+    relaxation's optimal basis. Warm replications usually converge in far
+    fewer iterations but walk a different cut path than cold ones.
 
     :class:`ExponentialDraws` and the distributed
     :func:`~combrum.bootstrap_distributed.bootstrap_distributed` use different
@@ -240,29 +243,40 @@ def bootstrap(
         thetas = np.zeros((n_bootstrap, K), dtype=np.float64)
         converged = np.zeros(n_bootstrap, dtype=bool)
         with master_environment(resolved_master_backend) as master_env:
+            build = partial(
+                build_fit_context,
+                parameters,
+                observables=observables,
+                observed_bundles=observed_bundles,
+                shocks=shocks,
+                features=features,
+                observed_features=observed_features,
+                transport=transport,
+                master_backend=master_backend,
+                resolved_master_backend=resolved_master_backend,
+                master_params=master_params,
+                tolerance=tolerance,
+                warm_start=warm_start,
+                warm_cuts=warm_cuts,
+                result_publication=result_publication,
+                observed_cache=observed_cache,
+                master_env=master_env,
+            )
+            warm_basis = (
+                None
+                if warm_cuts is None
+                else optimal_basis(
+                    build(
+                        formulation=model.formulation(model.features), weights=None
+                    ).ctx.master_backend
+                )
+            )
             for b in range(n_bootstrap):
                 rep_t0 = perf_counter() if log_details else None
                 weights_b = np.asarray(weight_source.weights_for(b), dtype=np.float64)
                 formulation = model.formulation(model.features)
-                built = build_fit_context(
-                    parameters,
-                    observables=observables,
-                    observed_bundles=observed_bundles,
-                    shocks=shocks,
-                    formulation=formulation,
-                    features=features,
-                    observed_features=observed_features,
-                    transport=transport,
-                    master_backend=master_backend,
-                    resolved_master_backend=resolved_master_backend,
-                    master_params=master_params,
-                    tolerance=tolerance,
-                    weights=weights_b,
-                    warm_start=warm_start,
-                    warm_cuts=warm_cuts,
-                    result_publication=result_publication,
-                    observed_cache=observed_cache,
-                    master_env=master_env,
+                built = build(
+                    formulation=formulation, weights=weights_b, warm_basis=warm_basis
                 )
                 outcome = run_fit(built.ctx, oracle, formulation, config)
                 thetas[b] = outcome.result.theta_hat

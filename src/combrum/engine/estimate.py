@@ -201,6 +201,10 @@ def estimate(
             pure LP.
         iteration_callback: Per-iteration hook; may update oracle-owned
             settings and return an additional convergence floor.
+        warm_start: A prior fit whose ``theta_hat`` anchors the static
+            proximal penalty and, without ``warm_cuts``, is priced first.
+        warm_cuts: Cut rows reinstalled onto the fresh master before its
+            first solve, typically a prior fit's ``cuts``.
         cut_policy: Bounds an NSlack master by retiring non-binding cuts;
             ``None`` keeps every admitted cut.
         return_cut_duals: NSlack formulations only.

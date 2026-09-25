@@ -396,6 +396,43 @@ def test_bootstrap_distributed_matches_serial_with_observation_weights() -> None
 
 
 @needs_highs
+def test_warm_bootstrap_distributed_is_bitwise_placement_invariant() -> None:
+    arrays = _arrays()
+    fit = cb.estimate_distributed(
+        _model(arrays),
+        n_observations=_N,
+        n_simulations=_S,
+        transport=cb.SerialTransport(),
+        master_backend="highs",
+        tolerance=TOLERANCE,
+        max_iterations=MAX_ITERATIONS,
+        return_cuts=True,
+    )
+
+    def run(transport):  # type: ignore[no-untyped-def]
+        return cb.bootstrap_distributed(
+            _model(arrays),
+            n_observations=_N,
+            n_simulations=_S,
+            n_bootstrap=_B,
+            base_seed=_BOOT_SEED,
+            transport=transport,
+            master_backend="highs",
+            tolerance=TOLERANCE,
+            max_iterations=MAX_ITERATIONS,
+            warm_start=fit,
+            warm_cuts=fit.cuts,
+        ).thetas
+
+    # Every replication starts from the same warm basis on whichever rank
+    # owns it, so its solve path, and its estimate, ignore the layout.
+    serial = run(cb.SerialTransport())
+    for size in (2, 3):
+        for thetas in LocalCluster(size).run(run):
+            assert thetas.tobytes() == serial.tobytes()
+
+
+@needs_highs
 def test_split_axis_fit_routes_agent_values_without_dense_scatter() -> None:
     arrays = _arrays()
     serial = cb.estimate(
