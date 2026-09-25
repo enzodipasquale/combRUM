@@ -285,6 +285,27 @@ class GurobiMaster(MasterBackend):
         self._cut_duals = None
         self._bound_duals = None
 
+    def basis(self) -> tuple[list[int], list[int]] | None:
+        self._last()
+        model = self._model
+        try:
+            return (
+                model.getAttr("VBasis", model.getVars()),
+                model.getAttr("CBasis", model.getConstrs()),
+            )
+        except self._gp.GurobiError as exc:
+            if exc.errno != self._gp.GRB.Error.DATA_NOT_AVAILABLE:
+                raise
+            return None
+
+    def set_basis(self, basis: tuple[list[int], list[int]]) -> None:
+        vbasis, cbasis = basis
+        model = self._model
+        model.update()
+        model.setAttr("VBasis", model.getVars(), vbasis)
+        model.setAttr("CBasis", model.getConstrs(), cbasis)
+        self._invalidate_solution()
+
     def _bound_duals_now(self, theta: np.ndarray) -> dict[int, float]:
         grb = self._gp.GRB
         out: dict[int, float] = {}

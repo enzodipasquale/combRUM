@@ -15,6 +15,17 @@ from combrum.masters._common import (
 )
 from combrum.transport.base import CutRow
 
+#: Solver options applied under the caller's ``params``. Strategy 0 lets HiGHS
+#: pick dual simplex when new cuts leave the basis primal infeasible and primal
+#: simplex when a reused basis meets a new objective.
+_DEFAULT_OPTIONS = {"solver": "simplex", "simplex_strategy": 0}
+
+#: A warm simplex re-solve costs about (new cuts) x (model rows); interior
+#: point with crossover costs about the model's nonzeros, (model rows) x
+#: (K + 1). Interior point wins past this many new cuts per row nonzero,
+#: measured on NSlack masters with K from 4 to 21.
+_IPM_NEW_CUTS_PER_NONZERO = 150
+
 
 def available() -> bool:
     try:
@@ -42,7 +53,13 @@ class _Solution:
 
 
 class HighsMaster(MasterBackend):
-    """One replication's relaxation hosted on a per-instance HiGHS model."""
+    """One replication's relaxation hosted on a per-instance HiGHS model.
+
+    Unless ``params`` pins ``solver``, each solve chooses its algorithm:
+    simplex warm-started from the last basis, or interior point with
+    crossover once so many cuts arrived since that basis that repairing it
+    would cost more than solving afresh.
+    """
 
     def __init__(
         self,
@@ -63,7 +80,7 @@ class HighsMaster(MasterBackend):
         self._params = dict(params) if params else {}
         u_lower = self._params.pop("u_lower_bound", 0.0)
         self._u_lower_bound = None if u_lower is None else float(u_lower)
-        self._u_obj: dict[int, float] = {}
+        self._choose_solver = "solver" not in self._params
         import highspy
 
         self._highspy = highspy
@@ -79,12 +96,7 @@ class HighsMaster(MasterBackend):
     def _build(self) -> None:
         solver = self._highspy.Highs()
         solver.setOptionValue("output_flag", False)
-        if "solver" not in self._params:
-            self._check_status(
-                solver.setOptionValue("solver", "simplex"),
-                "setOptionValue(solver)",
-            )
-        for key, value in self._params.items():
+        for key, value in {**_DEFAULT_OPTIONS, **self._params}.items():
             self._check_status(
                 solver.setOptionValue(key, value), f"setOptionValue({key})"
             )
@@ -108,61 +120,46 @@ class HighsMaster(MasterBackend):
         self._row_index: dict[tuple[int, bytes], int] = {}
         self._row_keys: list[tuple[int, bytes]] = []
         self._u_cols: dict[int, int] = {}
+        self._u_obj: dict[int, float] = {}
         self._u_upper: dict[int, float] = {}
         self._u_read: tuple[list[int], np.ndarray] | None = None
         self._solution: _Solution | None = None
+        self._unsolved_cuts = 0
         if self._n_agents is not None:
-            n = self._n_agents
-            inf = float(self._highspy.kHighsInf)
-            self._check_status(
-                solver.addCols(
-                    n,
-                    self._slack_coef_vector(n),
-                    np.full(n, self._u_lb(), dtype=np.float64),
-                    np.full(n, inf, dtype=np.float64),
-                    0,
-                    np.zeros(n, dtype=np.int32),
-                    no_index,
-                    no_value,
-                ),
-                "addCols(u)",
-            )
-            first = self._n_cols
-            self._u_cols = {agent_id: first + agent_id for agent_id in range(n)}
-            self._u_upper = dict.fromkeys(range(n), inf)
-            self._n_cols += n
+            self._add_u_columns(np.arange(self._n_agents, dtype=np.int64))
 
 
     def add_cuts(self, rows: Sequence[CutRow]) -> int:
         fresh: dict[tuple[int, bytes], CutRow] = {}
         for row in rows:
             key = (row.agent_id, row.bundle_key)
-            if key in self._installed or key in fresh:
-                continue
-            self._validate_row(row)
-            fresh[key] = row
+            if key not in self._installed:
+                fresh.setdefault(key, row)
         if fresh:
-            self._invalidate_solution()
-            self._u_read = None
-            ordered = sorted(fresh.values(), key=lambda r: (r.agent_id, r.bundle_key))
-            self._install_batch(ordered)
+            keys = sorted(fresh)
+            self._install_batch(keys, [fresh[key] for key in keys])
         return len(fresh)
 
-    def _install_batch(self, rows: Sequence[CutRow]) -> None:
-        first_rows: dict[int, CutRow] = {}
-        for row in rows:
-            first_rows.setdefault(row.agent_id, row)
+    def _install_batch(
+        self, keys: Sequence[tuple[int, bytes]], rows: Sequence[CutRow]
+    ) -> None:
+        phi, lower = self._validated_rows(rows)
+        self._invalidate_solution()
+        self._u_read = None
+        n = len(rows)
+        agent_ids = np.fromiter((key[0] for key in keys), dtype=np.int64, count=n)
         missing = [
-            agent_id for agent_id in first_rows if agent_id not in self._u_cols
+            agent_id
+            for agent_id in dict.fromkeys(agent_ids.tolist())
+            if agent_id not in self._u_cols
         ]
         if missing:
-            self._add_u_columns(missing, first_rows)
-        n = len(rows)
-        phi = np.vstack([row.phi for row in rows])
+            self._add_u_columns(np.asarray(missing, dtype=np.int64))
         u_cols = np.fromiter(
-            (self._u_cols[row.agent_id] for row in rows), dtype=np.int32, count=n
+            (self._u_cols[agent_id] for agent_id in agent_ids.tolist()),
+            dtype=np.int32,
+            count=n,
         )
-        lower = np.fromiter((row.epsilon for row in rows), dtype=np.float64, count=n)
         mask = phi != 0.0
         nnz = np.count_nonzero(mask, axis=1)
         ends = np.cumsum(nnz + 1)
@@ -185,54 +182,61 @@ class HighsMaster(MasterBackend):
             values,
         )
         self._check_status(status, f"addRows({n} cuts)")
+        first = len(self._row_keys)
+        self._row_keys.extend(keys)
+        self._row_index.update(zip(keys, range(first, first + n)))
+        self._installed.update(zip(keys, rows))
+        self._unsolved_cuts += n
+        self._raise_u_uppers(agent_ids, phi, lower)
+
+    def _validated_rows(
+        self, rows: Sequence[CutRow]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        shape = (self._K,)
         for row in rows:
-            key = (row.agent_id, row.bundle_key)
-            self._row_index[key] = len(self._row_keys)
-            self._row_keys.append(key)
-            self._installed[key] = row
-        if self._u_lower_bound is not None:
-            candidates = np.maximum(
-                self._u_lb(),
-                lower
-                + np.where(phi >= 0.0, phi * self._upper, phi * self._lower).sum(
-                    axis=1
-                ),
+            if row.phi.shape != shape:
+                raise ValueError(
+                    f"cut phi must have shape {shape}; got {row.phi.shape}"
+                )
+        phi = np.vstack([row.phi for row in rows])
+        if not np.isfinite(phi).all():
+            raise ValueError("cut phi must be finite everywhere")
+        epsilon = np.fromiter(
+            (row.epsilon for row in rows), dtype=np.float64, count=len(rows)
+        )
+        bad = np.flatnonzero(~np.isfinite(epsilon))
+        if bad.size:
+            raise ValueError(
+                f"cut epsilon must be finite; got {float(epsilon[bad[0]])!r}"
             )
-            for row, candidate in zip(rows, candidates.tolist()):
-                self._update_u_upper(row, candidate)
+        return phi, epsilon
 
-    def _slack_coef(self, agent_id: int) -> float:
+    def _slack_coefs(self, agent_ids: np.ndarray) -> np.ndarray:
         if self._u_coefs is not None:
-            return float(self._u_coefs[agent_id])
-        coef = self._u_obj.setdefault(agent_id, float(self._u_coef(agent_id)))
-        if not np.isfinite(coef):
-            raise ValueError(f"u_coef({agent_id}) must be finite, got {coef!r}")
-        return coef
+            return self._u_coefs[agent_ids]
+        coefs = np.fromiter(
+            (self._u_coef(agent_id) for agent_id in agent_ids.tolist()),
+            dtype=np.float64,
+            count=agent_ids.size,
+        )
+        bad = np.flatnonzero(~np.isfinite(coefs))
+        if bad.size:
+            raise ValueError(
+                f"u_coef({int(agent_ids[bad[0]])}) must be finite,"
+                f" got {float(coefs[bad[0]])!r}"
+            )
+        return coefs
 
-    def _slack_coef_vector(self, n: int) -> np.ndarray:
-        if self._u_coefs is not None:
-            return self._u_coefs[:n]
-        out = np.empty(n, dtype=np.float64)
-        for agent_id in range(n):
-            out[agent_id] = self._slack_coef(agent_id)
-        return out
-
-    def _add_u_columns(
-        self, agent_ids: Sequence[int], first_rows: Mapping[int, CutRow]
-    ) -> None:
-        n = len(agent_ids)
-        coefs = np.empty(n, dtype=np.float64)
-        uppers = np.empty(n, dtype=np.float64)
-        for i, agent_id in enumerate(agent_ids):
-            coef = self._slack_coef(agent_id)
-            coefs[i] = coef
-            uppers[i] = self._initial_u_upper(first_rows[agent_id], coef)
+    def _add_u_columns(self, agent_ids: np.ndarray) -> None:
+        n = int(agent_ids.size)
+        coefs = self._slack_coefs(agent_ids)
+        inf = float(self._highspy.kHighsInf)
         self._check_status(
             self._h.addCols(
                 n,
                 coefs,
                 np.full(n, self._u_lb(), dtype=np.float64),
-                uppers,
+                np.full(n, inf, dtype=np.float64),
                 0,
                 np.zeros(n, dtype=np.int32),
                 np.array([], dtype=np.int32),
@@ -240,25 +244,67 @@ class HighsMaster(MasterBackend):
             ),
             f"addCols({n} u columns)",
         )
-        for agent_id, upper in zip(agent_ids, uppers.tolist()):
-            self._u_cols[agent_id] = self._n_cols
-            self._u_upper[agent_id] = upper
-            self._n_cols += 1
+        ids = agent_ids.tolist()
+        self._u_cols.update(zip(ids, range(self._n_cols, self._n_cols + n)))
+        self._u_obj.update(zip(ids, coefs.tolist()))
+        self._u_upper.update(dict.fromkeys(ids, inf))
+        self._n_cols += n
+
+    def _raise_u_uppers(
+        self, agent_ids: np.ndarray, phi: np.ndarray, epsilon: np.ndarray
+    ) -> None:
+        """Grow each bounded slack's upper bound to its cuts' theta-box envelope.
+
+        A slack with a nonnegative objective coefficient never exceeds the
+        largest right-hand side its cuts can reach over the theta box, so that
+        envelope is a valid, finite upper bound. Bounds only ever grow.
+        """
+        if self._u_lower_bound is None:
+            return
+        rhs_max = epsilon + np.where(
+            phi >= 0.0, phi * self._upper, phi * self._lower
+        ).sum(axis=1)
+        agents, inverse = np.unique(agent_ids, return_inverse=True)
+        envelope = np.full(agents.size, self._u_lb())
+        np.maximum.at(envelope, inverse, rhs_max)
+        ids = agents.tolist()
+        current = np.fromiter(
+            (self._u_upper[agent_id] for agent_id in ids),
+            dtype=np.float64,
+            count=len(ids),
+        )
+        coefs = np.fromiter(
+            (self._u_obj[agent_id] for agent_id in ids),
+            dtype=np.float64,
+            count=len(ids),
+        )
+        grow = (coefs >= 0.0) & (
+            (current >= self._highspy.kHighsInf) | (envelope > current)
+        )
+        if not grow.any():
+            return
+        grown, envelope = agents[grow].tolist(), envelope[grow]
+        cols = np.fromiter(
+            (self._u_cols[agent_id] for agent_id in grown),
+            dtype=np.int32,
+            count=len(grown),
+        )
+        order = np.argsort(cols)
+        self._check_status(
+            self._h.changeColsBounds(
+                cols.size,
+                cols[order],
+                np.full(cols.size, self._u_lb(), dtype=np.float64),
+                envelope[order],
+            ),
+            f"changeColsBounds({cols.size} u columns)",
+        )
+        self._u_upper.update(zip(grown, envelope.tolist()))
 
     def _u_lb(self) -> float:
         if self._u_lower_bound is None:
             return -float(self._highspy.kHighsInf)
         return float(self._u_lower_bound)
-
-    def _validate_row(self, row: CutRow) -> None:
-        if row.phi.shape != (self._K,):
-            raise ValueError(
-                f"cut phi must have shape ({self._K},); got {row.phi.shape}"
-            )
-        if not np.isfinite(row.phi).all():
-            raise ValueError("cut phi must be finite everywhere")
-        if not np.isfinite(row.epsilon):
-            raise ValueError(f"cut epsilon must be finite; got {row.epsilon!r}")
 
     def extract_cuts(self) -> tuple[CutRow, ...]:
         return tuple(self._installed[key] for key in sorted(self._installed))
@@ -310,45 +356,18 @@ class HighsMaster(MasterBackend):
             self._installed[key]._replace(epsilon=new_eps)
             for key, new_eps in zip(keys, lowers.tolist())
         ]
-        for key, row in zip(keys, rows):
-            self._installed[key] = row
-        if self._u_lower_bound is not None:
-            phi = np.vstack([row.phi for row in rows])
-            candidates = np.maximum(
-                self._u_lb(),
-                lowers
-                + np.where(phi >= 0.0, phi * self._upper, phi * self._lower).sum(
-                    axis=1
-                ),
-            )
-            for row, candidate in zip(rows, candidates.tolist()):
-                self._update_u_upper(row, candidate)
-
-    def _initial_u_upper(self, row: CutRow, coef: float) -> float:
-        if self._u_lower_bound is None or coef < 0.0:
-            return float(self._highspy.kHighsInf)
-        return self._finite_u_upper(row)
-
-    def _finite_u_upper(self, row: CutRow) -> float:
-        rhs_max = float(row.epsilon) + float(
-            np.where(row.phi >= 0.0, row.phi * self._upper, row.phi * self._lower).sum()
+        self._installed.update(zip(keys, rows))
+        self._raise_u_uppers(
+            np.fromiter((key[0] for key in keys), dtype=np.int64, count=len(keys)),
+            np.vstack([row.phi for row in rows]),
+            lowers,
         )
-        return max(self._u_lb(), rhs_max)
-
-    def _update_u_upper(self, row: CutRow, candidate: float) -> None:
-        coef = self._slack_coef(row.agent_id)
-        if coef < 0.0:
-            return
-        current = self._u_upper[row.agent_id]
-        if current < self._highspy.kHighsInf and candidate <= current:
-            return
-        col = self._u_cols[row.agent_id]
-        status = self._h.changeColBounds(col, self._u_lb(), candidate)
-        self._check_status(status, f"changeColBounds(u[{row.agent_id}])")
-        self._u_upper[row.agent_id] = candidate
 
 
     def solve(self) -> None:
+        if self._choose_solver:
+            ipm = self._unsolved_cuts >= _IPM_NEW_CUTS_PER_NONZERO * (self._K + 1)
+            self._h.setOptionValue("solver", "ipm" if ipm else "simplex")
         run_status = self._h.run()
         model_status = self._h.getModelStatus()
         optimal = self._highspy.HighsModelStatus.kOptimal
@@ -358,6 +377,7 @@ class HighsMaster(MasterBackend):
                 f" {self._h.modelStatusToString(model_status)}"
                 f" (run status {run_status.name}); expected Optimal"
             )
+        self._unsolved_cuts = 0
         col_values = np.asarray(self._h.allVariableValues(), dtype=np.float64)
         theta = np.array(col_values[: self._K], dtype=np.float64)
         theta.setflags(write=False)
@@ -367,6 +387,15 @@ class HighsMaster(MasterBackend):
             row_keys=tuple(self._row_keys),
             u_values=self._u_values_now(col_values),
         )
+
+    def basis(self) -> object:
+        self._last()
+        return self._h.getBasis()
+
+    def set_basis(self, basis: object) -> None:
+        self._check_status(self._h.setBasis(basis), "setBasis")
+        self._invalidate_solution()
+        self._unsolved_cuts = 0
 
     def _u_values_now(self, col_values: np.ndarray) -> dict[int, float]:
         if self._u_read is None:

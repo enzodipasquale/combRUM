@@ -189,6 +189,23 @@ class MasterBackend(ABC):
         self.reinstall(kept)
         return len(rows) - len(kept)
 
+    def basis(self) -> object | None:
+        """Opaque snapshot of the last solve's basis, or ``None`` without one.
+
+        The snapshot fits any master holding the same rows and columns, such
+        as a :meth:`reinstall` of the same cuts. Constraints alone decide
+        primal feasibility, so the basis stays feasible under any objective:
+        replications that reweight one warm relaxation can all start from it.
+        """
+        return None
+
+    def set_basis(self, basis: object) -> None:
+        """Start the next solve from a :meth:`basis` snapshot."""
+        raise NotImplementedError(
+            "MasterBackend.set_basis is not overridden;"
+            " this backend exposes no basis"
+        )
+
     def set_rhs(self, updates: Mapping[tuple[int, bytes], float]) -> None:
         """Rewrite the RHS (epsilon) of already-installed cuts in place.
 

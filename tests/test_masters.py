@@ -960,6 +960,68 @@ def test_highs_defaults_to_simplex_solver_unless_overridden() -> None:
         assert value == "choose"
 
 
+def _spread_rows(n: int) -> list[CutRow]:
+    rng = np.random.default_rng(3)
+    return [
+        make_row(agent_id, b"k", tuple(rng.normal(size=K)), float(rng.normal()))
+        for agent_id in range(n)
+    ]
+
+
+def _highs_master(**params: object) -> HighsMaster:
+    master = make_master(
+        K,
+        LP_BOUNDS,
+        LP_C_THETA,
+        lambda _agent_id: 1.0,
+        backend="highs",
+        params=params or None,
+    )
+    assert isinstance(master, HighsMaster)
+    return master
+
+
+@needs_highs
+def test_highs_solves_large_cut_batches_by_interior_point() -> None:
+    batch = highs_backend._IPM_NEW_CUTS_PER_NONZERO * (K + 1)
+    rows = _spread_rows(batch + 1)
+    with _highs_master() as master, _highs_master(solver="simplex") as pinned:
+        for each in (master, pinned):
+            each.add_cuts(rows[:batch])
+            each.solve()
+        assert master._h.getOptionValue("solver")[1] == "ipm"
+        assert pinned._h.getOptionValue("solver")[1] == "simplex"
+        assert master.objective() == pytest.approx(pinned.objective(), abs=1e-9)
+        # Crossover leaves a basis for the next, small batch to re-solve warm.
+        assert master.basis().valid
+
+        master.add_cuts(rows[batch:])
+        master.solve()
+        assert master._h.getOptionValue("solver")[1] == "simplex"
+
+
+@pytest.mark.parametrize("backend", REAL_BACKENDS)
+def test_basis_warm_starts_a_reweighted_reinstall(backend: str) -> None:
+    reweighted = {1: 0.5, 2: 3.0}
+    with lp_master(backend) as source:
+        source.add_cuts(LP_ROWS)
+        source.solve()
+        snapshot = source.basis()
+    assert snapshot is not None
+
+    results = []
+    for basis in (None, snapshot):
+        with make_master(
+            K, LP_BOUNDS, LP_C_THETA, reweighted.__getitem__, backend=backend
+        ) as master:
+            master.reinstall(LP_ROWS)
+            if basis is not None:
+                master.set_basis(basis)
+            master.solve()
+            results.append(master.objective())
+    assert results[1] == pytest.approx(results[0], abs=1e-9)
+
+
 @pytest.mark.skipif(
     not (GUROBI_AVAILABLE or HIGHS_AVAILABLE),
     reason="no real backend available",
