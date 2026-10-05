@@ -83,9 +83,8 @@ def make_data(T, M, n_per_market, S, capacity, seed, nu_scale):
     )
 
 
-def _default_oracle_workers():
-    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1"))
-    return max(1, min(4, (os.cpu_count() or 1) // world_size))
+def default_oracle_workers(ranks_per_node):
+    return max(1, min(4, (os.cpu_count() or 1) // ranks_per_node))
 
 
 # Feature map: item characteristics, market-item fixed effects, and pairwise terms.
@@ -230,7 +229,7 @@ class HighsDemand:
 
 # Demand oracle: solve each simulated agent's quadratic knapsack.
 class BLPDemandOracle(cb.Oracle):
-    def __init__(self, arrays, parameters, shocks, backend="auto", oracle_workers=None):
+    def __init__(self, arrays, parameters, shocks, backend, oracle_workers):
         self.X = arrays["X"]
         self.market_idx = arrays["market_idx"]
         self.weights = arrays["weights"]
@@ -242,12 +241,7 @@ class BLPDemandOracle(cb.Oracle):
         self.T = arrays["prices"].shape[0]
         self.backend_name = backend
         self.settings = cb.SolverSettings()
-        self._oracle_workers = (
-            _default_oracle_workers()
-            if oracle_workers is None
-            else int(oracle_workers)
-        )
-        self._pool = ThreadPoolExecutor(max_workers=self._oracle_workers)
+        self._pool = ThreadPoolExecutor(max_workers=oracle_workers)
         self._thread_solver = threading.local()
         self._solvers = []
         self._solver_lock = threading.Lock()
@@ -321,12 +315,15 @@ def price_sensitivity_alpha(delta_tj, prices, instruments):
     return -float(ols.params.iloc[-1]), -float(tsls.params.iloc[-1])
 
 
-def make_transport(mode):
-    if mode == "mpi":
-        return cb.MpiTransport()
-    if mode == "auto" and "OMPI_COMM_WORLD_SIZE" in os.environ:
-        return cb.MpiTransport()
-    return cb.SerialTransport()
+def make_transport(kind):
+    if kind == "auto":
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            kind = "serial"
+        else:
+            kind = "mpi" if MPI.COMM_WORLD.Get_size() > 1 else "serial"
+    return cb.MpiTransport() if kind == "mpi" else cb.SerialTransport()
 
 
 def main():
@@ -349,6 +346,7 @@ def main():
         }
     )
     transport = make_transport(args.transport)
+    oracle_workers = args.oracle_workers or default_oracle_workers(transport.node.node_size)
 
     publish = {}
     with transport.collective():
@@ -370,7 +368,7 @@ def main():
                 }
             )
             publish["observed"] = simulate_observed(
-                publish, parameters, theta_true, backend, args.oracle_workers
+                publish, parameters, theta_true, backend, oracle_workers
             )
 
     arrays = dict(transport.node_shared(publish))
@@ -379,7 +377,7 @@ def main():
     S = arrays["est_shocks"].shape[1]
 
     features = BLPFeatures(arrays)
-    demand = BLPDemandOracle(arrays, parameters, arrays["est_shocks"], backend, args.oracle_workers)
+    demand = BLPDemandOracle(arrays, parameters, arrays["est_shocks"], backend, oracle_workers)
     model = cb.Model(
         demand,
         parameters,

@@ -1,7 +1,6 @@
 """Market-wise OneSlack unit-demand BLP example."""
 
 import argparse
-import os
 
 import numpy as np
 from linearmodels.iv import IV2SLS
@@ -24,9 +23,14 @@ BETA_TRUE = np.array([0.65, -0.35, 0.2], dtype=np.float64)
 
 
 def make_transport(kind):
-    if kind == "mpi" or (kind == "auto" and "OMPI_COMM_WORLD_SIZE" in os.environ):
-        return cb.MpiTransport()
-    return cb.SerialTransport()
+    if kind == "auto":
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            kind = "serial"
+        else:
+            kind = "mpi" if MPI.COMM_WORLD.Get_size() > 1 else "serial"
+    return cb.MpiTransport() if kind == "mpi" else cb.SerialTransport()
 
 
 def price_sensitivity_alpha(delta, prices, instruments):

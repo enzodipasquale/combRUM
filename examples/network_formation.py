@@ -1,7 +1,6 @@
 """Network formation with one player fixed effect and node-shared MPI data."""
 
 import argparse
-import os
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -214,9 +213,14 @@ class NetworkDemandOracle(cb.Oracle):
 
 
 def make_transport(kind):
-    if kind == "mpi" or (kind == "auto" and "OMPI_COMM_WORLD_SIZE" in os.environ):
-        return cb.MpiTransport()
-    return cb.SerialTransport()
+    if kind == "auto":
+        try:
+            from mpi4py import MPI
+        except ImportError:
+            kind = "serial"
+        else:
+            kind = "mpi" if MPI.COMM_WORLD.Get_size() > 1 else "serial"
+    return cb.MpiTransport() if kind == "mpi" else cb.SerialTransport()
 
 
 def main():
