@@ -1,7 +1,6 @@
 """BLP-style bundle-demand example with quadratic knapsack demand."""
 
 import argparse
-import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -37,20 +36,20 @@ K_QUAD = 2
 N_MARKETS = 15
 N_ITEMS = 30
 N_SIMULATIONS = 1
-N_PER_MARKET = None
+N_PER_MARKET = 100
 CAPACITY = 10
 SEED = 0
 TOLERANCE = 1e-3
 MAX_ITERATIONS = 80
 ALPHA_TRUE = 1.0
 XI_MEAN = 0.5
+PRICE_LEVEL = 3.0
 NU_SCALE = 2.5
 BETA_TRUE = np.array([0.6, -0.3], dtype=np.float64)
 LAMBDA_TRUE = np.array([0.6, 0.3], dtype=np.float64)
 
 
 def make_data(T, M, n_per_market, S, capacity, seed, nu_scale):
-    n_per_market = 1000 // T if n_per_market is None else n_per_market
     N = T * n_per_market
     rng = np.random.default_rng(seed)
 
@@ -66,7 +65,7 @@ def make_data(T, M, n_per_market, S, capacity, seed, nu_scale):
 
     xi = XI_MEAN + rng.normal(size=(T, M))
     instruments = rng.normal(size=(T, M))
-    prices = 0.7 * instruments + xi + 0.3 * rng.normal(size=(T, M))
+    prices = PRICE_LEVEL + 0.7 * instruments + xi + 0.3 * rng.normal(size=(T, M))
     delta_true = -ALPHA_TRUE * prices + xi + 0.5 * rng.normal(size=(T, M))
 
     return dict(
@@ -131,6 +130,7 @@ class GurobiDemand:
         self._env.start()
         self._model = gp.Model(env=self._env)
         self._model.Params.OutputFlag = 0
+        self._model.Params.MIPGap = 0.0
         self._x = self._model.addMVar(self._weights.size, vtype=gp.GRB.BINARY)
         self._capacity = self._model.addConstr(self._weights @ self._x <= 0.0)
         self._model.update()
@@ -150,11 +150,9 @@ class GurobiDemand:
             raise RuntimeError("Gurobi found no feasible bundle")
         bundle = self._x.X > 0.5
         value = self._model.ObjVal
-        raw_gap = self._model.MIPGap
-        exact = self._model.Status == gp.GRB.OPTIMAL and math.isfinite(raw_gap)
-        if exact and raw_gap <= 0.0:
+        if self._model.Status == gp.GRB.OPTIMAL:
             return cb.Demand.exact(bundle, value)
-        return cb.Demand.uncertified(bundle, value, gap=raw_gap)
+        return cb.Demand.uncertified(bundle, value, gap=self._model.MIPGap)
 
     def close(self):
         self._model.dispose()
@@ -217,11 +215,9 @@ class HighsDemand:
         solution = self._model.getSolution()
         bundle = np.asarray(solution.col_value[: self._weights.size]) > 0.5
         value = self._model.getObjectiveValue()
-        raw_gap = self._model.getInfo().mip_gap
-        exact = model_status == hp.HighsModelStatus.kOptimal and math.isfinite(raw_gap)
-        if exact and raw_gap <= 0.0:
+        if model_status == hp.HighsModelStatus.kOptimal:
             return cb.Demand.exact(bundle, value)
-        return cb.Demand.uncertified(bundle, value, gap=raw_gap)
+        return cb.Demand.uncertified(bundle, value, gap=self._model.getInfo().mip_gap)
 
     def close(self):
         self._model.clear()
@@ -420,7 +416,8 @@ def main():
     converged = fit.metadata["converged"]
 
     print(f"blp: N={N} T={T} M={M} S={S} K={parameters.K} backend={backend}")
-    print(f"mean bundle size: {arrays['observed'].sum(axis=1).mean():.2f}")
+    sizes = arrays["observed"].sum(axis=1)
+    print(f"mean bundle size: {sizes.mean():.2f}, share at capacity: {np.mean(sizes == CAPACITY):.2f}")
     print(f"iterations: {iterations} converged: {converged} wall: {fit.runtime_seconds:.1f}s")
     print(f"objective: {fit.objective:.6f}")
     print(f"beta_hat: {beta_hat}")
