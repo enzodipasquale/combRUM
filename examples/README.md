@@ -12,12 +12,12 @@ python -m pip install ".[examples]"
 ## Scripts
 
 - `quickstart.py`: small bundle-choice model with estimation and bootstrap.
-- `unitdemand_blp_large.py`: BLP inversion with many agents per market, an
-  outside option, and item fixed effects.
 - `blp_bundle_demand.py`: bundle demand with endogenous prices and quadratic
   knapsack choice problems.
 - `network_formation.py`: directed network formation with a min-cut demand
   oracle.
+- `unitdemand_blp_large.py`: BLP inversion with many agents per market, an
+  outside option, and market-item fixed effects.
 - `peer_effects_large_network.py`: peer effects on a large undirected network,
   with estimation of a nonlinear shock-correlation parameter.
 

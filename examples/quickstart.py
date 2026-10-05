@@ -1,128 +1,90 @@
-"""Small bundle-choice example."""
+"""Small bundle-choice example, explained step by step in notebooks/01_quickstart.ipynb."""
 
 import itertools
-import os
 
 import numpy as np
 
 import combrum as cb
 
+rng = np.random.default_rng(17)
 
-N = 300
-S = 5
-M = 3
-BUNDLES = np.array(list(itertools.product([0.0, 1.0], repeat=M)), dtype=np.float64)
-BUNDLE_SIZES = BUNDLES.sum(axis=1)
-THETA_TRUE = np.array([0.2, 0.1, -0.1, 0.5], dtype=np.float64)
+N_ITEMS = 4
+N_FEATURES = 3
+N_OBS = 100
+N_SIMULATIONS = 4
+THETA_TRUE = np.array([0.9, -0.5, 0.35])
+SHOCK_SCALE = 0.10
+
+BUNDLES = np.array(list(itertools.product([0.0, 1.0], repeat=N_ITEMS)))
+X = rng.normal(size=(N_OBS, N_ITEMS, N_FEATURES))
+estimation_shocks = rng.normal(
+    scale=SHOCK_SCALE,
+    size=(N_OBS, N_SIMULATIONS, N_ITEMS),
+)
+observed_shocks = rng.normal(scale=SHOCK_SCALE, size=(N_OBS, N_ITEMS))
 
 
-# Oracle: solve each simulated agent's bundle problem.
+def simulate_observed(theta):
+    observed = np.zeros((N_OBS, N_ITEMS))
+    for i in range(N_OBS):
+        utilities = X[i] @ theta + observed_shocks[i]
+        scores = BUNDLES @ utilities
+        observed[i] = BUNDLES[np.argmax(scores)]
+    return observed
+
+
+# Oracle: each simulated agent's best bundle, by enumeration.
 class BundleOracle(cb.Oracle):
-    def __init__(self, arrays):
-        self.x = arrays["x"]
-        self.shocks = arrays["shocks"]
-
     def price_batch(self, theta, agent_ids):
-        obs = agent_ids % N
-        sim = agent_ids // N
-        scores = (
-            np.einsum("bm,m->b", BUNDLES, theta[:M])
-            + theta[-1] * self.x[obs, None] * BUNDLE_SIZES
-            + np.einsum("nm,bm->nb", self.shocks[obs, sim], BUNDLES, optimize=True)
-        )
-        best = np.argmax(scores, axis=1)
-        return cb.DemandBatch.exact(
-            agent_ids,
-            BUNDLES[best],
-            scores[np.arange(agent_ids.size), best],
-        )
+        i = agent_ids % N_OBS
+        s = agent_ids // N_OBS
+        utilities = X[i] @ theta + estimation_shocks[i, s]
+        scores = utilities @ BUNDLES.T
+        choices = np.argmax(scores, axis=1)
+        payoffs = scores[np.arange(agent_ids.size), choices]
+        return cb.DemandBatch.exact(agent_ids, BUNDLES[choices], payoffs)
 
 
-# Feature map: compute phi_i(d) and epsilon_i(d).
+# Feature map: phi_i(d) and epsilon_i(d) for a batch of bundles.
 class BundleFeatures(cb.FeatureMap):
-    def __init__(self, arrays):
-        self.x = arrays["x"]
-        self.shocks = arrays["shocks"]
-        self.observed = arrays["observed"]
-
-    def observed_features_batch(self, observation_ids):
-        Phi, _eps = self.features_batch(observation_ids, self.observed[observation_ids])
-        return np.ascontiguousarray(Phi, dtype=np.float64)
-
-    def features_batch(self, ids, bundles, *, weights=None, aggregate=False):
-        obs = ids % N
-        sim = ids // N
-        Phi = np.empty((ids.size, M + 1), dtype=np.float64)
-        Phi[:, :M] = bundles
-        Phi[:, -1] = self.x[obs] * bundles.sum(axis=1)
-        eps = np.einsum("ij,ij->i", self.shocks[obs, sim], bundles)
-        if aggregate:
-            return weights @ Phi, float(weights @ eps)
-        return Phi, eps
-
-
-# Use MPI when the script is launched with mpiexec.
-transport = (
-    cb.MpiTransport()
-    if "OMPI_COMM_WORLD_SIZE" in os.environ
-    else cb.SerialTransport()
-)
-
-# Build the data on each node leader, then share it with ranks on that node.
-publish = {}
-with transport.collective():
-    if transport.node.node_rank == 0:
-        rng = np.random.default_rng(17)
-        x = rng.normal(size=N)
-        shocks = rng.normal(scale=0.25, size=(N, S, M))
-        dgp_utilities = (
-            np.einsum("bm,m->b", BUNDLES, THETA_TRUE[:M])
-            + THETA_TRUE[-1] * x[:, None] * BUNDLE_SIZES
-            + np.einsum("nm,bm->nb", shocks[:, 0], BUNDLES, optimize=True)
+    def features_batch(self, ids, bundles):
+        i = ids % N_OBS
+        s = ids // N_OBS
+        return np.einsum("ij,ijk->ik", bundles, X[i]), np.einsum(
+            "ij,ij->i", bundles, estimation_shocks[i, s]
         )
-        publish = {
-            "x": x,
-            "shocks": shocks,
-            "observed": BUNDLES[np.argmax(dgp_utilities, axis=1)],
-        }
 
-# combRUM model = oracle + parameters + feature map.
-arrays = dict(transport.node_shared(publish))
-features = BundleFeatures(arrays)
+
 model = cb.Model(
-    BundleOracle(arrays),
-    cb.Parameters({"item": (-2.0, 2.0, M), "x_size": (-2.0, 2.0, 1)}),
-    features=features,
-    observed_features=features,
-    formulation=cb.NSlack,
+    BundleOracle(),
+    cb.Parameters({"taste": (-2.0, 2.0, N_FEATURES)}),
+    features=BundleFeatures(),
+)
+data = cb.Data(
+    observed_bundles=simulate_observed(THETA_TRUE),
+    shocks=estimation_shocks,
+    observables=X,
 )
 
-# Estimate by row generation, then run a multiplier bootstrap.
-fit = cb.estimate_distributed(
+fit = cb.estimate(
     model,
-    n_observations=N,
-    n_simulations=S,
-    transport=transport,
+    data,
     master_backend="highs",
     tolerance=1e-8,
-    max_iterations=60,
+    max_iterations=100,
 )
-boot = cb.bootstrap_distributed(
+boot = cb.bootstrap(
     model,
-    n_bootstrap=50,
-    base_seed=23,
-    n_observations=N,
-    n_simulations=S,
-    transport=transport,
-    warm_start=fit,
+    data,
+    n_bootstrap=10,
+    weight_source=cb.ExponentialDraws(n_observations=N_OBS, base_seed=23),
     master_backend="highs",
     tolerance=1e-8,
-    max_iterations=60,
+    max_iterations=100,
 )
 
-if transport.rank == 0:
-    print("theta_true:", THETA_TRUE.round(6).tolist())
-    print("theta_hat:", fit.theta_hat.round(6).tolist())
-    print("objective:", round(float(fit.objective), 6))
-    print("converged:", bool(fit.metadata["converged"]))
-    print("bootstrap se:", boot.se(only_converged=False).round(6).tolist())
+print("theta_true:", THETA_TRUE.round(4).tolist())
+print("theta_hat:", fit.theta_hat.round(4).tolist())
+print("converged:", fit.metadata["converged"])
+print("iterations:", fit.metadata["iterations"])
+print("bootstrap se:", boot.se(only_converged=False).round(4).tolist())
