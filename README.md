@@ -10,12 +10,12 @@ d_i^* \in \arg\max_{d \in \mathcal C_i \subset \{0,1\}^M}
 The researcher supplies the model-specific parts: how to compute features
 $`\phi_i(d)`$ for a candidate choice $`d`$, and how to solve the
 combinatorial optimization at a candidate parameter vector. combRUM estimates
-$`\theta`$ by row generation, provides bootstrap inference, and can distribute
-large runs across multiple processes or compute nodes.
+$`\theta`$, provides bootstrap inference, and can distribute large runs across
+multiple processes or compute nodes.
 
 combRUM is designed for models where $`\mathcal C_i`$ is too large to enumerate
 (already with $`M=50`$ items and $`\mathcal C_i = \{0,1\}^M`$, there are
-$`2^{50} \approx 1.1 \times 10^{15}`$ possible choices!). Estimation proceeds
+$`2^{50} \approx 1.1 \times 10^{15}`$ possible choices). Estimation proceeds
 by row generation: combRUM iteratively queries the researcher's custom oracle
 and uses the returned choices to build the linear program.
 
@@ -43,21 +43,16 @@ runs a multiplier bootstrap. The same example is explained step by step in
 
 ## Using combRUM
 
-To use combRUM, specify two model-specific pieces:
+The two model-specific parts are written as classes:
 
 - an `Oracle` that solves the combinatorial optimization for a given parameter
   vector
-- a `FeatureMap` that computes the priced-row pair
-  $`(\phi_i(d), \varepsilon_i(d))`$ for a choice $`d \in \{0,1\}^M`$
+- a `FeatureMap` that returns $`\phi_i(d)`$ and the simulated error
+  $`\varepsilon_i(d)`$ for a choice $`d \in \{0,1\}^M`$
 
-Serial runs pass observed choices and simulation draws through `cb.Data`, then
-call `cb.estimate(...)`. For the serial bootstrap, keep the same `Model` and
-`Data` and call `cb.bootstrap(...)`.
-
-On a high-performance computing (HPC) cluster, the distributed entry points run
-row generation across MPI ranks. Pass `cb.MpiTransport` to
-`cb.estimate_distributed(...)` and `cb.bootstrap_distributed(...)` to communicate
-through MPI. The worked examples and notebooks show both paths.
+A `cb.Model` combines them with a `cb.Parameters` layout of $`\theta`$. Serial
+runs pass observed choices and simulation draws through `cb.Data`, then call
+`cb.estimate(...)`; `cb.bootstrap(...)` takes the same `Model` and `Data`.
 
 ## Distributed Runs
 
@@ -65,7 +60,9 @@ combRUM supports distributed execution with MPI (Message Passing Interface),
 through `mpi4py`. In distributed row generation, ranks work in parallel on the
 expensive part of the computation: solving simulated agents' choice problems.
 Each rank calls the oracle for its assigned simulated agents, and combRUM
-combines the returned choices to update the linear program.
+combines the returned choices to update the linear program. The distributed
+entry points are `cb.estimate_distributed(...)` and
+`cb.bootstrap_distributed(...)`, called on every rank with a `cb.MpiTransport()`.
 
 ```bash
 python -m pip install ".[examples,mpi]"
