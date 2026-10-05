@@ -69,7 +69,6 @@ markers = [
   "mpi_smoke: the requires_mpi subset CI runs on every push",
 ]
 
-# Version is single-sourced from the package so releases can't drift from code.
 [tool.hatch.version]
 path = "src/combrum/_version.py"
 
